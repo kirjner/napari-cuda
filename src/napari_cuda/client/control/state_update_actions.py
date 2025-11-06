@@ -13,13 +13,7 @@ from typing import (
 )
 
 from napari_cuda.protocol import NotifyCamera
-from napari_cuda.shared.dims_spec import (
-    DimsSpec,
-    dims_spec_axis_index_for_target,
-    dims_spec_axis_labels,
-    dims_spec_level_shape,
-    dims_spec_primary_axis,
-)
+from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_axis_index_for_target, dims_spec_primary_axis
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
@@ -111,6 +105,18 @@ class ControlStateContext:
         frame_id = f"state-{base}"
         return intent_id, frame_id
 
+    def dims_step(self) -> tuple[int, ...] | None:
+        if self.dims_step_override is not None:
+            return self.dims_step_override
+        spec = self.dims_spec
+        return None if spec is None else tuple(int(v) for v in spec.current_step)
+
+    def dims_ndisplay(self) -> int | None:
+        if self.dims_ndisplay_override is not None:
+            return self.dims_ndisplay_override
+        spec = self.dims_spec
+        return None if spec is None else int(spec.ndisplay)
+
 
 
 
@@ -138,7 +144,6 @@ def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContex
     state.dims_ndisplay_override = None
     state.primary_axis_index = None
     loop_state.pending_intents.clear()
-    loop_state.last_dims_payload = None
     loop_state.last_dims_spec = None
     state.control_runtimes.clear()
     state.camera_state.clear()
@@ -179,63 +184,47 @@ def handle_notify_camera(
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     spec = state.dims_spec
     if isinstance(spec, DimsSpec):
-        labels = dims_spec_axis_labels(spec)
-        if 0 <= axis_idx < len(labels):
-            return labels[axis_idx]
+        axes = spec.axes
+        if 0 <= axis_idx < len(axes):
+            return axes[axis_idx].label
     return str(axis_idx)
 
 def _runtime_key(scope: str, target: str, key: str) -> str:
     return f"{scope}:{target}:{key}"
 
 
-def build_dims_payload(state: ControlStateContext) -> dict[str, Any]:
+def _dims_snapshot(state: ControlStateContext) -> tuple[DimsSpec, dict[str, Any]]:
     spec = ensure_dims_spec(state)
     state.last_dims_spec = spec
-    current_step = resolve_current_step(state)
-    if current_step is None:
-        current_step = tuple(int(v) for v in spec.current_step)
-    ndisplay = resolve_ndisplay(state)
+    step = state.dims_step() or tuple(int(v) for v in spec.current_step)
+    ndisplay = state.dims_ndisplay()
     if ndisplay is None:
         ndisplay = int(spec.ndisplay)
-    level_shapes = [[int(dim) for dim in shape] for shape in spec.level_shapes]
-    active_shape = list(dims_spec_level_shape(spec, spec.current_level))
-    dims_range = [[0, max(0, int(dim) - 1)] for dim in active_shape]
-
-    return {
-        'current_step': list(int(v) for v in current_step),
+    level_shapes = spec.level_shapes
+    if 0 <= spec.current_level < len(level_shapes):
+        active_shape = level_shapes[spec.current_level]
+    else:
+        active_shape = ()
+    dims_range = tuple((0, max(0, int(dim) - 1)) for dim in active_shape)
+    axis_labels = tuple(axis.label for axis in spec.axes)
+    order = tuple(int(idx) for idx in spec.order)
+    displayed = tuple(int(idx) for idx in spec.displayed)
+    viewer_update = {
+        'current_step': tuple(int(v) for v in step),
         'ndisplay': int(ndisplay),
         'ndim': int(spec.ndim),
         'dims_range': dims_range,
-        'order': [int(idx) for idx in spec.order],
-        'axis_labels': [str(label) for label in dims_spec_axis_labels(spec)],
-        'level_shapes': level_shapes,
-        'displayed': [int(idx) for idx in spec.displayed],
-        'mode': 'volume' if int(ndisplay) >= 3 else 'plane',
-        'volume': not bool(spec.plane_mode),
-        'dims_spec': spec,
+        'order': order,
+        'axis_labels': axis_labels,
+        'displayed': displayed,
     }
+    return spec, viewer_update
 
 
 def ensure_dims_spec(state: ControlStateContext) -> DimsSpec:
     spec = state.dims_spec
     assert spec is not None, "dims_spec must be available"
     return spec
-
-
-def resolve_current_step(state: ControlStateContext) -> tuple[int, ...] | None:
-    if state.dims_step_override is not None:
-        return state.dims_step_override
-    if state.dims_spec is None:
-        return None
-    return tuple(int(v) for v in state.dims_spec.current_step)
-
-
-def resolve_ndisplay(state: ControlStateContext) -> Optional[int]:
-    if state.dims_ndisplay_override is not None:
-        return state.dims_ndisplay_override
-    if state.dims_spec is None:
-        return None
-    return int(state.dims_spec.ndisplay)
 
 
 def _emit_state_update(
@@ -312,35 +301,16 @@ def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: AckRec
             runtime.last_phase = None
 
 
-def mirror_dims_to_viewer(
-    viewer_obj,
-    ui_call,
-    *,
-    current_step,
-    ndisplay,
-    ndim,
-    dims_range,
-    order,
-    axis_labels,
-    displayed,
-) -> None:
+def _mirror_viewer_dims(viewer_obj, ui_call, update: Mapping[str, Any]) -> None:
     apply_remote = viewer_obj._apply_remote_dims_update  # type: ignore[attr-defined]
 
     def _apply() -> None:
-        apply_remote(
-            current_step=current_step,
-            ndisplay=ndisplay,
-            ndim=ndim,
-            dims_range=dims_range,
-            order=order,
-            axis_labels=axis_labels,
-            displayed=displayed,
-        )
+        apply_remote(**update)
 
     if ui_call is not None:
         ui_call.call.emit(_apply)
-        return
-    _apply()
+    else:
+        _apply()
 
 
 def handle_dims_ack(
@@ -364,11 +334,10 @@ def handle_dims_ack(
         axis_idx = dims_spec_axis_index_for_target(spec, str(outcome.target))
 
     if outcome.status == "accepted":
-        payload = build_dims_payload(state)
-        loop_state.last_dims_payload = dict(payload)
-        loop_state.last_dims_spec = state.last_dims_spec
+        spec, viewer_update = _dims_snapshot(state)
+        loop_state.last_dims_spec = spec
         if presenter is not None:
-            presenter.apply_dims_update(dict(payload))
+            presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
         if log_dims_info and axis_idx is not None and outcome.applied_value is not None:
             logger.info(
                 "dims ack accepted: axis=%s value=%s",
@@ -402,12 +371,10 @@ def handle_dims_ack(
         base_step[axis_idx] = int(confirmed_value)
         state.dims_step_override = tuple(base_step)
         state.primary_axis_index = dims_spec_primary_axis(spec)
-
-    payload = build_dims_payload(state)
-    loop_state.last_dims_payload = dict(payload)
-    loop_state.last_dims_spec = state.last_dims_spec
+    spec, viewer_update = _dims_snapshot(state)
+    loop_state.last_dims_spec = spec
     if presenter is not None:
-        presenter.apply_dims_update(dict(payload))
+        presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
 
     if log_dims_info and axis_idx is not None:
         logger.info(
@@ -419,17 +386,7 @@ def handle_dims_ack(
 
     viewer = viewer_ref() if callable(viewer_ref) else viewer_ref
     assert viewer is not None, "viewer reference must be available"
-    mirror_dims_to_viewer(
-        viewer,
-        ui_call,
-        current_step=payload['current_step'],
-        ndisplay=payload['ndisplay'],
-        ndim=payload['ndim'],
-        dims_range=payload['dims_range'],
-        order=payload['order'],
-        axis_labels=payload['axis_labels'],
-        displayed=payload['displayed'],
-    )
+    _mirror_viewer_dims(viewer, ui_call, viewer_update)
 
 
 def handle_generic_ack(
@@ -463,11 +420,10 @@ def handle_generic_ack(
         if scope == 'view':
             if key == 'ndisplay' and confirmed_value is not None:
                 state.dims_ndisplay_override = int(confirmed_value)
-                payload = build_dims_payload(state)
-                loop_state.last_dims_payload = dict(payload)
-                loop_state.last_dims_spec = state.last_dims_spec
+                spec, viewer_update = _dims_snapshot(state)
+                loop_state.last_dims_spec = spec
                 if presenter is not None:
-                    presenter.apply_dims_update(dict(payload))
+                    presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
             return
 
         if scope == 'dims':
@@ -482,11 +438,10 @@ def handle_generic_ack(
                 base_step[axis_idx] = int(confirmed_value)
                 state.dims_step_override = tuple(base_step)
                 state.primary_axis_index = dims_spec_primary_axis(spec)
-                payload = build_dims_payload(state)
-                loop_state.last_dims_payload = dict(payload)
-                loop_state.last_dims_spec = state.last_dims_spec
+                spec, viewer_update = _dims_snapshot(state)
+                loop_state.last_dims_spec = spec
                 if presenter is not None:
-                    presenter.apply_dims_update(dict(payload))
+                    presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
             return
 
         return
@@ -508,11 +463,10 @@ def handle_generic_ack(
             state.view_state[key] = confirmed_value
             if key == 'ndisplay':
                 state.dims_ndisplay_override = int(confirmed_value)
-                payload = build_dims_payload(state)
-                loop_state.last_dims_payload = dict(payload)
-                loop_state.last_dims_spec = state.last_dims_spec
+                spec, viewer_update = _dims_snapshot(state)
+                loop_state.last_dims_spec = spec
                 if presenter is not None:
-                    presenter.apply_dims_update(dict(payload))
+                    presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
     elif scope == 'volume' and confirmed_value is not None:
         state.volume_state[key] = confirmed_value
     elif scope == 'multiscale' and confirmed_value is not None:
@@ -520,7 +474,7 @@ def handle_generic_ack(
 
 
 def current_ndisplay(state: ControlStateContext) -> Optional[int]:
-    return resolve_ndisplay(state)
+    return state.dims_ndisplay()
 
 
 def handle_key_event(
@@ -956,7 +910,7 @@ def multiscale_set_level(
 def hud_snapshot(state: ControlStateContext, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
     spec = state.dims_spec
     snap: dict[str, object] = {}
-    snap['ndisplay'] = resolve_ndisplay(state)
+    snap['ndisplay'] = state.dims_ndisplay()
     snap['volume'] = None if spec is None else bool(not spec.plane_mode)
     snap['vol_mode'] = bool(_is_volume_mode(state))
 
@@ -1011,7 +965,7 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
         resolved = dims_spec_axis_index_for_target(spec, str(axis))
         if resolved is not None:
             return resolved
-        labels = dims_spec_axis_labels(spec)
+        labels = tuple(ax.label for ax in spec.axes)
         label_map = {str(lbl): idx for idx, lbl in enumerate(labels)}
         match = label_map.get(str(axis))
         if match is not None:
@@ -1029,7 +983,7 @@ def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
 
 
 def _is_volume_mode(state: ControlStateContext) -> bool:
-    ndisplay = resolve_ndisplay(state)
+    ndisplay = state.dims_ndisplay()
     if ndisplay is None:
         return False
     spec = state.dims_spec

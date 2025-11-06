@@ -218,7 +218,7 @@ class ClientLoopState:
 
     pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
     last_dims_seq: int | None = None
-    last_dims_payload: dict[str, object] | None = None
+    last_dims_spec: DimsSpec | None = None
 
     sync: LoopSyncState = field(default_factory=LoopSyncState)
     disco_gated: bool = False

@@ -2,7 +2,7 @@
 
 ## 1. Baseline Audit *(dims analogue: none – dims already migrated)*
 - Read `src/napari_cuda/client/state/bridges/layer_state_bridge.py` end-to-end to catalogue responsibilities (layer property wiring, state.update dispatch, presenter sync, registry maintenance, ACK handling). Dims parity: we previously performed this audit for `NapariDimsMirror` and `NapariDimsIntentEmitter` when they replaced the legacy dims bridge.
-- Inventory runtime entry points that currently call the bridge (`_ingest_notify_scene_snapshot`, `_ingest_notify_layers`, `_ingest_ack_state`, `_abort_pending_commands`). Dims counterpart: `_initialize_mirrors_and_emitters()` and `_replay_last_dims_payload()` already route through the dims mirror, and multiscale data now arrives with the enriched `notify.dims` frame.
+- Inventory runtime entry points that currently call the bridge (`_ingest_notify_scene_snapshot`, `_ingest_notify_layers`, `_ingest_ack_state`, `_abort_pending_commands`). Dims counterpart: `_initialize_mirrors_and_emitters()` and `_replay_last_dims_spec()` already route through the dims mirror, and multiscale data now arrives with the enriched `notify.dims` frame.
 - Record how the bridge interacts with the ledger (confirmed vs pending values) so the new mirror/emitter keep the same projections—mirroring dims behaviour where `_record_dims_snapshot` and `_record_dims_delta` manage confirmed entries.
 
 ## 2. NapariLayerIntentEmitter *(dims analogue: `NapariDimsIntentEmitter`)*
@@ -38,7 +38,7 @@
   - UI-facing layer intent helpers in the runtime should delegate to `self._layer_emitter.*` (mirroring dims’ delegation).
   - ACK reconciliation should call a new `self._layer_mirror.handle_ack(outcome)` (dims equivalent: ledger-driven updates inside the mirror).
 
-## 5. Registry & Presenter Coordination *(dims analogue: last dims payload cache + presenter.apply_dims_update)*
+## 5. Registry & Presenter Coordination *(dims analogue: last dims spec cache + presenter.apply_dims_update)*
 - Move registry seeding/delta application from the bridge into `NapariLayerMirror`, ensuring it remains the single source of truth for `RemoteLayerRegistry`.
 - Allow the mirror to notify the emitter when layers are added/removed so the emitter can attach/detach listeners automatically—similar to how dims emitter attaches to the viewer once.
 - Relocate shared utilities (debug logging toggles, value coercion helpers) from the bridge into the new emitter/mirror modules, keeping parity with dims’ helper placement.

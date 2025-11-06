@@ -18,6 +18,8 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from qtpy import QtCore, QtWidgets
 
+from napari_cuda.shared.dims_spec import DimsSpec
+
 if TYPE_CHECKING:  # pragma: no cover - narrow compile-time imports only
     from qtpy.QtCore import QObject
 
@@ -68,7 +70,7 @@ class PresenterFacade:
 
         # Misc state
         self._viewer_ref: Optional[weakref.ReferenceType[Any]] = None
-        self._last_dims_payload: Optional[dict[str, Any]] = None
+        self._last_dims_spec: Optional[DimsSpec] = None
         self._intent_dispatcher: Optional[Callable[[str, dict[str, Any]], None]] = None
         self._camera_summaries: dict[str, Any] = {}
         self._hud_camera_snapshot: dict[str, Any] = {}
@@ -182,18 +184,24 @@ class PresenterFacade:
         self._renderer = None
         self._client_cfg = None
         self._viewer_ref = None
-        self._last_dims_payload = None
+        self._last_dims_spec = None
         self._intent_dispatcher = None
 
     # ----------------------------------------------------------------- façade API
-    def apply_dims_update(self, payload: dict[str, Any]) -> None:
-        """Cache dims payloads and forward to any registered dispatcher."""
+    def apply_dims_update(
+        self,
+        *,
+        spec: DimsSpec,
+        viewer_update: Mapping[str, Any],
+    ) -> None:
+        """Cache the latest dims spec and notify any registered dispatcher."""
 
-        self._last_dims_payload = dict(payload)
-        if self._intent_dispatcher is None:
+        self._last_dims_spec = spec
+        dispatcher = self._intent_dispatcher
+        if dispatcher is None:
             return
         try:
-            self._intent_dispatcher('dims', payload)
+            dispatcher('dims', {'spec': spec, 'viewer': dict(viewer_update)})
         except Exception:
             logger.exception('PresenterFacade intent dispatcher failed')
 
@@ -229,8 +237,8 @@ class PresenterFacade:
         logger.debug('PresenterFacade: intent dispatcher set=%s', bool(dispatcher))
         return prev
 
-    def cached_dims_payload(self) -> Optional[dict[str, Any]]:
-        return dict(self._last_dims_payload) if self._last_dims_payload is not None else None
+    def cached_dims_spec(self) -> Optional[DimsSpec]:
+        return self._last_dims_spec
 
     def cached_multiscale_policy(self) -> Optional[dict[str, Any]]:
         return dict(self._multiscale_snapshot) if self._multiscale_snapshot is not None else None

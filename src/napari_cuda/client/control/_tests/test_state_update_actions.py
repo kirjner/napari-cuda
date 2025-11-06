@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
 from typing import Any
 
@@ -47,8 +47,8 @@ class PresenterStub:
         self.calls: list[dict[str, Any]] = []
         self.multiscale_calls: list[dict[str, Any]] = []
 
-    def apply_dims_update(self, payload: dict[str, Any]) -> None:
-        self.calls.append(dict(payload))
+    def apply_dims_update(self, *, spec: DimsSpec, viewer_update: Mapping[str, Any]) -> None:
+        self.calls.append({'spec': spec, 'viewer': dict(viewer_update)})
 
     def apply_multiscale_policy(self, payload: dict[str, Any]) -> None:
         self.multiscale_calls.append(dict(payload))
@@ -281,20 +281,19 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
     mirror.ingest_dims_notify(frame)
 
     assert state.dims_ready is True
-    payload = dict(loop_state.last_dims_payload)
-    dims_spec = payload.pop('dims_spec')
-    assert isinstance(dims_spec, DimsSpec)
-    assert payload == {
-        'current_step': [1, 2, 3],
+    spec = state.dims_spec
+    assert isinstance(spec, DimsSpec)
+    assert loop_state.last_dims_spec == spec
+    call = presenter.calls[-1]
+    assert call['spec'] == spec
+    assert call['viewer'] == {
+        'current_step': (1, 2, 3),
         'ndisplay': 2,
         'ndim': 3,
-        'dims_range': [[0, 10], [0, 5], [0, 3]],
-        'order': [0, 1, 2],
-        'axis_labels': ['z', 'y', 'x'],
-        'level_shapes': [[11, 6, 4]],
-        'displayed': [1, 2],
-        'mode': 'plane',
-        'volume': False,
+        'dims_range': ((0, 10), (0, 5), (0, 3)),
+        'order': (0, 1, 2),
+        'axis_labels': ('z', 'y', 'x'),
+        'displayed': (1, 2),
     }
     assert presenter.calls
     debug = ledger.dump_debug()
@@ -340,9 +339,9 @@ def test_handle_dims_update_modes_volume_flag() -> None:
     spec = state.dims_spec
     assert spec is not None
     assert spec.plane_mode is False
-    assert control_actions.resolve_ndisplay(state) == 3
-    assert loop_state.last_dims_payload['volume'] is True
-    assert presenter.calls[-1]['mode'] == 'volume'
+    assert control_actions.current_ndisplay(state) == 3
+    assert loop_state.last_dims_spec == spec
+    assert presenter.calls[-1]['viewer']['ndisplay'] == 3
 
 
 def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
@@ -396,11 +395,12 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
     payload = viewer.calls[-1]
     assert payload['ndisplay'] == 3
     assert tuple(payload['current_step']) == (1, 2, 3)
-    assert payload['axis_labels'] == ['z', 'y', 'x']
+    assert payload['axis_labels'] == ('z', 'y', 'x')
 
-    assert presenter.calls[-1]['ndisplay'] == 3
-    assert loop_state.last_dims_payload['ndisplay'] == 3
-    assert loop_state.last_dims_payload['mode'] == 'volume'
+    call = presenter.calls[-1]
+    assert call['viewer']['ndisplay'] == 3
+    assert loop_state.last_dims_spec == state.dims_spec
+    assert state.dims_spec is not None and state.dims_spec.plane_mode is False
 
 
 def test_scene_level_then_dims_updates_slider_bounds() -> None:
@@ -438,9 +438,6 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
     )
 
     mirror.ingest_dims_notify(frame)
-
-    dims_range = loop_state.last_dims_payload['dims_range']
-    assert dims_range and dims_range[2][1] == 31
 
     assert viewer.calls, 'viewer should receive updated dims metadata'
     payload = viewer.calls[-1]
@@ -508,10 +505,10 @@ def test_dims_notify_preserves_optional_metadata() -> None:
     assert [axis.label for axis in spec.axes] == ['z', 'y', 'x']
     assert list(spec.order) == [0, 1, 2]
     assert list(spec.displayed) == [1, 2]
-    payload = loop_state.last_dims_payload
-    assert payload['axis_labels'] == ['z', 'y', 'x']
-    assert payload['order'] == [0, 1, 2]
-    assert payload['displayed'] == [1, 2]
+    payload = viewer.calls[-1]
+    assert payload['axis_labels'] == ('z', 'y', 'x')
+    assert payload['order'] == (0, 1, 2)
+    assert payload['displayed'] == (1, 2)
 
 
 def test_dims_notify_populates_multiscale_state() -> None:
@@ -641,7 +638,7 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
         log_dims_info=True,
     )
 
-    current_step = control_actions.resolve_current_step(state)
+    current_step = state.dims_step()
     assert current_step is not None and current_step[0] == 271
     assert len(viewer.calls) >= 1, "viewer should receive applied dims update"
     assert len(presenter.calls) >= 1, "presenter should receive applied dims update"
@@ -779,7 +776,7 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
         log_dims_info=False,
     )
 
-    current_step = control_actions.resolve_current_step(state)
+    current_step = state.dims_step()
     assert current_step is not None and current_step[0] == 4
     assert viewer_updates
 
@@ -815,7 +812,7 @@ def test_handle_generic_ack_updates_view_metadata() -> None:
     presenter = PresenterStub()
     control_actions.handle_generic_ack(state, loop_state, outcome, presenter=presenter)
 
-    assert control_actions.resolve_ndisplay(state) == 2
+    assert control_actions.current_ndisplay(state) == 2
 
 
 def test_camera_zoom_bypasses_dedupe() -> None:

@@ -648,11 +648,11 @@ class ClientStreamLoop:
 
         self._run_on_ui(_apply)
 
-    def _replay_last_dims_payload(self) -> None:
+    def _replay_last_dims_spec(self) -> None:
         mirror = self._dims_mirror
         if mirror is None:
             return
-        mirror.replay_last_payload()
+        mirror.replay_last_spec()
 
     def _ingest_notify_scene_snapshot(self, frame: NotifySceneFrame) -> None:
         """Cache notify.scene frame and delegate to layer mirror."""
@@ -1178,7 +1178,7 @@ class ClientStreamLoop:
         self._initialize_mirrors_and_emitters()
         if self._dims_emitter is not None:
             self._dims_emitter.attach_viewer(viewer)
-        self._replay_last_dims_payload()
+        self._replay_last_dims_spec()
         if self._layer_mirror is not None:
             self._layer_mirror.replay_last_payload()
         if self._camera_mirror is not None:
@@ -1379,7 +1379,7 @@ class ClientStreamLoop:
             logger.debug("pointer event skipped: camera emitter unavailable")
             return
         spec = self._control_state.dims_spec
-        ndisplay = control_actions.resolve_ndisplay(self._control_state)
+        ndisplay = control_actions.current_ndisplay(self._control_state)
         in_vol3d = bool(spec is not None and ndisplay == 3 and not spec.plane_mode)
         camera.handle_pointer(
             emitter,

@@ -25,12 +25,12 @@
   - Registers a lightweight intent hook placeholder (`self._intent_dispatcher`) so the forthcoming layer intent bridge can bind without modifying the canvas again.
   - Emits the "first dims ready" callback so window deferral logic (`StreamingCanvas.defer_window_show`) can remain outside the façade.
 
-### `PresenterFacade.apply_dims_update(data: dict)`
+### `PresenterFacade.apply_dims_update(*, spec: DimsSpec, viewer_update: Mapping[str, Any])`
 - Called from `ClientStreamLoop._mirror_dims_to_viewer` (or its successor once the state bag lands).
 - Responsibilities:
-  - Mirror dims metadata/step to the attached viewer via a stored weakref (currently `ClientStreamLoop.attach_viewer_proxy`).
+  - Cache the latest `DimsSpec` and the precomputed viewer kwargs emitted by the mirror.
   - Trigger presenter HUD updates if range/ndisplay changes affect overlay text.
-  - Call into an optional intent dispatcher with `intent='dims'` events so the layer bridge can coalesce changes.
+  - Call into an optional intent dispatcher with `intent='dims'` events and the `{spec, viewer}` bundle so the layer bridge can coalesce changes.
   - Maintain internal caches required for `PresenterFacade` to answer lightweight queries (e.g., `current_ndisplay()` for UI toggles).
 
 ### `PresenterFacade.shutdown()`
@@ -55,7 +55,7 @@
    - The canvas now delegates draw wiring, HUD, and display-loop setup to `PresenterFacade` and no longer owns presenter, decoder, or queue state.
    - Legacy smoke/offline paths were removed; all presentation flows through `ClientStreamLoop.draw` via the façade hook.
 3. **Expose dims/application events** *(done)*
-   - `ClientStreamLoop` forwards dims payloads to `PresenterFacade.apply_dims_update`, which caches them for future intent bridge work.
+   - `ClientStreamLoop` forwards each confirmed dims spec and viewer update to `PresenterFacade.apply_dims_update`, which caches them for future intent bridge work.
 4. **Teardown wiring**
    - On loop shutdown, invoke `self._presenter_facade.shutdown()` before renderer teardown.
    - Ensure `StreamingCanvas.closeEvent` (or equivalent) calls through to the loop, which fans out to the façade.
@@ -64,14 +64,14 @@
 - **Qt Draw Wiring**: Qt test harness ensuring `scene_canvas.events.draw` calls `ClientStreamLoop.draw` exactly once per repaint and retains `enable_dims_play` ordering. (Existing `_tests/test_streaming_canvas_draw.py` can be adapted.)
 - **HUD Stats Source**: Unit test that injects a fake presenter with deterministic `stats()` output and verifies the HUD label text updates after timer tick.
 - **Display Loop Opt-in**: Test toggling `NAPARI_CUDA_USE_DISPLAY_LOOP` asserts façade starts/stops `DisplayLoop` and does not leak when shutdown is called twice.
-- **Dims Update Mirror**: Test that `apply_dims_update` forwards payload to the viewer mirror, triggers `on_first_dims_ready`, and accepts repeated payloads without duplicating logs.
-- **Intent Hook Smoke**: Test registering a stub dispatcher, calling `apply_dims_update`, and asserting the dispatcher sees a `('dims', payload)` tuple.
+- **Dims Update Mirror**: Test that `apply_dims_update` forwards the viewer update to the mirror, triggers `on_first_dims_ready`, and accepts repeated specs without duplicating logs.
+- **Intent Hook Smoke**: Test registering a stub dispatcher, calling `apply_dims_update`, and asserting the dispatcher sees a `('dims', {'spec': spec, 'viewer': ...})` tuple.
 
 ## Open Questions / Follow-ups
 - With the `ClientLoopState` dataclass in place, migrate façade construction to accept the state bag and collaborators explicitly (reduces `self` reach).
 - `PresenterFacade` exposes `set_intent_dispatcher`; `NapariLayerMirror` and friends must document how it plugs into this hook.
 
 ## Current Status
-- `PresenterFacade` manages draw wiring, HUD updates, and optional display loop creation. It caches viewer weakrefs and dims payloads for the forthcoming layer-intent bridge.
+- `PresenterFacade` manages draw wiring, HUD updates, and optional display loop creation. It caches viewer weakrefs and the latest dims spec for the forthcoming layer-intent bridge.
 - `StreamingCanvas` is now a thin Qt shim responsible for vsync setup, keymap handling, and deferred window display; all presenter logic is delegated.
 - Smoke/offline paths were deleted alongside the hoist to keep the façade surface focused on real streaming flows.

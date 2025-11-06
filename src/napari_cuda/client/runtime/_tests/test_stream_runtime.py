@@ -3,7 +3,7 @@ from __future__ import annotations
 import threading
 from itertools import count
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Mapping
 
 import pytest
 from qtpy import QtCore
@@ -67,8 +67,8 @@ class _PresenterStub:
         self.calls: list[dict[str, Any]] = []
         self.layer_updates: list[Any] = []
 
-    def apply_dims_update(self, payload: dict[str, Any]) -> None:
-        self.calls.append(dict(payload))
+    def apply_dims_update(self, *, spec: DimsSpec, viewer_update: Mapping[str, Any]) -> None:
+        self.calls.append({'spec': spec, 'viewer': dict(viewer_update)})
 
     def set_viewer_mirror(self, _viewer: Any) -> None:  # pragma: no cover - simple stub
         return None
@@ -84,7 +84,6 @@ def _make_loop() -> ClientStreamLoop:
     loop = ClientStreamLoop.__new__(ClientStreamLoop)
     loop._log_dims_info = False
     loop._loop_state = ClientLoopState()
-    loop._loop_state.last_dims_payload = None
     loop._loop_state.state_channel = _StateChannelStub()
     loop._state_channel_stub = loop._loop_state.state_channel
     loop._viewer_mirror = lambda: None
@@ -227,8 +226,19 @@ def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
     assert payload.value == 2
 
 
-def test_handle_dims_update_caches_payload() -> None:
+def test_handle_dims_update_caches_spec() -> None:
     loop = _make_loop()
+
+    class ViewerStub:
+        def __init__(self) -> None:
+            self.calls: list[dict[str, Any]] = []
+
+        def _apply_remote_dims_update(self, **kwargs: Any) -> None:
+            self.calls.append(dict(kwargs))
+
+    viewer = ViewerStub()
+    loop._viewer_mirror = lambda: viewer
+    loop._dims_mirror._viewer_ref = lambda: viewer
 
     spec = _make_spec(
         current_step=[1, 2, 0],
@@ -258,27 +268,25 @@ def test_handle_dims_update_caches_payload() -> None:
 
     loop._dims_mirror.ingest_dims_notify(frame)
 
-    payload = dict(loop._loop_state.last_dims_payload)
-    dims_spec = payload.pop('dims_spec')
-    assert dims_spec is not None
-    assert payload == {
-        'current_step': [1, 2, 0],
+    assert loop._loop_state.last_dims_spec == spec
+    call = loop._presenter_facade.calls[-1]
+    assert call['spec'] == spec
+    assert call['viewer'] == {
+        'current_step': (1, 2, 0),
         'ndisplay': 2,
         'ndim': 3,
-        'dims_range': [[0, 10], [0, 5], [0, 3]],
-        'order': [0, 1, 2],
-        'axis_labels': ['z', 'y', 'x'],
-        'level_shapes': [[11, 6, 4]],
-        'displayed': [1, 2],
-        'mode': 'plane',
-        'volume': False,
+        'dims_range': ((0, 10), (0, 5), (0, 3)),
+        'order': (0, 1, 2),
+        'axis_labels': ('z', 'y', 'x'),
+        'displayed': (1, 2),
     }
+    assert viewer.calls
     assert loop._control_state.dims_ready is True
     assert loop._presenter_facade.calls
     assert loop._state_channel_stub.sent_frames == []
 
 
-def test_replay_last_dims_payload_forwards_to_viewer() -> None:
+def test_replay_last_dims_spec_forwards_to_viewer() -> None:
     loop = _make_loop()
 
     class ViewerStub:
@@ -290,28 +298,32 @@ def test_replay_last_dims_payload_forwards_to_viewer() -> None:
 
     viewer = ViewerStub()
     loop._viewer_mirror = lambda: viewer
-    loop._loop_state.last_dims_payload = {
-        'current_step': [3, 1],
-        'ndisplay': 2,
-        'ndim': 3,
-        'dims_range': [(0, 8), (0, 4), (0, 2)],
-        'order': [0, 2, 1],
-        'axis_labels': ['z', 'x', 'y'],
-        'displayed': [2, 1],
-    }
+    spec = _make_spec(
+        current_step=[3, 1, 0],
+        ndisplay=2,
+        level_shapes=[[9, 5, 3]],
+        axis_labels=['z', 'x', 'y'],
+        order=[0, 2, 1],
+        displayed=[2, 1],
+    )
+    loop._loop_state.last_dims_spec = spec
 
-    loop._replay_last_dims_payload()
+    loop._control_state.dims_spec = spec
+    loop._control_state.dims_step_override = spec.current_step
+    loop._control_state.dims_ndisplay_override = spec.ndisplay
+
+    loop._replay_last_dims_spec()
 
     assert viewer.calls == [
         {
-            'current_step': [3, 1],
+            'current_step': (3, 1, 0),
             'ndisplay': 2,
             'ndim': 3,
-            'dims_range': [(0, 8), (0, 4), (0, 2)],
-            'order': [0, 2, 1],
-            'axis_labels': ['z', 'x', 'y'],
-            'displayed': [2, 1],
-            }
+            'dims_range': ((0, 8), (0, 4), (0, 2)),
+            'order': (0, 2, 1),
+            'axis_labels': ('z', 'x', 'y'),
+            'displayed': (2, 1),
+        }
     ]
 
 

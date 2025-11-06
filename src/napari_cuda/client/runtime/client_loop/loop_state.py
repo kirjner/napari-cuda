@@ -102,7 +102,6 @@ class ClientLoopState:
 
     # Intent caches
     pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
-    last_dims_payload: dict[str, object] | None = None
     last_dims_spec: DimsSpec | None = None
     state_session_metadata: SessionMetadata | None = None
 
