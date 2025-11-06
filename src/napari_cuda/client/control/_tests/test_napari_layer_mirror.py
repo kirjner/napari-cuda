@@ -76,7 +76,7 @@ def test_layer_mirror_applies_registry_updates(qtbot) -> None:
     assert remote_layer.visible is True
     assert pytest.approx(remote_layer.opacity, rel=1e-6) == 0.5
 
-    registry.apply_delta(LayerDelta(layer_id=block["layer_id"], changes={"opacity": 0.25}))
+    registry.apply_delta(LayerDelta.controls_only(block["layer_id"], {"opacity": 0.25}))
     assert pytest.approx(remote_layer.opacity, rel=1e-6) == 0.25
 
     registry.apply_delta(LayerDelta.removal(block["layer_id"]))

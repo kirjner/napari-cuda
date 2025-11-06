@@ -17,7 +17,6 @@ def apply_dims_step_transaction(
     ledger: ServerStateLedger,
     step: Sequence[int],
     dims_spec_payload: Mapping[str, Any],
-    metadata: Optional[Mapping[str, object]] = None,
     origin: str = "control.dims",
     timestamp: Optional[float] = None,
     op_seq: Optional[int] = None,
@@ -34,8 +33,6 @@ def apply_dims_step_transaction(
         if op_kind is not None:
             entries.append(("scene", "main", "op_kind", str(op_kind)))
     spec_entry = ("dims", "main", "dims_spec", dict(dims_spec_payload))
-    if metadata is not None:
-        spec_entry = spec_entry + (dict(metadata),)
     entries.append(spec_entry)
 
     return ledger.batch_record_confirmed(

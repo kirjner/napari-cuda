@@ -713,7 +713,6 @@ def _dims_entries_from_payload(
             "main",
             "current_step",
             current_step,
-            {"axis_index": axis_index, "axis_target": axis_target},
         )
     )
 
@@ -872,17 +871,12 @@ def reduce_bootstrap_state(
     entries.append(("dims", "main", "dims_spec", _serialize_dims_spec(dims_spec)))
 
     axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
-    axis_index_metadata = {
-        "axis_index": axis_index,
-        "axis_target": axis_target,
-    }
     entries.append(
         (
             "dims",
             axis_target,
             "index",
             axis_index_value,
-            axis_index_metadata,
         )
     )
 
@@ -994,11 +988,6 @@ def reduce_dims_update(
     requested_step = tuple(int(v) for v in step)
     resolved_intent_id = intent_id or f"dims-{uuid.uuid4().hex}"
 
-    step_metadata = {
-        "axis_index": int(idx),
-        "axis_target": control_target,
-    }
-
     axes_list = list(current_spec.axes)
     assert idx < len(axes_list), "dims spec missing target axis"
     axes_list[idx] = replace(axes_list[idx], current_step=int(requested_step[idx]))
@@ -1014,7 +1003,6 @@ def reduce_dims_update(
         ledger=ledger,
         step=requested_step,
         dims_spec_payload=_serialize_dims_spec(new_spec),
-        metadata=step_metadata,
         origin=origin,
         timestamp=ts,
         op_seq=next_op_seq,
@@ -1383,7 +1371,6 @@ def reduce_plane_restore(
         ledger=ledger,
         step=step_tuple,
         dims_spec_payload=_serialize_dims_spec(new_spec),
-        metadata=_metadata_from_intent(intent_id),
         origin=origin,
         timestamp=ts,
         op_seq=_next_scene_op_seq(ledger),
@@ -1528,9 +1515,6 @@ def reduce_level_update(
         level_shapes_payload[level] = shape_tuple
     updated_level_shapes = tuple(level_shapes_payload) if level_shapes_payload else tuple()
 
-    step_metadata = {"source": "worker.level_update", "level": level}
-    if intent_id is not None:
-        step_metadata["intent_id"] = intent_id
     volume_payload = _plain_volume_state(volume_state)
     mode_value: Optional[str] = None
     if mode is not None:
@@ -1594,10 +1578,6 @@ def reduce_level_update(
         dims_spec_payload=_serialize_dims_spec(new_spec),
         level_shapes=updated_level_shapes if updated_level_shapes else None,
         downgraded=bool(downgraded) if downgraded is not None else None,
-        step_metadata=step_metadata,
-        level_metadata=metadata,
-        level_shapes_metadata=metadata if metadata is not None and updated_level_shapes else None,
-        downgraded_metadata=metadata if metadata is not None and downgraded is not None else None,
         origin=origin,
         timestamp=ts,
         op_seq=next_op_seq,

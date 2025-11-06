@@ -255,12 +255,13 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
         order=[0, 1, 2],
         displayed=[1, 2],
     )
+    viewer = ViewerStub()
 
     mirror = NapariDimsMirror(
         ledger=ledger,
         state=state,
         loop_state=loop_state,
-        viewer_ref=lambda: None,
+        viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=presenter,
         log_dims_info=False,
@@ -311,12 +312,13 @@ def test_handle_dims_update_modes_volume_flag() -> None:
         level_shapes=[[32, 32, 32]],
         mode='volume',
     )
+    viewer = ViewerStub()
 
     mirror = NapariDimsMirror(
         ledger=ledger,
         state=state,
         loop_state=loop_state,
-        viewer_ref=lambda: None,
+        viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=presenter,
         log_dims_info=False,
@@ -470,11 +472,13 @@ def test_hud_snapshot_carries_volume_state() -> None:
 def test_dims_notify_preserves_optional_metadata() -> None:
     state, loop_state, ledger, dispatch = _make_state()
 
+    viewer = ViewerStub()
+
     mirror = NapariDimsMirror(
         ledger=ledger,
         state=state,
         loop_state=loop_state,
-        viewer_ref=lambda: None,
+        viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=None,
         log_dims_info=False,
@@ -639,7 +643,6 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
 
     current_step = control_actions.resolve_current_step(state)
     assert current_step is not None and current_step[0] == 271
-    assert state.dims_state[('0', 'index')] == 271
     assert len(viewer.calls) >= 1, "viewer should receive applied dims update"
     assert len(presenter.calls) >= 1, "presenter should receive applied dims update"
 

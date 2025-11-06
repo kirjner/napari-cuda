@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
-from numbers import Integral, Real
+from collections.abc import Callable, Mapping
 from typing import TYPE_CHECKING, Any, Optional
 
 from qtpy import QtCore
@@ -20,6 +19,7 @@ from napari_cuda.shared.dims_spec import (
     dims_spec_axis_index_for_target,
     dims_spec_axis_labels,
     dims_spec_primary_axis,
+    dims_spec_to_payload,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -103,12 +103,40 @@ class NapariDimsMirror:
             state.multiscale_state = {}
         self._apply_multiscale_to_presenter(multiscale_snapshot)
 
-        snapshot_payload = _build_consumer_dims_payload(state, self._loop_state)
+        snapshot_payload = control_actions.build_dims_payload(state)
+        self._loop_state.last_dims_payload = dict(snapshot_payload)
+        self._loop_state.last_dims_spec = state.last_dims_spec
 
-        if not was_ready:
-            _record_dims_snapshot(state, self._ledger, snapshot_payload)
-        else:
-            _record_dims_delta(state, self._ledger, snapshot_payload, update_kind='notify')
+        axis_labels = snapshot_payload.get('axis_labels') or []
+        current_step = snapshot_payload.get('current_step') or []
+        entries: list[tuple[Any, ...]] = []
+        for axis_idx, raw_value in enumerate(current_step):
+            label = axis_labels[axis_idx] if axis_idx < len(axis_labels) else str(axis_idx)
+            entries.append(('dims', str(label), 'index', int(raw_value)))
+        entries.append(("dims", "main", "dims_spec", dims_spec_to_payload(dims_spec)))
+
+        ndisplay = snapshot_payload.get('ndisplay')
+        if ndisplay is not None:
+            entries.append(('view', 'main', 'ndisplay', int(ndisplay)))
+
+        order = snapshot_payload.get('order')
+        if isinstance(order, (list, tuple)):
+            entries.append(('view', 'main', 'order', tuple(int(v) for v in order)))
+
+        displayed = snapshot_payload.get('displayed')
+        if isinstance(displayed, (list, tuple)):
+            entries.append(('view', 'main', 'displayed', tuple(int(v) for v in displayed)))
+
+        level_snapshot = state.multiscale_state
+        if isinstance(level_snapshot, Mapping):
+            if 'level' in level_snapshot:
+                entries.append(('multiscale', 'main', 'level', int(level_snapshot['level'])))
+            if 'policy' in level_snapshot:
+                entries.append(('multiscale', 'main', 'policy', level_snapshot['policy']))
+            if 'downgraded' in level_snapshot:
+                entries.append(('multiscale', 'main', 'downgraded', bool(level_snapshot['downgraded'])))
+        if entries:
+            self._ledger.batch_record_confirmed(entries)
 
         if not state.dims_ready:
             state.dims_ready = True
@@ -160,15 +188,9 @@ class NapariDimsMirror:
             self._handle_ndisplay_update(update)
 
     def _handle_axis_update(self, update: MirrorEvent) -> None:
-        metadata = update.metadata or {}
-        axis_idx: Optional[int] = None
-        if 'axis_index' in metadata:
-            try:
-                axis_idx = int(metadata['axis_index'])
-            except Exception:
-                axis_idx = None
-        if axis_idx is None:
-            axis_idx = _axis_index_from_target(self._state, str(update.target))
+        spec = control_actions.ensure_dims_spec(self._state)
+        target = str(update.target)
+        axis_idx = dims_spec_axis_index_for_target(spec, target)
         assert axis_idx is not None, f"unknown dims axis target={update.target!r}"
 
         if logger.isEnabledFor(logging.DEBUG):
@@ -178,32 +200,22 @@ class NapariDimsMirror:
                 update.target,
                 update.key,
                 update.value,
-                metadata,
+                update.metadata,
             )
 
-        try:
-            value_int = int(update.value)
-        except Exception as exc:  # pragma: no cover - intentional crash path
-            raise AssertionError(f"dims value must be int-like: {update.value!r}") from exc
+        value_int = int(update.value)
 
         state = self._state
-        spec = control_actions.ensure_dims_spec(state)
         current = list(control_actions.resolve_current_step(state) or spec.current_step)
         while len(current) <= axis_idx:
             current.append(0)
         current[axis_idx] = value_int
         state.dims_step_override = tuple(int(v) for v in current)
-
-        state.dims_state[(str(update.target), str(update.key))] = value_int
         state.primary_axis_index = dims_spec_primary_axis(spec)
         self._mirror_confirmed_dims(reason=f"axis:{axis_idx}")
 
     def _handle_ndisplay_update(self, update: MirrorEvent) -> None:
-        try:
-            ndisplay = int(update.value)
-        except Exception as exc:  # pragma: no cover - intentional crash path
-            raise AssertionError(f"ndisplay value must be int-like: {update.value!r}") from exc
-        self._state.dims_ndisplay_override = ndisplay
+        self._state.dims_ndisplay_override = int(update.value)
         self._mirror_confirmed_dims(reason="ndisplay")
 
     def _mirror_confirmed_dims(
@@ -212,11 +224,14 @@ class NapariDimsMirror:
         reason: str,
         payload: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        confirmed_payload = (
-            dict(payload)
-            if payload is not None
-            else _build_consumer_dims_payload(self._state, self._loop_state)
-        )
+        if payload is not None:
+            confirmed_payload = dict(payload)
+        else:
+            snapshot = control_actions.build_dims_payload(self._state)
+            confirmed_payload = dict(snapshot)
+            self._loop_state.last_dims_payload = dict(confirmed_payload)
+        if self._state.last_dims_spec is not None:
+            self._loop_state.last_dims_spec = self._state.last_dims_spec
 
         # Multiscale snapshot already applied during ingest_dims_notify.
 
@@ -242,9 +257,10 @@ class NapariDimsMirror:
             if self._presenter is not None:
                 self._presenter.apply_dims_update(dict(confirmed_payload))
 
-        viewer_obj = self._viewer_ref() if callable(self._viewer_ref) else None  # type: ignore[misc]
+        viewer = self._viewer_ref() if callable(self._viewer_ref) else self._viewer_ref  # type: ignore[misc]
+        assert viewer is not None, "viewer reference must be alive"
         mirror_dims_to_viewer(
-            viewer_obj,
+            viewer,
             self._ui_call,
             current_step=confirmed_payload.get('current_step'),
             ndisplay=confirmed_payload.get('ndisplay'),
@@ -267,35 +283,6 @@ class NapariDimsMirror:
         assert current is self._ui_thread, "NapariDimsMirror methods must run on the Qt GUI thread"
 
 
-# Shared helpers (lifted from the legacy state_update_actions module)
-
-
-def _record_dims_snapshot(
-    state: ControlStateContext,
-    ledger: ClientStateLedger,
-    payload: Mapping[str, Any],
-) -> None:
-    _record_dims_delta(state, ledger, payload, update_kind='snapshot')
-
-    ndisplay = payload.get('ndisplay')
-    entries: list[tuple[Any, ...]] = []
-    if ndisplay is not None:
-        entries.append(('view', 'main', 'ndisplay', int(ndisplay)))
-
-    order = payload.get('order')
-    if isinstance(order, (list, tuple)):
-        entries.append(('view', 'main', 'order', tuple(int(v) for v in order)))
-
-    displayed = payload.get('displayed')
-    if isinstance(displayed, (list, tuple)):
-        entries.append(('view', 'main', 'displayed', tuple(int(v) for v in displayed)))
-
-    if entries:
-        ledger.batch_record_confirmed(entries)
-
-    _record_multiscale_metadata(state, ledger)
-
-
 def _build_multiscale_snapshot(payload: Any) -> dict[str, Any] | None:
     levels_source = getattr(payload, 'levels', None)
     if not levels_source:
@@ -313,113 +300,6 @@ def _build_multiscale_snapshot(payload: Any) -> dict[str, Any] | None:
     return snapshot
 
 
-def _record_dims_delta(
-    state: ControlStateContext,
-    ledger: ClientStateLedger,
-    payload: Mapping[str, Any],
-    *,
-    update_kind: str,
-) -> None:
-    current_step = payload.get('current_step')
-    if not isinstance(current_step, (list, tuple)):
-        return
-    entries: list[tuple[Any, ...]] = []
-    for idx, value in enumerate(current_step):
-        if value is None:
-            continue
-        value_int = _coerce_step_value(value)
-        if value_int is None:
-            continue
-        target_label = _axis_target_label(state, idx)
-        metadata = {
-            'axis_index': idx,
-            'axis_target': target_label,
-            'update_kind': update_kind,
-        }
-        entries.append(('dims', target_label, 'index', value_int, metadata))
-
-    if entries:
-        ledger.batch_record_confirmed(entries)
-
-
-def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientLoopState) -> dict[str, Any]:
-    payload = control_actions.build_dims_payload(state)
-    loop_state.last_dims_payload = dict(payload)
-
-    return payload
-
-
-def _record_multiscale_metadata(state: ControlStateContext, ledger: ClientStateLedger) -> None:
-    multiscale_meta = state.multiscale_state
-    if not isinstance(multiscale_meta, Mapping):
-        return
-
-    entries: list[tuple[Any, ...]] = []
-
-    level_val = multiscale_meta.get('level')
-    if level_val is None:
-        level_val = multiscale_meta.get('current_level')
-    if level_val is not None:
-        entries.append(('multiscale', 'main', 'level', int(level_val)))
-
-    policy_val = multiscale_meta.get('policy')
-    if policy_val is not None:
-        entries.append(('multiscale', 'main', 'policy', str(policy_val)))
-
-    downgraded = multiscale_meta.get('downgraded')
-    if downgraded is not None:
-        entries.append(('multiscale', 'main', 'downgraded', bool(downgraded)))
-
-    if entries:
-        ledger.batch_record_confirmed(entries)
-
-def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedger) -> None:  # pragma: no cover - removed
-    return
-
-
-def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
-    target_lower = target.lower()
-    spec = state.dims_spec
-    if isinstance(spec, DimsSpec):
-        resolved = dims_spec_axis_index_for_target(spec, target)
-        if resolved is not None:
-            return resolved
-        labels = dims_spec_axis_labels(spec)
-        for idx, label in enumerate(labels):
-            text = str(label)
-            if text == target or text.lower() == target_lower:
-                return int(idx)
-    if target.startswith('axis-'):
-        target = target.split('-', 1)[1]
-    try:
-        return int(target)
-    except Exception:
-        return None
-    return None
-
-
-def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    spec = state.dims_spec
-    if isinstance(spec, DimsSpec):
-        labels = dims_spec_axis_labels(spec)
-        if 0 <= axis_idx < len(labels):
-            return labels[axis_idx]
-    return str(axis_idx)
-
-
-def _coerce_step_value(value: Any) -> Optional[int]:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, Integral):
-        return int(value)
-    if isinstance(value, Real):
-        value_int = int(value)
-        if abs(float(value) - float(value_int)) < 1e-6:
-            return value_int
-        return None
-    return None
-
-
 def mirror_dims_to_viewer(
     viewer_obj,
     ui_call,
@@ -432,8 +312,6 @@ def mirror_dims_to_viewer(
     axis_labels,
     displayed,
 ) -> None:
-    if viewer_obj is None or not hasattr(viewer_obj, '_apply_remote_dims_update'):
-        return
     apply_remote = viewer_obj._apply_remote_dims_update  # type: ignore[attr-defined]
 
     def _apply() -> None:

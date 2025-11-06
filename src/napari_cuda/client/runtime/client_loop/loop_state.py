@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from threading import Thread
 from typing import TYPE_CHECKING
 
+from napari_cuda.shared.dims_spec import DimsSpec
+
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
 
 
@@ -101,6 +103,7 @@ class ClientLoopState:
     # Intent caches
     pending_intents: dict[int, dict[str, object]] = field(default_factory=dict)
     last_dims_payload: dict[str, object] | None = None
+    last_dims_spec: DimsSpec | None = None
     state_session_metadata: SessionMetadata | None = None
 
     # Stream continuity

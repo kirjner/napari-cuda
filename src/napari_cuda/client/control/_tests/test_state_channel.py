@@ -17,7 +17,6 @@ from napari_cuda.protocol import (
     FeatureResumeState,
     FeatureToggle,
     build_ack_state,
-    build_notify_dims,
     build_notify_layers_delta,
     build_notify_scene_snapshot,
     build_notify_stream,
@@ -31,6 +30,7 @@ from napari_cuda.protocol.messages import (
     NotifySceneFrame,
     NotifyStreamFrame,
 )
+from napari_cuda.client.control._tests.test_state_update_actions import _make_notify_dims_frame
 
 
 @pytest.fixture
@@ -78,7 +78,7 @@ def test_state_channel_layer_delta_callback(state_channel):
 
     frame = build_notify_layers_delta(
         session_id='session-4',
-        payload={'layer_id': 'layer-1', 'changes': {'opacity': 0.5}},
+        payload={'layer_id': 'layer-1', 'controls': {'opacity': 0.5}},
         timestamp=1.0,
         delta_token='tok-layer-1',
         seq=3,
@@ -90,7 +90,8 @@ def test_state_channel_layer_delta_callback(state_channel):
     message = received[0]
     assert isinstance(message, NotifyLayersFrame)
     assert message.payload.layer_id == 'layer-1'
-    assert message.payload.changes['opacity'] == 0.5
+    assert message.payload.controls is not None
+    assert message.payload.controls['opacity'] == 0.5
 
 
 def test_state_channel_layer_remove_callback(state_channel):
@@ -99,7 +100,7 @@ def test_state_channel_layer_remove_callback(state_channel):
 
     frame = build_notify_layers_delta(
         session_id='session-5',
-        payload={'layer_id': 'layer-2', 'changes': {'removed': True}},
+        payload={'layer_id': 'layer-2', 'removed': True},
         timestamp=2.0,
         delta_token='tok-layer-2',
         seq=4,
@@ -111,24 +112,20 @@ def test_state_channel_layer_remove_callback(state_channel):
     message = received[0]
     assert isinstance(message, NotifyLayersFrame)
     assert message.payload.layer_id == 'layer-2'
-    assert message.payload.changes.get('removed') is True
+    assert bool(message.payload.removed) is True
 
 
 def test_state_channel_dims_update_dispatch() -> None:
     frames: list[NotifyDimsFrame] = []
     sc = StateChannel('localhost', 8081, ingest_dims_notify=frames.append)
-    frame = build_notify_dims(
+    frame = _make_notify_dims_frame(
+        current_step=[12, 3, 4],
+        ndisplay=2,
+        level_shapes=[[16, 8, 4]],
+        mode='plane',
         session_id='session-42',
-        payload={
-            'step': [12, 3, 4],
-            'levels': [{'index': 0, 'shape': [16, 8, 4]}],
-            'level_shapes': [[16, 8, 4]],
-            'current_level': 0,
-            'mode': 'slice',
-            'ndisplay': 2,
-        },
-        timestamp=9.5,
         frame_id='dims-007',
+        timestamp=9.5,
     )
 
     sc._handle_message(frame.to_dict())
@@ -140,7 +137,7 @@ def test_state_channel_dims_update_dispatch() -> None:
     assert received.envelope.session == 'session-42'
     assert received.payload.current_step == (12, 3, 4)
     assert received.payload.ndisplay == 2
-    assert received.payload.mode == 'slice'
+    assert received.payload.mode == 'plane'
     assert received.payload.level_shapes == ((16, 8, 4),)
 
 

@@ -144,7 +144,7 @@ def test_remote_layer_registry_lifecycle():
     assert first.ids() == (block["layer_id"],)
     record = first.layers[0]
     assert record.layer.remote_id == block["layer_id"]
-    registry.apply_delta(LayerDelta(layer_id=block["layer_id"], changes={"opacity": 0.25}))
+    registry.apply_delta(LayerDelta.controls_only(block["layer_id"], {"opacity": 0.25}))
     updated_record = registry.snapshot().layers[0]
     assert updated_record.layer.opacity == pytest.approx(0.25)
     preview = np.ones((4, 4, 1), dtype=np.float32)

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Optional
+from typing import Any, Optional
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -20,10 +20,6 @@ def apply_level_switch_transaction(
     dims_spec_payload: Mapping[str, Any],
     level_shapes: Optional[Sequence[Sequence[int]]] = None,
     downgraded: Optional[bool] = None,
-    step_metadata: Optional[Mapping[str, object]] = None,
-    level_metadata: Optional[Mapping[str, object]] = None,
-    level_shapes_metadata: Optional[Mapping[str, object]] = None,
-    downgraded_metadata: Optional[Mapping[str, object]] = None,
     origin: str = "worker.state.level",
     timestamp: Optional[float] = None,
     op_seq: Optional[int] = None,
@@ -41,55 +37,23 @@ def apply_level_switch_transaction(
             batch_entries.append(("scene", "main", "op_state", str(op_state)))
         if op_kind is not None:
             batch_entries.append(("scene", "main", "op_kind", str(op_kind)))
-    if level_metadata is None:
-        batch_entries.append(("multiscale", "main", "level", int(level)))
-    else:
-        batch_entries.append(
-            ("multiscale", "main", "level", int(level), dict(level_metadata))
-        )
+    batch_entries.append(("multiscale", "main", "level", int(level)))
 
     if level_shapes is not None:
         normalized_shapes = tuple(
             tuple(int(dim) for dim in shape) for shape in level_shapes
         )
-        if level_shapes_metadata is None:
-            batch_entries.append(
-                ("multiscale", "main", "level_shapes", normalized_shapes),
-            )
-        else:
-            batch_entries.append(
-                (
-                    "multiscale",
-                    "main",
-                    "level_shapes",
-                    normalized_shapes,
-                    dict(level_shapes_metadata),
-                ),
-            )
+        batch_entries.append(
+            ("multiscale", "main", "level_shapes", normalized_shapes),
+        )
     if downgraded is not None:
-        if downgraded_metadata is None:
-            batch_entries.append(
-                ("multiscale", "main", "downgraded", bool(downgraded)),
-            )
-        else:
-            batch_entries.append(
-                (
-                    "multiscale",
-                    "main",
-                    "downgraded",
-                    bool(downgraded),
-                    dict(downgraded_metadata),
-                ),
-            )
+        batch_entries.append(
+            ("multiscale", "main", "downgraded", bool(downgraded)),
+        )
 
     # Persist the requested step with the level switch so the worker can apply
     # the snapshot verbatim without additional remapping.
-    if step_metadata is not None:
-        batch_entries.append(
-            ("dims", "main", "current_step", step_tuple, dict(step_metadata)),
-        )
-    else:
-        batch_entries.append(("dims", "main", "current_step", step_tuple))
+    batch_entries.append(("dims", "main", "current_step", step_tuple))
 
     batch_entries.append(("dims", "main", "dims_spec", dict(dims_spec_payload)))
 

@@ -282,7 +282,7 @@ class RemoteThumbnail:
         else:
             # For scalar thumbnails, prefer grayscale; if source is color, take
             # its luminance (first channel) to keep ScalarField expectations.
-            if channels > 1:
+            if arr.ndim == 3:
                 arr = arr[..., 0]
             arr = np.asarray(arr, dtype=arr.dtype)
 
