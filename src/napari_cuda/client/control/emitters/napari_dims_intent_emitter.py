@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 import weakref
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Optional
@@ -335,7 +335,8 @@ class NapariDimsIntentEmitter:
         dims = self._viewer_dims
         if dims is None:
             return
-        current = self._coerce_step(getattr(dims, "current_step", ()))
+        raw_step = getattr(dims, "current_step", ()) or ()
+        current = tuple(int(value) for value in raw_step)
         if self._last_step_ui is not None and current == self._last_step_ui:
             return
 
@@ -438,13 +439,7 @@ class NapariDimsIntentEmitter:
         if current_step is None:
             self._last_step_ui = None
             return
-        try:
-            self._last_step_ui = self._coerce_step(current_step)
-        except Exception:
-            self._last_step_ui = None
-
-    def _coerce_step(self, raw: Sequence[object]) -> tuple[int, ...]:
-        return tuple(int(value) for value in raw)
+        self._last_step_ui = tuple(int(value) for value in current_step)
 
     def _detect_changed_axis(self, current: tuple[int, ...]) -> int | None:
         prev = self._last_step_ui

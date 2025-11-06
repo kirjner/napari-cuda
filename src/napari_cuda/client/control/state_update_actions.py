@@ -781,20 +781,20 @@ def hud_snapshot(
 
     snap['rendering'] = rendering
     if isinstance(clim, Sequence):
-        snap['clim_lo'] = _float_or_none(clim[0] if len(clim) > 0 else None)
-        snap['clim_hi'] = _float_or_none(clim[1] if len(clim) > 1 else None)
+        snap['clim_lo'] = clim[0] if len(clim) > 0 else None
+        snap['clim_hi'] = clim[1] if len(clim) > 1 else None
     else:
         snap['clim_lo'] = None
         snap['clim_hi'] = None
     snap['colormap'] = colormap
-    snap['opacity'] = _float_or_none(opacity)
+    snap['opacity'] = opacity
 
-    snap['sample_step'] = _float_or_none(state.volume_state.get('sample_step')) if state.volume_state else None
+    snap['sample_step'] = state.volume_state.get('sample_step') if state.volume_state else None
 
     if isinstance(state.multiscale_state, dict):
         levels_obj = state.multiscale_state.get('levels')
         snap['ms_policy'] = state.multiscale_state.get('policy')
-        level_value = _int_or_none(state.multiscale_state.get('current_level'))
+        level_value = state.multiscale_state.get('current_level')
         snap['ms_level'] = level_value
         if isinstance(levels_obj, Sequence):
             snap['ms_levels'] = len(levels_obj)
@@ -808,11 +808,11 @@ def hud_snapshot(
             snap['ms_path'] = None
 
     primary_axis = projection.primary_axis if projection is not None else state.primary_axis_index
-    snap['primary_axis'] = _int_or_none(primary_axis)
+    snap['primary_axis'] = primary_axis
     snap.update(zoom_state)
     video_w, video_h = video_size
-    snap['video_w'] = _int_or_none(video_w)
-    snap['video_h'] = _int_or_none(video_h)
+    snap['video_w'] = video_w
+    snap['video_h'] = video_h
     return snap
 
 
@@ -823,14 +823,7 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
         return int(axis)
     spec = state.dims_spec
     if isinstance(spec, DimsSpec):
-        resolved = dims_spec_axis_index_for_target(spec, str(axis))
-        if resolved is not None:
-            return resolved
-        labels = tuple(ax.label for ax in spec.axes)
-        label_map = {str(lbl): idx for idx, lbl in enumerate(labels)}
-        match = label_map.get(str(axis))
-        if match is not None:
-            return int(match)
+        return dims_spec_axis_index_for_target(spec, str(axis))
     return None
 
 
@@ -892,19 +885,3 @@ def _clamp_level(state: ControlStateContext, level: int) -> int:
             return hi
         return lv
     return int(level)
-
-
-def _int_or_none(value: object) -> Optional[int]:
-    return None if value is None else int(value)  # type: ignore[arg-type]
-
-
-def _float_or_none(value: object) -> Optional[float]:
-    return None if value is None else float(value)  # type: ignore[arg-type]
-
-
-def _bool_or_none(value: object) -> Optional[bool]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    return bool(value)

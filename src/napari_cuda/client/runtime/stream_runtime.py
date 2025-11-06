@@ -121,24 +121,6 @@ def _maybe_enable_debug_logger() -> None:
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
-
-def _int_or_none(value: object) -> Optional[int]:
-    return None if value is None else int(value)  # type: ignore[arg-type]
-
-
-def _float_or_none(value: object) -> Optional[float]:
-    return None if value is None else float(value)  # type: ignore[arg-type]
-
-
-def _bool_or_none(value: object) -> Optional[bool]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    return bool(value)
-
-
-
 class CommandError(RuntimeError):
     """Raised when a command lane invocation returns an error frame."""
 

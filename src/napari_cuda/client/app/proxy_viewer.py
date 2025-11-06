@@ -153,18 +153,17 @@ class ProxyViewer(ViewerModel):
             if ndim is not None:
                 dims.ndim = int(ndim)
             if dims_range is not None:
-                coerced = tuple(self._coerce_range(entry) for entry in dims_range)
-                dims.range = coerced
+                dims.range = tuple(tuple(entry) for entry in dims_range)
             elif sizes is not None:
                 dims.range = tuple((0.0, float(int(size) - 1), 1.0) for size in sizes)
             if order is not None:
-                dims.order = self._coerce_order(order, axis_labels)
+                dims.order = tuple(int(idx) for idx in order)
             if axis_labels is not None:
                 dims.axis_labels = tuple(str(lbl) for lbl in axis_labels)
             if ndisplay is not None:
                 dims.ndisplay = int(ndisplay)
             if displayed is not None:
-                self._apply_displayed_axes(displayed)
+                dims.displayed = tuple(int(idx) for idx in displayed)
             if current_step is not None:
                 step_tuple = tuple(int(value) for value in current_step)
                 dims.current_step = step_tuple
@@ -173,45 +172,6 @@ class ProxyViewer(ViewerModel):
             logger.debug("ProxyViewer: remote dims apply failed", exc_info=True)
         finally:
             self._suppress_forward_flag = prev_flag
-
-    @staticmethod
-    def _coerce_range(entry) -> tuple[float, float, float]:
-        if entry is None:
-            return (0.0, 0.0, 1.0)
-        if len(entry) == 2:
-            start, stop = entry
-            step = 1.0
-        elif len(entry) >= 3:
-            start, stop, step = entry[:3]
-        else:
-            raise ValueError("range entry must contain at least 2 values")
-        return (float(start), float(stop), float(step))
-
-    def _coerce_order(self, order, axis_labels) -> tuple[int, ...]:
-        if not order:
-            return tuple()
-        try:
-            return tuple(int(x) for x in order)
-        except Exception:
-            if axis_labels is None:
-                raise
-            label_to_idx = {str(lbl): idx for idx, lbl in enumerate(axis_labels)}
-            return tuple(int(label_to_idx[str(lbl)]) for lbl in order)
-
-    def _apply_displayed_axes(self, displayed) -> None:
-        dims = self.dims
-        values = [int(x) for x in displayed]
-        values = [x for x in values if 0 <= x < dims.ndim]
-        if not values:
-            return
-        current_order = list(dims.order) or list(range(dims.ndim))
-        base = [axis for axis in current_order if axis not in values]
-        base.extend(axis for axis in values if axis not in base)
-        for axis in range(dims.ndim):
-            if axis not in base:
-                base.insert(0, axis)
-        if len(base) == len(current_order):
-            dims.order = tuple(base)
 
 
 

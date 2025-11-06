@@ -61,7 +61,6 @@ class NapariDimsMirror:
         self._notify_first_ready = notify_first_ready
         self._emitter: Optional[NapariDimsIntentEmitter] = None
         self._ui_thread = app.thread()
-        self._last_multiscale_snapshot: Mapping[str, Any] | None = None
         ledger.subscribe_all(self._handle_ledger_update)
 
     def set_logging(self, enabled: bool) -> None:
@@ -75,7 +74,6 @@ class NapariDimsMirror:
 
         self._assert_gui_thread()
         state = self._state
-        was_ready = bool(state.dims_ready)
         payload = frame.payload
 
         dims_spec = payload.dims_spec
@@ -303,7 +301,6 @@ class NapariDimsMirror:
         control_actions._mirror_viewer_dims(viewer, self._ui_call, viewer_update_local)
 
     def _apply_multiscale_to_presenter(self, multiscale: Mapping[str, Any] | None) -> None:
-        self._last_multiscale_snapshot = dict(multiscale) if multiscale is not None else None
         presenter = self._presenter
         if presenter is None or multiscale is None:
             return
