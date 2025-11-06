@@ -29,7 +29,12 @@ from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
 from napari_cuda.server.scene.viewport import PlaneState, RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 from napari_cuda.server.utils.signatures import SignatureToken
-from napari_cuda.shared.dims_spec import DimsSpec
+from napari_cuda.shared.dims_spec import (
+    DimsSpec,
+    dims_spec_axis_labels,
+    dims_spec_displayed,
+    dims_spec_order,
+)
 
 from .viewer_metadata import apply_plane_metadata
 
@@ -156,12 +161,12 @@ def apply_dims_from_snapshot(
     assert dims_spec is not None, "render snapshot missing dims_spec"
 
     ndim = max(ndim, int(dims_spec.ndim))
-    labels = tuple(axis.label for axis in dims_spec.axes)
+    labels = dims_spec_axis_labels(dims_spec)
     dims.axis_labels = labels
 
     step_tuple = dims_spec.current_step
-    order_values = dims_spec.order
-    displayed_tuple = dims_spec.displayed
+    order_values = dims_spec_order(dims_spec)
+    displayed_tuple = dims_spec_displayed(dims_spec)
     target_ndisplay = int(dims_spec.ndisplay)
 
     if snapshot.axis_labels is not None:

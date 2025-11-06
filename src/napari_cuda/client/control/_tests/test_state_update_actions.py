@@ -19,6 +19,12 @@ from napari_cuda.client.control.mirrors.napari_dims_mirror import (
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.protocol import build_ack_state, build_notify_dims
 from napari_cuda.protocol.messages import NotifyDimsFrame
+from napari_cuda.shared.dims_spec import (
+    AxisExtent,
+    DimsSpec,
+    DimsSpecAxis,
+    dims_spec_to_payload,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +107,53 @@ def _make_notify_dims_frame(
         payload['order'] = [int(index) for index in order]
     if displayed is not None:
         payload['displayed'] = [int(index) for index in displayed]
+
+    ndim = len(level_shapes[0]) if level_shapes else len(step_values)
+    resolved_labels = list(axis_labels) if axis_labels is not None else [f"axis-{i}" for i in range(ndim)]
+    resolved_order = list(order) if order is not None else list(range(ndim))
+    if displayed is not None:
+        resolved_displayed = [int(idx) for idx in displayed]
+    else:
+        resolved_displayed = list(resolved_order[-ndisplay:])
+    displayed_lookup = set(resolved_displayed)
+    axes: list[DimsSpecAxis] = []
+    for axis_idx in range(ndim):
+        per_level_steps = [int(shape[axis_idx]) for shape in level_shapes]
+        axes.append(
+            DimsSpecAxis(
+                index=axis_idx,
+                label=str(resolved_labels[axis_idx]),
+                role=str(resolved_labels[axis_idx]).lower(),
+                displayed=axis_idx in displayed_lookup,
+                order_position=resolved_order.index(axis_idx),
+                current_step=step_values[axis_idx] if axis_idx < len(step_values) else 0,
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=tuple(per_level_steps),
+                per_level_world=tuple(
+                    AxisExtent(0.0, float(max(count - 1, 0)), 1.0) for count in per_level_steps
+                ),
+            )
+        )
+
+    dims_spec = DimsSpec(
+        version=1,
+        ndim=ndim,
+        ndisplay=int(ndisplay),
+        order=tuple(int(idx) for idx in resolved_order),
+        displayed=tuple(resolved_displayed),
+        current_level=int(current_level),
+        current_step=tuple(step_values[:ndim]),
+        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in level_shapes),
+        plane_mode=(mode != 'volume'),
+        axes=tuple(axes),
+        levels=tuple(level_entries),
+        downgraded=downgraded,
+        labels=None,
+    )
+    payload['dims_spec'] = dims_spec_to_payload(dims_spec)
 
     return build_notify_dims(
         session_id=session_id,
@@ -205,7 +258,10 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
     mirror.ingest_dims_notify(frame)
 
     assert state.dims_ready is True
-    assert loop_state.last_dims_payload == {
+    payload = dict(loop_state.last_dims_payload)
+    dims_spec = payload.pop('dims_spec')
+    assert isinstance(dims_spec, DimsSpec)
+    assert payload == {
         'current_step': [1, 2, 3],
         'ndisplay': 2,
         'ndim': 3,
@@ -314,6 +370,7 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
         ndisplay=3,
         level_shapes=[[32, 32, 32]],
         mode='volume',
+        axis_labels=['z', 'y', 'x'],
     )
 
     mirror.ingest_dims_notify(frame)
@@ -437,6 +494,7 @@ def test_dims_notify_preserves_optional_metadata() -> None:
         current_step=[10, 20, 30],
         ndisplay=2,
         level_shapes=[[256, 128, 64]],
+        axis_labels=['z', 'y', 'x'],
     )
 
     mirror.ingest_dims_notify(frame)

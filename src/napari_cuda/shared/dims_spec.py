@@ -225,6 +225,106 @@ def validate_ledger_against_dims_spec(spec: DimsSpec, snapshot: LedgerSnapshot) 
     assert snapshot_spec == spec, "dims spec payload mismatch"
 
 
+def dims_spec_axis_labels(spec: DimsSpec) -> tuple[str, ...]:
+    return tuple(axis.label for axis in spec.axes)
+
+
+def dims_spec_order(spec: DimsSpec) -> tuple[int, ...]:
+    return tuple(int(idx) for idx in spec.order)
+
+
+def dims_spec_displayed(spec: DimsSpec) -> tuple[int, ...]:
+    return tuple(int(idx) for idx in spec.displayed)
+
+
+def dims_spec_level_shape(spec: DimsSpec, level: int) -> tuple[int, ...]:
+    shapes = spec.level_shapes
+    if level < 0 or level >= len(shapes):
+        raise IndexError(f"dims level {level} out of range")
+    return tuple(int(dim) for dim in shapes[level])
+
+
+def dims_spec_clamp_step(
+    spec: DimsSpec,
+    level: int,
+    step: Sequence[int],
+) -> tuple[int, ...]:
+    axis_count = len(spec.axes)
+    normalized = [int(step[idx]) if idx < len(step) else 0 for idx in range(axis_count)]
+    shape = dims_spec_level_shape(spec, level)
+    clamped: list[int] = []
+    for axis_idx in range(axis_count):
+        if axis_idx >= len(shape):
+            clamped.append(normalized[axis_idx])
+            continue
+        bound = int(shape[axis_idx])
+        if bound <= 0:
+            clamped.append(0)
+            continue
+        value = normalized[axis_idx]
+        if value < 0:
+            clamped.append(0)
+        elif value >= bound:
+            clamped.append(bound - 1)
+        else:
+            clamped.append(value)
+    return tuple(clamped)
+
+
+def dims_spec_primary_axis(spec: DimsSpec) -> int:
+    if spec.order:
+        return int(spec.order[0])
+    return 0
+
+
+def dims_spec_axis_index_for_target(spec: DimsSpec, target: str) -> int | None:
+    label = target.strip()
+    for axis in spec.axes:
+        if axis.label == label or axis.label.lower() == label.lower():
+            return int(axis.index)
+    if label.startswith("axis-"):
+        label = label.split("-", 1)[1]
+    if label.isdigit() or (label.startswith("-") and label[1:].isdigit()):
+        value = int(label)
+        return value if 0 <= value < len(spec.axes) else None
+    return None
+
+
+def dims_spec_remap_step_for_level(
+    spec: DimsSpec,
+    *,
+    step: Sequence[int],
+    prev_level: int,
+    next_level: int,
+) -> tuple[int, ...]:
+    axis_count = len(spec.axes)
+    normalized = [int(step[idx]) if idx < len(step) else 0 for idx in range(axis_count)]
+    next_shape = spec.level_shapes[next_level] if 0 <= next_level < len(spec.level_shapes) else ()
+    prev_shape = spec.level_shapes[prev_level] if 0 <= prev_level < len(spec.level_shapes) else ()
+    result: list[int] = []
+    for idx in range(axis_count):
+        source_index = normalized[idx]
+        if idx >= len(next_shape):
+            result.append(source_index)
+            continue
+        target_len = int(next_shape[idx])
+        if target_len <= 0:
+            result.append(0)
+            continue
+        if idx >= len(prev_shape):
+            result.append(min(max(source_index, 0), target_len - 1))
+            continue
+        prev_len = int(prev_shape[idx])
+        axis_label = spec.axes[idx].label.lower()
+        if axis_label == "z" and prev_len != target_len and prev_len > 1 and target_len > 1:
+            ratio = float(target_len - 1) / float(prev_len - 1)
+            mapped = int(round(float(source_index) * ratio))
+            result.append(min(max(mapped, 0), target_len - 1))
+            continue
+        result.append(min(max(source_index, 0), target_len - 1))
+    return tuple(result)
+
+
 def _as_int_tuple(value: Any) -> tuple[int, ...]:
     assert isinstance(value, Iterable), "expected iterable for integer tuple conversion"
     return tuple(int(v) for v in value)
@@ -247,6 +347,14 @@ __all__ = [
     "dims_spec_from_payload",
     "dims_spec_to_payload",
     "validate_ledger_against_dims_spec",
+    "dims_spec_axis_labels",
+    "dims_spec_order",
+    "dims_spec_displayed",
+    "dims_spec_level_shape",
+    "dims_spec_clamp_step",
+    "dims_spec_primary_axis",
+    "dims_spec_axis_index_for_target",
+    "dims_spec_remap_step_for_level",
     # Shared
     "AxisExtent",
 ]

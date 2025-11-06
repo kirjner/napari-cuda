@@ -14,7 +14,12 @@ from typing import (
 )
 
 from napari_cuda.protocol import NotifyCamera
-from napari_cuda.shared.dims_spec import DimsSpec
+from napari_cuda.shared.dims_spec import (
+    DimsSpec,
+    dims_spec_axis_index_for_target,
+    dims_spec_axis_labels,
+    dims_spec_primary_axis,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
@@ -180,12 +185,9 @@ def handle_notify_camera(
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     dims_spec = state.dims_meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        try:
-            axis = dims_spec.axis_by_index(axis_idx)
-            if axis.label:
-                return axis.label
-        except KeyError:
-            pass
+        labels = dims_spec_axis_labels(dims_spec)
+        if 0 <= axis_idx < len(labels):
+            return labels[axis_idx]
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
         label = labels[axis_idx]
@@ -198,9 +200,9 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
     target_lower = target.lower()
     dims_spec = state.dims_meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        for axis in dims_spec.axes:
-            if axis.label == target or axis.label.lower() == target_lower:
-                return axis.index
+        resolved = dims_spec_axis_index_for_target(dims_spec, target)
+        if resolved is not None:
+            return resolved
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
         for idx, label in enumerate(labels):
@@ -1224,10 +1226,9 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
         return int(axis)
     dims_spec = state.dims_meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        try:
-            return dims_spec.axis_by_label(str(axis)).index
-        except KeyError:
-            pass
+        resolved = dims_spec_axis_index_for_target(dims_spec, str(axis))
+        if resolved is not None:
+            return resolved
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
         label_map = {str(lbl): i for i, lbl in enumerate(labels)}
@@ -1239,9 +1240,7 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
     dims_spec = meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        if dims_spec.order:
-            return int(dims_spec.order[0])
-        return 0
+        return dims_spec_primary_axis(dims_spec)
     order = meta.get('order')
     ndisplay = meta.get('ndisplay')
     labels = meta.get('axis_labels')

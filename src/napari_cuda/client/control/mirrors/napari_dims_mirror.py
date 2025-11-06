@@ -14,7 +14,15 @@ from napari_cuda.client.control.client_state_ledger import (
     MirrorEvent,
 )
 from napari_cuda.protocol.messages import NotifyDimsFrame
-from napari_cuda.shared.dims_spec import DimsSpec
+from napari_cuda.shared.dims_spec import (
+    DimsSpec,
+    dims_spec_axis_index_for_target,
+    dims_spec_axis_labels,
+    dims_spec_displayed,
+    dims_spec_level_shape,
+    dims_spec_order,
+    dims_spec_primary_axis,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
@@ -95,14 +103,14 @@ class NapariDimsMirror:
 
         active_level = int(dims_spec.current_level)
         assert 0 <= active_level < len(level_shapes), 'active level out of bounds for level_shapes'
-        active_shape = [int(dim) for dim in level_shapes[active_level]]
+        active_shape = list(dims_spec_level_shape(dims_spec, active_level))
         meta['active_level_shape'] = active_shape
         meta['range'] = [[0, max(0, dim - 1)] for dim in active_shape]
         meta['ndim'] = int(dims_spec.ndim)
 
-        meta['order'] = [int(idx) for idx in dims_spec.order]
-        meta['axis_labels'] = [str(axis.label) for axis in dims_spec.axes]
-        meta['displayed'] = [int(idx) for idx in dims_spec.displayed]
+        meta['order'] = list(dims_spec_order(dims_spec))
+        meta['axis_labels'] = list(dims_spec_axis_labels(dims_spec))
+        meta['displayed'] = list(dims_spec_displayed(dims_spec))
 
         if 'sizes' in meta:
             meta.pop('sizes', None)
@@ -367,11 +375,6 @@ def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientL
     payload: dict[str, Any] = {}
 
     dims_spec = meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        payload['dims_spec'] = dims_spec
-    else:
-        payload['dims_spec'] = None
-
     current_step = meta.get('current_step')
     if isinstance(current_step, Sequence):
         payload['current_step'] = [int(value) for value in current_step]
@@ -416,7 +419,9 @@ def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientL
 
     payload['source'] = meta.get('source')
 
+    payload['dims_spec'] = dims_spec if isinstance(dims_spec, DimsSpec) else None
     loop_state.last_dims_payload = dict(payload)
+
     return payload
 
 
@@ -452,9 +457,9 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
     target_lower = target.lower()
     dims_spec = state.dims_meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        for axis in dims_spec.axes:
-            if axis.label == target or axis.label.lower() == target_lower:
-                return axis.index
+        resolved = dims_spec_axis_index_for_target(dims_spec, target)
+        if resolved is not None:
+            return resolved
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence):
         for idx, label in enumerate(labels):
@@ -472,9 +477,7 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
 def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
     dims_spec = meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        if dims_spec.order:
-            return int(dims_spec.order[0])
-        return 0
+        return dims_spec_primary_axis(dims_spec)
     order = meta.get('order')
     ndisplay = meta.get('ndisplay')
     labels = meta.get('axis_labels')
@@ -494,12 +497,9 @@ def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     dims_spec = state.dims_meta.get('dims_spec')
     if isinstance(dims_spec, DimsSpec):
-        try:
-            axis = dims_spec.axis_by_index(axis_idx)
-            if axis.label:
-                return axis.label
-        except KeyError:
-            pass
+        labels = dims_spec_axis_labels(dims_spec)
+        if 0 <= axis_idx < len(labels):
+            return labels[axis_idx]
     labels = state.dims_meta.get('axis_labels')
     if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
         label = labels[axis_idx]

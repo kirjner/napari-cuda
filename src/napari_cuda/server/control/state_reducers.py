@@ -41,7 +41,13 @@ from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,
     DimsSpecAxis,
+    dims_spec_axis_labels,
+    dims_spec_clamp_step,
+    dims_spec_displayed,
     dims_spec_from_payload,
+    dims_spec_level_shape,
+    dims_spec_order,
+    dims_spec_remap_step_for_level,
     dims_spec_to_payload,
     validate_ledger_against_dims_spec,
 )
@@ -99,103 +105,6 @@ def _axis_extents_for_steps(steps: Sequence[int]) -> tuple[AxisExtent, ...]:
         stop = float(max(size - 1, 0))
         extents.append(AxisExtent(start=0.0, stop=stop, step=1.0))
     return tuple(extents)
-
-
-def _clamp_index(value: int, size: int) -> int:
-    bound = int(size)
-    if bound <= 0:
-        return 0
-    index = int(value)
-    if index <= 0:
-        return 0
-    if index >= bound:
-        return bound - 1
-    return index
-
-
-def _proportional_index(index: int, prev_len: int, new_len: int) -> int:
-    if new_len <= 1 or prev_len <= 1 or prev_len == new_len:
-        return _clamp_index(index, new_len)
-    ratio = float(new_len - 1) / float(prev_len - 1)
-    mapped = int(round(float(index) * ratio))
-    return _clamp_index(mapped, new_len)
-
-
-def _shape_for_level(level_shapes: Sequence[Sequence[int]], level: int) -> tuple[int, ...] | None:
-    if level < 0 or level >= len(level_shapes):
-        return None
-    return tuple(int(dim) for dim in level_shapes[level])
-
-
-def _normalize_step(step: Sequence[int], axis_count: int) -> tuple[int, ...]:
-    if axis_count <= 0:
-        return ()
-    values: list[int] = []
-    for idx in range(axis_count):
-        if idx < len(step):
-            values.append(int(step[idx]))
-        else:
-            values.append(0)
-    return tuple(values)
-
-
-def _clamp_step_for_shape(
-    step: Sequence[int],
-    *,
-    axis_count: int,
-    level_shape: Sequence[int] | None,
-) -> tuple[int, ...]:
-    normalized = _normalize_step(step, axis_count)
-    if axis_count == 0 or level_shape is None:
-        return normalized
-    shape = tuple(int(dim) for dim in level_shape)
-    result: list[int] = []
-    for idx in range(axis_count):
-        if idx >= len(shape):
-            result.append(normalized[idx])
-            continue
-        target_len = shape[idx]
-        if target_len <= 0:
-            result.append(0)
-            continue
-        result.append(_clamp_index(normalized[idx], target_len))
-    return tuple(result)
-
-
-def _remap_step_for_level_switch(
-    step: Sequence[int],
-    *,
-    axis_count: int,
-    prev_level: int,
-    next_level: int,
-    level_shapes: Sequence[Sequence[int]],
-    axes: Sequence[DimsSpecAxis],
-) -> tuple[int, ...]:
-    normalized = _normalize_step(step, axis_count)
-    next_shape = _shape_for_level(level_shapes, next_level)
-    if next_shape is None:
-        return normalized
-    prev_shape = _shape_for_level(level_shapes, prev_level)
-    result: list[int] = []
-    for idx in range(axis_count):
-        source_index = normalized[idx]
-        if idx >= len(next_shape):
-            result.append(source_index)
-            continue
-        target_len = next_shape[idx]
-        if target_len <= 0:
-            result.append(0)
-            continue
-        if prev_shape is None or idx >= len(prev_shape):
-            result.append(_clamp_index(source_index, target_len))
-            continue
-        prev_len = prev_shape[idx]
-        axis_label = axes[idx].label.lower() if idx < len(axes) else ""
-        if axis_label == "z" and prev_len != target_len and prev_len > 1 and target_len > 1:
-            result.append(_proportional_index(source_index, prev_len, target_len))
-            continue
-        result.append(_clamp_index(source_index, target_len))
-    return tuple(result)
 
 
 def normalize_clim(lo: object, hi: object) -> tuple[float, float]:
@@ -798,24 +707,6 @@ def reduce_volume_sample_step(
     )
 
 
-def _axis_label_from_axes(
-    order: Sequence[Any] | None,
-    axis_labels: Sequence[Any] | None,
-    idx: int,
-) -> Optional[str]:
-    if isinstance(order, Sequence) and idx < len(order):
-        candidate = order[idx]
-        if isinstance(candidate, str) and candidate.strip():
-            return str(candidate)
-
-    if isinstance(axis_labels, Sequence) and idx < len(axis_labels):
-        candidate = axis_labels[idx]
-        if isinstance(candidate, str) and candidate.strip():
-            return str(candidate)
-
-    return None
-
-
 def _normalize_view_order(
     *,
     baseline_order: Optional[Sequence[int]],
@@ -946,9 +837,9 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     ndisplay = int(dims_spec.ndisplay)
     mode = "volume" if ndisplay >= 3 else "plane"
 
-    axis_labels = tuple(axis.label for axis in dims_spec.axes)
-    order = tuple(int(idx) for idx in dims_spec.order)
-    displayed = tuple(int(idx) for idx in dims_spec.displayed)
+    axis_labels = dims_spec_axis_labels(dims_spec)
+    order = dims_spec_order(dims_spec)
+    displayed = dims_spec_displayed(dims_spec)
 
     labels_raw = optional("dims", "labels")
     labels = (
@@ -1189,8 +1080,11 @@ def reduce_dims_update(
     if idx is None:
         raise ValueError("unable to resolve axis index for dims update")
 
-    axis_label = _axis_label_from_axes(payload.order, payload.axis_labels, idx)
-    control_target = axis_label or str(idx)
+    current_spec = payload.dims_spec
+    assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
+
+    spec_labels = dims_spec_axis_labels(current_spec)
+    control_target = spec_labels[idx] if idx < len(spec_labels) else str(idx)
 
     target = int(step[idx])
     if value is not None:
@@ -1198,14 +1092,10 @@ def reduce_dims_update(
     if step_delta is not None:
         target += int(step_delta)
 
-    shapes_raw = payload.level_shapes
-    assert shapes_raw, "ledger dims metadata missing level_shapes"
     level_idx = int(payload.current_level)
-    assert 0 <= level_idx < len(shapes_raw), "current_level out of bounds for level_shapes"
-    shape_raw = shapes_raw[level_idx]
-    assert isinstance(shape_raw, Sequence), "level_shapes entry must be sequence"
-    assert idx < len(shape_raw), "axis index outside level_shapes entry"
-    size_val = int(shape_raw[idx])
+    level_shape = dims_spec_level_shape(current_spec, level_idx)
+    assert idx < len(level_shape), "axis index outside level_shapes entry"
+    size_val = int(level_shape[idx])
     assert size_val > 0, "level_shapes entries must be positive"
     target = max(0, min(size_val - 1, target))
 
@@ -1217,9 +1107,6 @@ def reduce_dims_update(
         "axis_index": int(idx),
         "axis_target": control_target,
     }
-
-    current_spec = payload.dims_spec
-    assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
 
     axes_list = list(current_spec.axes)
     assert idx < len(axes_list), "dims spec missing target axis"
@@ -1586,11 +1473,7 @@ def reduce_plane_restore(
     spec = dims_payload.dims_spec
     assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
-    axis_count = len(spec.axes)
-    if len(step_tuple) < axis_count:
-        step_tuple = tuple(list(step_tuple) + [0] * (axis_count - len(step_tuple)))
-    elif len(step_tuple) > axis_count:
-        step_tuple = step_tuple[:axis_count]
+    step_tuple = dims_spec_clamp_step(spec, int(level_idx), step_tuple)
 
     axes_list = []
     for axis_idx, axis in enumerate(spec.axes):
@@ -1776,29 +1659,19 @@ def reduce_level_update(
 
     axis_count = len(spec.axes)
     base_step = step_tuple if step_tuple is not None else ()
-    normalized_step = _normalize_step(base_step, axis_count)
-
     if level_shapes_final:
         previous_level = int(spec.current_level)
-        previous_level = int(spec.current_level)
         if previous_level != int(level):
-            step_tuple = _remap_step_for_level_switch(
-                normalized_step,
-                axis_count=axis_count,
+            step_tuple = dims_spec_remap_step_for_level(
+                spec,
+                step=base_step,
                 prev_level=previous_level,
                 next_level=int(level),
-                level_shapes=level_shapes_final,
-                axes=spec.axes,
             )
         else:
-            target_shape = _shape_for_level(level_shapes_final, int(level))
-            step_tuple = _clamp_step_for_shape(
-                normalized_step,
-                axis_count=axis_count,
-                level_shape=target_shape,
-            )
+            step_tuple = dims_spec_clamp_step(spec, int(level), base_step)
     else:
-        step_tuple = normalized_step
+        step_tuple = dims_spec_clamp_step(spec, int(level), base_step)
 
     axes_list: list[DimsSpecAxis] = []
     for axis in spec.axes:

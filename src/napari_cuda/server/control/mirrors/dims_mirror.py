@@ -8,7 +8,13 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
-from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_from_payload
+from napari_cuda.shared.dims_spec import (
+    DimsSpec,
+    dims_spec_axis_labels,
+    dims_spec_displayed,
+    dims_spec_from_payload,
+    dims_spec_order,
+)
 from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 
@@ -126,9 +132,9 @@ class ServerDimsMirror:
         ndisplay = int(dims_spec.ndisplay)
         mode = "volume" if ndisplay >= 3 else "plane"
 
-        displayed = tuple(int(idx) for idx in dims_spec.displayed)
-        order = tuple(int(idx) for idx in dims_spec.order)
-        axis_labels = tuple(axis.label for axis in dims_spec.axes)
+        displayed = dims_spec_displayed(dims_spec)
+        order = dims_spec_order(dims_spec)
+        axis_labels = dims_spec_axis_labels(dims_spec)
         labels = tuple(str(lbl) for lbl in dims_spec.labels) if dims_spec.labels is not None else None
         downgraded = dims_spec.downgraded
         levels = tuple(dict(level) for level in dims_spec.levels)
