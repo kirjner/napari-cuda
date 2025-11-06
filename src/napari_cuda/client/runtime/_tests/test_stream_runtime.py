@@ -140,8 +140,6 @@ def _seed_default_spec(state: ControlStateContext) -> None:
         displayed=[1, 2],
     )
     state.dims_spec = spec
-    state.dims_step_override = tuple(spec.current_step)
-    state.dims_ndisplay_override = int(spec.ndisplay)
 
 
 def _make_spec(
@@ -213,17 +211,15 @@ def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
     assert payload.key == 'ndisplay'
     assert payload.value == 3
 
-    loop._control_state.dims_ndisplay_override = 2
-    loop._control_state.last_settings_send = 0.0
-    assert loop.toggle_ndisplay(origin='ui') is True
-    payload = loop._state_channel_stub.sent_frames[-1].payload
-    assert payload.value == 3
-
-    loop._control_state.dims_ndisplay_override = 3
     loop._control_state.last_settings_send = 0.0
     assert loop.toggle_ndisplay(origin='ui') is True
     payload = loop._state_channel_stub.sent_frames[-1].payload
     assert payload.value == 2
+
+    loop._control_state.last_settings_send = 0.0
+    assert loop.toggle_ndisplay(origin='ui') is True
+    payload = loop._state_channel_stub.sent_frames[-1].payload
+    assert payload.value == 3
 
 
 def test_handle_dims_update_caches_spec() -> None:
@@ -309,8 +305,6 @@ def test_replay_last_dims_spec_forwards_to_viewer() -> None:
     loop._loop_state.last_dims_spec = spec
 
     loop._control_state.dims_spec = spec
-    loop._control_state.dims_step_override = spec.current_step
-    loop._control_state.dims_ndisplay_override = spec.ndisplay
 
     loop._replay_last_dims_spec()
 

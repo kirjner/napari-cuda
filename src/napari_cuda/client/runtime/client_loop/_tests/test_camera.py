@@ -88,8 +88,6 @@ def _seed_volume_spec(state: ControlStateContext) -> None:
         labels=None,
     )
     state.dims_spec = spec
-    state.dims_step_override = tuple(spec.current_step)
-    state.dims_ndisplay_override = int(spec.ndisplay)
 
 
 def test_handle_wheel_zoom_posts_camera_zoom(qtbot) -> None:

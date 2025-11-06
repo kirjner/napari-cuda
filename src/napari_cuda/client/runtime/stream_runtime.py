@@ -745,6 +745,7 @@ class ClientStreamLoop:
         )
 
         def _apply() -> None:
+            control_actions._update_runtime_from_ack_outcome(self._control_state, outcome)
             scope = outcome.scope
             if scope == "layer":
                 if self._layer_emitter is not None:
@@ -754,16 +755,11 @@ class ClientStreamLoop:
                 if self._camera_emitter is not None:
                     self._camera_emitter.handle_ack(outcome)
                 return
-            if scope == "dims":
-                control_actions.handle_dims_ack(
-                    self._control_state,
-                    self._loop_state,
-                    outcome,
-                    presenter=self._presenter_facade,
-                    viewer_ref=self._viewer_mirror,
-                    ui_call=self._ui_call,
-                    log_dims_info=self._log_dims_info,
-                )
+            if scope == "dims" or (
+                scope == "view" and outcome.target == "main" and outcome.key == "ndisplay"
+            ):
+                if self._dims_mirror is not None:
+                    self._dims_mirror.handle_ack(outcome)
                 return
             control_actions.handle_generic_ack(self._control_state, self._loop_state, outcome)
 
@@ -1229,7 +1225,7 @@ class ClientStreamLoop:
     # --- Intents API --------------------------------------------------------------
     # --- Mode helpers -----------------------------------------------------------
     def _is_volume_mode(self) -> bool:
-        return control_actions._is_volume_mode(self._control_state)  # type: ignore[attr-defined]
+        return control_actions._is_volume_mode(self._control_state, self._state_ledger)  # type: ignore[attr-defined]
 
     # --- Small utilities (no behavior change) ----------------------------------
     # --- View HUD snapshot (for overlay) ----------------------------------------
@@ -1250,6 +1246,7 @@ class ClientStreamLoop:
         }
         return control_actions.hud_snapshot(
             self._control_state,
+            self._state_ledger,
             video_size=(self._vid_w, self._vid_h),
             zoom_state=zoom_state,
         )
@@ -1348,7 +1345,7 @@ class ClientStreamLoop:
         return emitter.view_set_ndisplay(ndisplay, origin=origin)
 
     def current_ndisplay(self) -> Optional[int]:
-        return control_actions.current_ndisplay(self._control_state)
+        return control_actions.current_ndisplay(self._control_state, self._state_ledger)
 
     def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
         emitter = self._dims_emitter
@@ -1379,7 +1376,7 @@ class ClientStreamLoop:
             logger.debug("pointer event skipped: camera emitter unavailable")
             return
         spec = self._control_state.dims_spec
-        ndisplay = control_actions.current_ndisplay(self._control_state)
+        ndisplay = control_actions.current_ndisplay(self._control_state, self._state_ledger)
         in_vol3d = bool(spec is not None and ndisplay == 3 and not spec.plane_mode)
         camera.handle_pointer(
             emitter,

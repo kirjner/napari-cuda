@@ -125,8 +125,6 @@ def _seed_default_spec(state: ControlStateContext) -> None:
         labels=None,
     )
     state.dims_spec = spec
-    state.dims_step_override = tuple(spec.current_step)
-    state.dims_ndisplay_override = int(spec.ndisplay)
 
 
 def test_dims_step_dispatches_delta(emitter_setup) -> None:
@@ -171,7 +169,6 @@ def test_handle_wheel_forwards_primary_axis(emitter_setup) -> None:
 
 def test_view_set_ndisplay_dispatches(emitter_setup) -> None:
     emitter, state, _loop_state, _ledger, dispatch = emitter_setup
-    state.dims_ndisplay_override = 2
 
     ok = emitter.view_set_ndisplay(3, origin='ui')
 
@@ -185,7 +182,6 @@ def test_view_set_ndisplay_dispatches(emitter_setup) -> None:
 
 def test_toggle_ndisplay_flips_target(emitter_setup) -> None:
     emitter, state, _loop_state, _ledger, dispatch = emitter_setup
-    state.dims_ndisplay_override = 2
 
     ok = emitter.toggle_ndisplay(origin='ui')
 

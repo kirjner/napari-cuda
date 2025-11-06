@@ -303,7 +303,7 @@ class NapariDimsIntentEmitter:
             return False
         nd_value = int(ndisplay)
         nd_target = 3 if nd_value >= 3 else 2
-        cur = control_actions.current_ndisplay(self._state)
+        cur = control_actions.current_ndisplay(self._state, self._ledger)
         if cur is not None and int(cur) == nd_target:
             return True
         ok, _ = _emit_state_update(
@@ -321,7 +321,7 @@ class NapariDimsIntentEmitter:
 
     def toggle_ndisplay(self, *, origin: str = "ui") -> bool:
         assert self._state.dims_ready, "ndisplay intents require dims ready"
-        current = current_ndisplay(self._state)
+        current = current_ndisplay(self._state, self._ledger)
         target = 2 if current == 3 else 3
         return self.view_set_ndisplay(target, origin=origin)
 

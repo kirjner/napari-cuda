@@ -58,8 +58,6 @@ class ControlStateContext:
 
     dims_ready: bool = False
     dims_spec: DimsSpec | None = None
-    dims_step_override: tuple[int, ...] | None = None
-    dims_ndisplay_override: int | None = None
     primary_axis_index: int | None = None
     session_id: Optional[str] = None
     ack_timeout_ms: Optional[int] = None
@@ -78,7 +76,6 @@ class ControlStateContext:
     volume_state: dict[str, Any] = field(default_factory=dict)
     multiscale_state: dict[str, Any] = field(default_factory=dict)
     camera_state: dict[str, Any] = field(default_factory=dict)
-    last_dims_spec: DimsSpec | None = None
 
     @classmethod
     def from_env(cls, env_cfg: Any) -> ControlStateContext:
@@ -105,20 +102,6 @@ class ControlStateContext:
         frame_id = f"state-{base}"
         return intent_id, frame_id
 
-    def dims_step(self) -> tuple[int, ...] | None:
-        if self.dims_step_override is not None:
-            return self.dims_step_override
-        spec = self.dims_spec
-        return None if spec is None else tuple(int(v) for v in spec.current_step)
-
-    def dims_ndisplay(self) -> int | None:
-        if self.dims_ndisplay_override is not None:
-            return self.dims_ndisplay_override
-        spec = self.dims_spec
-        return None if spec is None else int(spec.ndisplay)
-
-
-
 
 @dataclass
 class ControlRuntime:
@@ -132,16 +115,12 @@ class ControlRuntime:
 def on_state_connected(state: ControlStateContext) -> None:
     state.dims_ready = False
     state.dims_spec = None
-    state.dims_step_override = None
-    state.dims_ndisplay_override = None
     state.primary_axis_index = None
 
 
 def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContext) -> None:
     state.dims_ready = False
     state.dims_spec = None
-    state.dims_step_override = None
-    state.dims_ndisplay_override = None
     state.primary_axis_index = None
     loop_state.pending_intents.clear()
     loop_state.last_dims_spec = None
@@ -193,11 +172,14 @@ def _runtime_key(scope: str, target: str, key: str) -> str:
     return f"{scope}:{target}:{key}"
 
 
-def _dims_snapshot(state: ControlStateContext) -> tuple[DimsSpec, dict[str, Any]]:
-    spec = ensure_dims_spec(state)
-    state.last_dims_spec = spec
-    step = state.dims_step() or tuple(int(v) for v in spec.current_step)
-    ndisplay = state.dims_ndisplay()
+def viewer_update_from_dims_spec(
+    spec: DimsSpec,
+    *,
+    step: Sequence[int] | None = None,
+    ndisplay: int | None = None,
+) -> dict[str, Any]:
+    if step is None:
+        step = spec.current_step
     if ndisplay is None:
         ndisplay = int(spec.ndisplay)
     level_shapes = spec.level_shapes
@@ -209,7 +191,7 @@ def _dims_snapshot(state: ControlStateContext) -> tuple[DimsSpec, dict[str, Any]
     axis_labels = tuple(axis.label for axis in spec.axes)
     order = tuple(int(idx) for idx in spec.order)
     displayed = tuple(int(idx) for idx in spec.displayed)
-    viewer_update = {
+    return {
         'current_step': tuple(int(v) for v in step),
         'ndisplay': int(ndisplay),
         'ndim': int(spec.ndim),
@@ -218,13 +200,45 @@ def _dims_snapshot(state: ControlStateContext) -> tuple[DimsSpec, dict[str, Any]
         'axis_labels': axis_labels,
         'displayed': displayed,
     }
-    return spec, viewer_update
+
+
+def projected_dims_step(ledger: ClientStateLedger, spec: DimsSpec) -> tuple[int, ...]:
+    values: list[int] = []
+    for axis in spec.axes:
+        label = axis.label
+        pending = ledger.latest_pending_value('dims', label, 'index')
+        if pending is not None:
+            values.append(int(pending))
+            continue
+        confirmed = ledger.confirmed_value('dims', label, 'index')
+        if confirmed is not None:
+            values.append(int(confirmed))
+            continue
+        values.append(int(axis.current_step))
+    return tuple(values)
+
+
+def projected_ndisplay(ledger: ClientStateLedger, spec: DimsSpec) -> int:
+    pending = ledger.latest_pending_value('view', 'main', 'ndisplay')
+    if pending is not None:
+        return int(pending)
+    confirmed = ledger.confirmed_value('view', 'main', 'ndisplay')
+    if confirmed is not None:
+        return int(confirmed)
+    return int(spec.ndisplay)
 
 
 def ensure_dims_spec(state: ControlStateContext) -> DimsSpec:
     spec = state.dims_spec
     assert spec is not None, "dims_spec must be available"
     return spec
+
+
+def current_ndisplay(state: ControlStateContext, ledger: ClientStateLedger) -> Optional[int]:
+    spec = state.dims_spec
+    if spec is None:
+        return None
+    return projected_ndisplay(ledger, spec)
 
 
 def _emit_state_update(
@@ -313,82 +327,6 @@ def _mirror_viewer_dims(viewer_obj, ui_call, update: Mapping[str, Any]) -> None:
         _apply()
 
 
-def handle_dims_ack(
-    state: ControlStateContext,
-    loop_state: ClientLoopState,
-    outcome: AckReconciliation,
-    *,
-    presenter: Optional[PresenterFacade] = None,
-    viewer_ref=None,
-    ui_call=None,
-    log_dims_info: bool = False,
-) -> None:
-    if outcome.scope != "dims":
-        return
-
-    _update_runtime_from_ack_outcome(state, outcome)
-
-    spec = ensure_dims_spec(state)
-    axis_idx: Optional[int] = None
-    if outcome.target is not None:
-        axis_idx = dims_spec_axis_index_for_target(spec, str(outcome.target))
-
-    if outcome.status == "accepted":
-        spec, viewer_update = _dims_snapshot(state)
-        loop_state.last_dims_spec = spec
-        if presenter is not None:
-            presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
-        if log_dims_info and axis_idx is not None and outcome.applied_value is not None:
-            logger.info(
-                "dims ack accepted: axis=%s value=%s",
-                axis_idx,
-                outcome.applied_value,
-            )
-        logger.debug(
-            "ack.state dims accepted: target=%s key=%s pending=%d",
-            outcome.target,
-            outcome.key,
-            outcome.pending_len,
-        )
-        return
-
-    error = outcome.error or {}
-    logger.warning(
-        "ack.state dims rejected: axis=%s target=%s key=%s code=%s message=%s details=%s",
-        axis_idx,
-        outcome.target,
-        outcome.key,
-        error.get("code"),
-        error.get("message"),
-        error.get("details"),
-    )
-
-    confirmed_value = outcome.confirmed_value
-    if axis_idx is not None and confirmed_value is not None:
-        base_step = list(int(v) for v in spec.current_step)
-        while len(base_step) <= axis_idx:
-            base_step.append(0)
-        base_step[axis_idx] = int(confirmed_value)
-        state.dims_step_override = tuple(base_step)
-        state.primary_axis_index = dims_spec_primary_axis(spec)
-    spec, viewer_update = _dims_snapshot(state)
-    loop_state.last_dims_spec = spec
-    if presenter is not None:
-        presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
-
-    if log_dims_info and axis_idx is not None:
-        logger.info(
-            "dims intent reverted: axis=%s target=%s value=%s",
-            axis_idx,
-            outcome.target,
-            confirmed_value,
-        )
-
-    viewer = viewer_ref() if callable(viewer_ref) else viewer_ref
-    assert viewer is not None, "viewer reference must be available"
-    _mirror_viewer_dims(viewer, ui_call, viewer_update)
-
-
 def handle_generic_ack(
     state: ControlStateContext,
     loop_state: ClientLoopState,
@@ -417,33 +355,6 @@ def handle_generic_ack(
         scope = outcome.scope
         key = outcome.key or ""
 
-        if scope == 'view':
-            if key == 'ndisplay' and confirmed_value is not None:
-                state.dims_ndisplay_override = int(confirmed_value)
-                spec, viewer_update = _dims_snapshot(state)
-                loop_state.last_dims_spec = spec
-                if presenter is not None:
-                    presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
-            return
-
-        if scope == 'dims':
-            axis_idx: Optional[int] = None
-            if outcome.target is not None:
-                axis_idx = dims_spec_axis_index_for_target(ensure_dims_spec(state), str(outcome.target))
-            if axis_idx is not None and confirmed_value is not None:
-                spec = ensure_dims_spec(state)
-                base_step = list(int(v) for v in spec.current_step)
-                while len(base_step) <= axis_idx:
-                    base_step.append(0)
-                base_step[axis_idx] = int(confirmed_value)
-                state.dims_step_override = tuple(base_step)
-                state.primary_axis_index = dims_spec_primary_axis(spec)
-                spec, viewer_update = _dims_snapshot(state)
-                loop_state.last_dims_spec = spec
-                if presenter is not None:
-                    presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
-            return
-
         return
 
     logger.debug(
@@ -461,20 +372,10 @@ def handle_generic_ack(
     if scope == 'view':
         if confirmed_value is not None:
             state.view_state[key] = confirmed_value
-            if key == 'ndisplay':
-                state.dims_ndisplay_override = int(confirmed_value)
-                spec, viewer_update = _dims_snapshot(state)
-                loop_state.last_dims_spec = spec
-                if presenter is not None:
-                    presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
     elif scope == 'volume' and confirmed_value is not None:
         state.volume_state[key] = confirmed_value
     elif scope == 'multiscale' and confirmed_value is not None:
         state.multiscale_state[key] = confirmed_value
-
-
-def current_ndisplay(state: ControlStateContext) -> Optional[int]:
-    return state.dims_ndisplay()
 
 
 def handle_key_event(
@@ -717,7 +618,7 @@ def volume_set_rendering(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state):
+    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
         return False
     if _rate_gate_settings(state, origin):
         return False
@@ -746,7 +647,7 @@ def volume_set_clim(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state):
+    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
         return False
     if _rate_gate_settings(state, origin):
         return False
@@ -774,7 +675,7 @@ def volume_set_colormap(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state):
+    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
         return False
     if _rate_gate_settings(state, origin):
         return False
@@ -801,7 +702,7 @@ def volume_set_opacity(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state):
+    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
         return False
     if _rate_gate_settings(state, origin):
         return False
@@ -829,7 +730,7 @@ def volume_set_sample_step(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state):
+    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
         return False
     if _rate_gate_settings(state, origin):
         return False
@@ -907,12 +808,24 @@ def multiscale_set_level(
     return ok
 
 
-def hud_snapshot(state: ControlStateContext, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
+def hud_snapshot(
+    state: ControlStateContext,
+    ledger: ClientStateLedger,
+    *,
+    video_size: tuple[Optional[int], Optional[int]],
+    zoom_state: dict[str, object],
+) -> dict[str, object]:
     spec = state.dims_spec
     snap: dict[str, object] = {}
-    snap['ndisplay'] = state.dims_ndisplay()
-    snap['volume'] = None if spec is None else bool(not spec.plane_mode)
-    snap['vol_mode'] = bool(_is_volume_mode(state))
+    if spec is not None:
+        ndisplay = projected_ndisplay(ledger, spec)
+        snap['volume'] = bool(not spec.plane_mode)
+        snap['vol_mode'] = bool(not spec.plane_mode and ndisplay >= 3)
+        snap['ndisplay'] = int(ndisplay)
+    else:
+        snap['volume'] = None
+        snap['vol_mode'] = False
+        snap['ndisplay'] = None
 
     rendering = state.volume_state.get('rendering') if state.volume_state else None
     clim = state.volume_state.get('contrast_limits') if state.volume_state else None
@@ -982,13 +895,11 @@ def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
     return False
 
 
-def _is_volume_mode(state: ControlStateContext) -> bool:
-    ndisplay = state.dims_ndisplay()
-    if ndisplay is None:
-        return False
+def _is_volume_mode(state: ControlStateContext, ledger: ClientStateLedger) -> bool:
     spec = state.dims_spec
     if spec is None:
-        return ndisplay >= 3
+        return False
+    ndisplay = projected_ndisplay(ledger, spec)
     return (not spec.plane_mode) and ndisplay >= 3
 
 

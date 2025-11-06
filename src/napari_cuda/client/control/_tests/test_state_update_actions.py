@@ -216,8 +216,6 @@ def _set_state_spec(
     )
     assert spec is not None
     state.dims_spec = spec
-    state.dims_step_override = tuple(int(v) for v in spec.current_step)
-    state.dims_ndisplay_override = int(spec.ndisplay)
     return frame
 
 
@@ -339,7 +337,7 @@ def test_handle_dims_update_modes_volume_flag() -> None:
     spec = state.dims_spec
     assert spec is not None
     assert spec.plane_mode is False
-    assert control_actions.current_ndisplay(state) == 3
+    assert control_actions.current_ndisplay(state, ledger) == 3
     assert loop_state.last_dims_spec == spec
     assert presenter.calls[-1]['viewer']['ndisplay'] == 3
 
@@ -457,6 +455,7 @@ def test_hud_snapshot_carries_volume_state() -> None:
 
     snap = control_actions.hud_snapshot(
         state,
+        ledger,
         video_size=(None, None),
         zoom_state={},
     )
@@ -564,7 +563,6 @@ def test_dims_notify_populates_multiscale_state() -> None:
 
 def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     state, loop_state, ledger, dispatch = _make_state()
-    state.dims_ready = True
     viewer = ViewerStub()
     presenter = PresenterStub()
 
@@ -575,9 +573,8 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
         viewer_ref=lambda: viewer,
         ui_call=None,
         presenter=presenter,
-        log_dims_info=False,
+        log_dims_info=True,
     )
-
     emitter = NapariDimsIntentEmitter(
         ledger=ledger,
         state=state,
@@ -600,19 +597,17 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     )
     mirror.ingest_dims_notify(frame)
 
-
     pending = ledger.apply_local(
         'dims',
-        '0',
+        'z',
         'index',
-        148,
+        200,
         'start',
         intent_id='intent-1',
         frame_id='state-1',
-        metadata={'axis_index': 0, 'axis_target': '0', 'update_kind': 'index'},
+        metadata={'axis_index': 0, 'axis_target': 'z', 'update_kind': 'index'},
     )
     assert pending is not None
-    assert pending.metadata is not None
 
     ack = build_ack_state(
         session_id='sess-1',
@@ -628,20 +623,12 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     )
 
     outcome = ledger.apply_ack(ack)
-    control_actions.handle_dims_ack(
-        state,
-        loop_state,
-        outcome,
-        presenter=presenter,
-        viewer_ref=lambda: viewer,
-        ui_call=None,
-        log_dims_info=True,
-    )
+    mirror.handle_ack(outcome)
 
-    current_step = state.dims_step()
-    assert current_step is not None and current_step[0] == 271
-    assert len(viewer.calls) >= 1, "viewer should receive applied dims update"
-    assert len(presenter.calls) >= 1, "presenter should receive applied dims update"
+    assert viewer.calls, "viewer should receive applied dims update"
+    assert viewer.calls[-1]['current_step'][0] == 271
+    assert presenter.calls, "presenter should receive applied dims update"
+    assert presenter.calls[-1]['viewer']['current_step'][0] == 271
 
 
 def test_dims_step_attaches_axis_metadata() -> None:
@@ -711,8 +698,6 @@ def test_dims_set_index_suppresses_duplicate_value() -> None:
 
 def test_handle_dims_ack_rejected_reverts_projection() -> None:
     state, loop_state, ledger, dispatch = _make_state()
-    state.dims_ready = False
-
     presenter = PresenterStub()
     viewer_updates: list[dict[str, Any]] = []
 
@@ -752,10 +737,8 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
         order=[0],
         displayed=[0],
     )
-
     mirror.ingest_dims_notify(frame)
 
-    # Emit a new intent that should be rejected
     emitter.dims_set_index('primary', 7, origin='ui')
 
     pending, _ = dispatch.calls[-1]
@@ -766,19 +749,10 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
     )
     outcome = ledger.apply_ack(ack)
 
-    control_actions.handle_dims_ack(
-        state,
-        loop_state,
-        outcome,
-        presenter=presenter,
-        viewer_ref=lambda: viewer,
-        ui_call=None,
-        log_dims_info=False,
-    )
+    mirror.handle_ack(outcome)
 
-    current_step = state.dims_step()
-    assert current_step is not None and current_step[0] == 4
-    assert viewer_updates
+    assert viewer_updates, "viewer should receive reverted dims update"
+    assert viewer_updates[-1]['current_step'][0] == 4
 
 
 def test_handle_generic_ack_updates_view_metadata() -> None:
@@ -812,7 +786,7 @@ def test_handle_generic_ack_updates_view_metadata() -> None:
     presenter = PresenterStub()
     control_actions.handle_generic_ack(state, loop_state, outcome, presenter=presenter)
 
-    assert control_actions.current_ndisplay(state) == 2
+    assert control_actions.current_ndisplay(state, ledger) == 2
 
 
 def test_camera_zoom_bypasses_dedupe() -> None:

@@ -10,6 +10,7 @@ from qtpy import QtCore
 
 from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.control.client_state_ledger import (
+    AckReconciliation,
     ClientStateLedger,
     MirrorEvent,
 )
@@ -80,8 +81,6 @@ class NapariDimsMirror:
         assert isinstance(dims_spec, DimsSpec), 'notify.dims requires dims_spec'
 
         state.dims_spec = dims_spec
-        state.dims_step_override = tuple(int(value) for value in dims_spec.current_step)
-        state.dims_ndisplay_override = int(dims_spec.ndisplay)
         state.primary_axis_index = dims_spec_primary_axis(dims_spec)
 
         multiscale_snapshot = _build_multiscale_snapshot(payload)
@@ -97,8 +96,8 @@ class NapariDimsMirror:
             state.multiscale_state = {}
         self._apply_multiscale_to_presenter(multiscale_snapshot)
 
-        spec, viewer_update = control_actions._dims_snapshot(state)
-        self._loop_state.last_dims_spec = spec
+        viewer_update = control_actions.viewer_update_from_dims_spec(dims_spec)
+        self._loop_state.last_dims_spec = dims_spec
 
         axis_labels = viewer_update['axis_labels']
         current_step = viewer_update['current_step']
@@ -141,20 +140,20 @@ class NapariDimsMirror:
             logger.debug(
                 'ingest_dims_notify: frame=%s step=%s level=%s shape=%s',
                 frame.envelope.frame_id,
-                list(current_step),
+                list(viewer_update['current_step']),
                 level_val,
                 viewer_update['dims_range'],
             )
-        if current_step and self._log_dims_info:
+        if viewer_update['current_step'] and self._log_dims_info:
             logger.info(
                 'notify.dims: step=%s ndisplay=%s order=%s labels=%s',
-                current_step,
-                ndisplay,
-                order,
-                axis_labels,
+                viewer_update['current_step'],
+                viewer_update['ndisplay'],
+                viewer_update['order'],
+                viewer_update['axis_labels'],
             )
 
-        self._mirror_confirmed_dims(reason='notify', spec=spec, viewer_update=viewer_update)
+        self._mirror_confirmed_dims(reason='notify', spec=dims_spec)
 
 
     def replay_last_spec(self) -> None:
@@ -164,6 +163,59 @@ class NapariDimsMirror:
         if spec is None:
             return
         self._mirror_confirmed_dims(reason="replay", spec=spec)
+
+    def handle_ack(self, outcome: AckReconciliation) -> None:
+        scope = outcome.scope
+        if scope == 'dims':
+            spec = control_actions.ensure_dims_spec(self._state)
+            axis_idx: Optional[int] = None
+            if outcome.target is not None:
+                axis_idx = dims_spec_axis_index_for_target(spec, str(outcome.target))
+            if outcome.status == 'accepted':
+                if self._log_dims_info and axis_idx is not None and outcome.applied_value is not None:
+                    logger.info(
+                        "dims ack accepted: axis=%s value=%s",
+                        axis_idx,
+                        outcome.applied_value,
+                    )
+                logger.debug(
+                    "ack.state dims accepted: target=%s key=%s pending=%d",
+                    outcome.target,
+                    outcome.key,
+                    outcome.pending_len,
+                )
+            else:
+                error = outcome.error or {}
+                logger.warning(
+                    "ack.state dims rejected: axis=%s target=%s key=%s code=%s message=%s details=%s",
+                    axis_idx,
+                    outcome.target,
+                    outcome.key,
+                    error.get("code"),
+                    error.get("message"),
+                    error.get("details"),
+                )
+                if self._log_dims_info and axis_idx is not None:
+                    logger.info(
+                        "dims intent reverted: axis=%s target=%s value=%s",
+                        axis_idx,
+                        outcome.target,
+                        outcome.confirmed_value,
+                    )
+            self._mirror_confirmed_dims(reason="ack:dims", spec=spec)
+            return
+
+        if scope == 'view' and outcome.target == 'main' and outcome.key == 'ndisplay':
+            if outcome.status != 'accepted':
+                error = outcome.error or {}
+                logger.warning(
+                    "ack.state view rejected: key=ndisplay code=%s message=%s details=%s",
+                    error.get("code"),
+                    error.get("message"),
+                    error.get("details"),
+                )
+            self._mirror_confirmed_dims(reason="ack:ndisplay")
+            return
 
     def refresh_from_state(self, *, reason: str) -> None:
         """Mirror the current consumer dims state into the viewer."""
@@ -195,20 +247,16 @@ class NapariDimsMirror:
                 update.metadata,
             )
 
-        value_int = int(update.value)
-
-        state = self._state
-        step_snapshot = state.dims_step()
-        current = list(step_snapshot or spec.current_step)
-        while len(current) <= axis_idx:
-            current.append(0)
-        current[axis_idx] = value_int
-        state.dims_step_override = tuple(int(v) for v in current)
-        state.primary_axis_index = dims_spec_primary_axis(spec)
-        self._mirror_confirmed_dims(reason=f"axis:{axis_idx}")
+        self._mirror_confirmed_dims(reason=f"axis:{axis_idx}", spec=spec)
 
     def _handle_ndisplay_update(self, update: MirrorEvent) -> None:
-        self._state.dims_ndisplay_override = int(update.value)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "dims ledger update: target=%s key=ndisplay value=%s metadata=%s",
+                update.target,
+                update.value,
+                update.metadata,
+            )
         self._mirror_confirmed_dims(reason="ndisplay")
 
     def _mirror_confirmed_dims(
@@ -216,43 +264,46 @@ class NapariDimsMirror:
         *,
         reason: str,
         spec: Optional[DimsSpec] = None,
-        viewer_update: Optional[Mapping[str, Any]] = None,
     ) -> None:
-        if spec is None or viewer_update is None:
-            spec, viewer_update = control_actions._dims_snapshot(self._state)
-        else:
-            viewer_update = dict(viewer_update)
-            self._state.last_dims_spec = spec
-        assert spec is not None
-        assert viewer_update is not None
+        if spec is None:
+            spec = control_actions.ensure_dims_spec(self._state)
+
+        step = control_actions.projected_dims_step(self._ledger, spec)
+        ndisplay = control_actions.projected_ndisplay(self._ledger, spec)
+        viewer_update_local = control_actions.viewer_update_from_dims_spec(
+            spec,
+            step=step,
+            ndisplay=ndisplay,
+        )
 
         self._loop_state.last_dims_spec = spec
+        self._state.primary_axis_index = dims_spec_primary_axis(spec)
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(
                 "dims mirror (%s): step=%s range=%s",
                 reason,
-                viewer_update.get('current_step'),
-                viewer_update.get('dims_range'),
+                viewer_update_local['current_step'],
+                viewer_update_local['dims_range'],
             )
 
-        if self._log_dims_info and viewer_update.get('current_step') is not None:
+        if self._log_dims_info and viewer_update_local['current_step']:
             logger.info(
                 "dims mirror (%s): step=%s ndisplay=%s",
                 reason,
-                viewer_update.get('current_step'),
-                viewer_update.get('ndisplay'),
+                viewer_update_local['current_step'],
+                viewer_update_local['ndisplay'],
             )
 
         emitter = self._emitter
         assert emitter is not None, "mirror requires a dims emitter"
         with emitter.suppressing():
             if self._presenter is not None:
-                self._presenter.apply_dims_update(spec=spec, viewer_update=viewer_update)
+                self._presenter.apply_dims_update(spec=spec, viewer_update=viewer_update_local)
 
         viewer = self._viewer_ref() if callable(self._viewer_ref) else self._viewer_ref  # type: ignore[misc]
         assert viewer is not None, "viewer reference must be alive"
-        control_actions._mirror_viewer_dims(viewer, self._ui_call, viewer_update)
+        control_actions._mirror_viewer_dims(viewer, self._ui_call, viewer_update_local)
 
     def _apply_multiscale_to_presenter(self, multiscale: Mapping[str, Any] | None) -> None:
         self._last_multiscale_snapshot = dict(multiscale) if multiscale is not None else None
