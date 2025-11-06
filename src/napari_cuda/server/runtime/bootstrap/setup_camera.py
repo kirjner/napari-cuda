@@ -236,12 +236,14 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
 
     worker._viewport_state.mode = RenderMode.VOLUME
 
+    descriptor = source.level_descriptors[int(context.level)]
+    shape_tuple = tuple(int(dim) for dim in descriptor.shape)
+
     intent = LevelSwitchIntent(
         desired_level=int(requested_level),
         selected_level=int(context.level),
         reason="ndisplay-3d",
         previous_level=int(worker._current_level_index()),
-        context=context,
         oversampling={},
         timestamp=decision.timestamp,
         downgraded=bool(downgraded),
@@ -250,6 +252,7 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
         mode=worker.viewport_state.mode,
         plane_state=deepcopy(worker.viewport_state.plane),
         volume_state=deepcopy(worker.viewport_state.volume),
+        level_shape=shape_tuple,
     )
     logger.info(
         "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
@@ -341,18 +344,21 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
         last_step=step_tuple,
     )
     facade.apply_plane_metadata(source, context)
+    descriptor = source.level_descriptors[int(context.level)]
+    shape_tuple = tuple(int(dim) for dim in descriptor.shape)
+
     intent = LevelSwitchIntent(
         desired_level=int(lvl_idx),
         selected_level=int(context.level),
         reason="ndisplay-2d",
         previous_level=int(worker._current_level_index()),
-        context=context,
         oversampling={},
         timestamp=decision.timestamp,
         downgraded=False,
         mode=worker.viewport_state.mode,
         plane_state=deepcopy(worker.viewport_state.plane),
         volume_state=deepcopy(worker.viewport_state.volume),
+        level_shape=shape_tuple,
     )
 
     callback = worker._level_intent_callback

@@ -363,11 +363,6 @@ class EGLHeadlessServer:
             logger.debug("level intent dropped (no active worker)")
             return
 
-        context = intent.context
-        if context is None:
-            logger.warning("level intent dropped (missing context)")
-            return
-
         intent_mode = intent.mode if intent.mode is not None else RenderMode.PLANE
         if not isinstance(intent_mode, RenderMode):
             try:
@@ -376,17 +371,17 @@ class EGLHeadlessServer:
                 intent_mode = RenderMode.PLANE
 
         if logger.isEnabledFor(logging.INFO):
-            context_level = int(context.level)
             logger.info(
                 "apply.level_intent: prev=%d target=%d reason=%s downgraded=%s",
                 int(intent.previous_level),
-                context_level,
+                int(intent.selected_level),
                 intent.reason,
                 bool(intent.downgraded),
             )
         reduce_level_update(
             self._state_ledger,
-            applied=context,
+            level=int(intent.selected_level),
+            level_shape=tuple(int(dim) for dim in intent.level_shape) if intent.level_shape is not None else None,
             downgraded=bool(intent.downgraded),
             intent_id=None,
             timestamp=None,

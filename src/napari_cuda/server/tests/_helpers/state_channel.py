@@ -899,10 +899,11 @@ class StateServerHarness:
         server._state_send = self._state_send  # type: ignore[assignment]
         server._scene_source = worker._ensure_scene_source()
 
-        def _commit_level(applied, downgraded):
+        def _commit_level(level: int, *, level_shape: tuple[int, ...] | None = None, downgraded: bool):
             reduce_level_update(
                 server._state_ledger,
-                applied=applied,
+                level=int(level),
+                level_shape=tuple(int(dim) for dim in level_shape) if level_shape is not None else None,
                 downgraded=bool(downgraded),
                 origin="harness.level",
             )

@@ -283,12 +283,14 @@ class EGLRendererWorker:
         )
         apply_plane_metadata(self, source, context)
 
+        descriptor = source.level_descriptors[int(context.level)]
+        shape_tuple = tuple(int(dim) for dim in descriptor.shape)
+
         intent = LevelSwitchIntent(
             desired_level=int(target),
             selected_level=int(context.level),
             reason="manual",
             previous_level=int(self._current_level_index()),
-            context=context,
             oversampling={},
             timestamp=decision.timestamp,
             downgraded=bool(downgraded),
@@ -297,6 +299,7 @@ class EGLRendererWorker:
             mode=self.viewport_state.mode,
             plane_state=deepcopy(self.viewport_state.plane),
             volume_state=deepcopy(self.viewport_state.volume),
+            level_shape=shape_tuple,
         )
 
         if logger.isEnabledFor(logging.INFO):
@@ -573,12 +576,14 @@ class EGLRendererWorker:
         else:
             apply_plane_metadata(apply_iface, source, context)
 
+        descriptor = source.level_descriptors[int(context.level)]
+        shape_tuple = tuple(int(dim) for dim in descriptor.shape)
+
         intent = LevelSwitchIntent(
             desired_level=int(decision.desired_level),
             selected_level=int(context.level),
             reason=decision.reason,
             previous_level=current_level,
-            context=context,
             oversampling=decision.oversampling,
             timestamp=decision.timestamp,
             downgraded=decision.downgraded,
@@ -587,6 +592,7 @@ class EGLRendererWorker:
             mode=self.viewport_state.mode,
             plane_state=deepcopy(self.viewport_state.plane),
             volume_state=deepcopy(self.viewport_state.volume),
+            level_shape=shape_tuple,
         )
 
         logger.info(

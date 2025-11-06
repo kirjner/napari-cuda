@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from napari_cuda.server.data.lod import LevelContext
 from napari_cuda.server.scene.viewport import (
     PlaneState,
     RenderMode,
@@ -21,7 +20,6 @@ class LevelSwitchIntent:
     selected_level: int
     reason: str
     previous_level: int
-    context: LevelContext
     oversampling: Mapping[int, float]
     timestamp: float
     downgraded: bool
@@ -30,6 +28,7 @@ class LevelSwitchIntent:
     mode: RenderMode = RenderMode.PLANE
     plane_state: PlaneState | None = None
     volume_state: VolumeState | None = None
+    level_shape: tuple[int, ...] | None = None
 
 
 __all__ = ["LevelSwitchIntent"]

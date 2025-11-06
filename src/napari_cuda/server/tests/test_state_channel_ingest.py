@@ -440,8 +440,7 @@ async def _test_roi_applied_once_on_level_switch() -> None:
         )
         assert ack["payload"]["status"] == "accepted"
 
-        applied = lod.LevelContext(level=1, step=(0, 0, 0), z_index=0, shape=(16, 480, 640), scale_yx=(1.0, 1.0), contrast=(0.0, 1.0), axes="zyx", dtype="float32")
-        harness.server._commit_level(applied, downgraded=False)
+        harness.server._commit_level(level=1, level_shape=(16, 480, 640), downgraded=False)
         await harness.drain_scheduled()
 
         assert len(roi_calls) == 1

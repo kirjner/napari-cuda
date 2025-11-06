@@ -1388,7 +1388,8 @@ def test_reduce_level_update_records_viewport_state() -> None:
 
         reduce_level_update(
             ledger,
-            applied={"level": 1, "step": (4, 0, 0), "shape": (16, 512, 512)},
+            level=1,
+            level_shape=(16, 512, 512),
             downgraded=False,
             intent_id="level-test",
             origin="test.level",
@@ -1443,7 +1444,8 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
 
         reduce_level_update(
             ledger,
-            applied={"level": 0, "step": (2, 0, 0), "shape": (32, 512, 512)},
+            level=0,
+            level_shape=(32, 512, 512),
             downgraded=False,
             origin="test.level",
             mode=RenderMode.PLANE,

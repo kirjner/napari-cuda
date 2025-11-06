@@ -101,6 +101,58 @@ def _axis_extents_for_steps(steps: Sequence[int]) -> tuple[AxisExtent, ...]:
     return tuple(extents)
 
 
+def _remap_step_for_level(
+    spec: DimsSpec,
+    *,
+    target_level: int,
+    level_shapes: tuple[tuple[int, ...], ...],
+) -> tuple[int, ...]:
+    """Project the current step onto ``target_level`` honoring axis bounds."""
+
+    axis_count = len(spec.axes)
+    if axis_count <= 0:
+        return tuple()
+
+    current_step = list(int(v) for v in spec.current_step)
+    if len(current_step) < axis_count:
+        current_step.extend(0 for _ in range(axis_count - len(current_step)))
+    elif len(current_step) > axis_count:
+        current_step = current_step[:axis_count]
+
+    prev_level = max(0, min(int(spec.current_level), max(0, len(level_shapes) - 1)))
+    target_idx = max(0, min(int(target_level), max(0, len(level_shapes) - 1)))
+
+    prev_shape = level_shapes[prev_level] if 0 <= prev_level < len(level_shapes) else ()
+    target_shape = level_shapes[target_idx] if 0 <= target_idx < len(level_shapes) else ()
+
+    remapped: list[int] = []
+    for axis_index in range(axis_count):
+        prev_len = int(prev_shape[axis_index]) if axis_index < len(prev_shape) else None
+        target_len = int(target_shape[axis_index]) if axis_index < len(target_shape) else prev_len
+
+        value = current_step[axis_index]
+        if prev_len is not None and prev_len > 0:
+            value = max(0, min(value, prev_len - 1))
+        else:
+            value = max(0, value)
+
+        if (
+            prev_len is None
+            or target_len is None
+            or prev_len <= 1
+            or target_len <= 1
+        ):
+            mapped = value if target_len is None else max(0, min(value, target_len - 1))
+        else:
+            ratio = float(target_len - 1) / float(prev_len - 1)
+            mapped = int(round(float(value) * ratio))
+            mapped = max(0, min(mapped, target_len - 1))
+
+        remapped.append(int(mapped))
+
+    return tuple(remapped)
+
+
 def normalize_clim(lo: object, hi: object) -> tuple[float, float]:
     lo_f = float(lo)
     hi_f = float(hi)
@@ -1623,7 +1675,8 @@ def reduce_volume_restore(
 def reduce_level_update(
     ledger: ServerStateLedger,
     *,
-    applied: Mapping[str, Any] | object,
+    level: int,
+    level_shape: Sequence[int] | None = None,
     downgraded: Optional[bool] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
@@ -1635,47 +1688,25 @@ def reduce_level_update(
     ts = _now(timestamp)
     metadata = {"intent_id": intent_id} if intent_id else None
 
-    def _applied_value(attr: str, default: Any = None) -> Any:
-        if hasattr(applied, attr):
-            return getattr(applied, attr)
-        if isinstance(applied, Mapping):
-            return applied.get(attr, default)
-        return default
-
-    level_raw = _applied_value("level")
-    if level_raw is None:
-        entry = ledger.get("multiscale", "main", "level")
-        if entry is not None and isinstance(entry.value, int):
-            level_raw = entry.value
-    if level_raw is None:
-        raise ValueError("level update requires a level index")
-    level = int(level_raw)
-
-    step_raw = _applied_value("step")
-    step_tuple: Optional[tuple[int, ...]] = None
-    if step_raw is not None:
-        step_tuple = tuple(int(v) for v in step_raw)
-
-    shape_raw = _applied_value("shape")
-    shape_tuple: Optional[tuple[int, ...]] = None
-    if shape_raw is not None:
-        shape_tuple = tuple(int(v) for v in shape_raw)
-
+    level_value = int(level)
     dims_payload = _ledger_dims_payload(ledger)
-    current_step = tuple(int(v) for v in dims_payload.current_step)
-    if step_tuple is None:
-        step_tuple = current_step
+    spec = dims_payload.dims_spec
+    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     level_shapes_payload: list[tuple[int, ...]] = []
     if dims_payload.level_shapes:
         level_shapes_payload = [tuple(int(v) for v in shape) for shape in dims_payload.level_shapes]
-    if shape_tuple is not None:
-        while len(level_shapes_payload) <= level:
+    if level_shape is not None:
+        shape_tuple = tuple(int(v) for v in level_shape)
+        while len(level_shapes_payload) <= level_value:
             level_shapes_payload.append(shape_tuple)
-        level_shapes_payload[level] = shape_tuple
+        level_shapes_payload[level_value] = shape_tuple
     updated_level_shapes = tuple(level_shapes_payload) if level_shapes_payload else tuple()
+    level_shapes_final = updated_level_shapes if updated_level_shapes else spec.level_shapes
 
-    step_metadata = {"source": "worker.level_update", "level": level}
+    step_tuple = _remap_step_for_level(spec, target_level=level_value, level_shapes=level_shapes_final)
+
+    step_metadata = {"source": "worker.level_update", "level": level_value}
     if intent_id is not None:
         step_metadata["intent_id"] = intent_id
     plane_struct: Optional[PlaneState] = None
@@ -1687,11 +1718,6 @@ def reduce_level_update(
         mode_value = mode.name if isinstance(mode, RenderMode) else str(mode)
 
     next_op_seq = _next_scene_op_seq(ledger)
-
-    spec = dims_payload.dims_spec
-    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
-
-    level_shapes_final = updated_level_shapes if updated_level_shapes else spec.level_shapes
     axes_list: list[AxesSpecAxis] = []
     for axis in spec.axes:
         axis_index = int(axis.index)
@@ -1710,7 +1736,7 @@ def reduce_level_update(
 
     new_spec = replace(
         spec,
-        current_level=int(level),
+        current_level=level_value,
         current_step=step_tuple,
         level_shapes=tuple(level_shapes_final),
         axes=tuple(axes_list),
@@ -1718,7 +1744,7 @@ def reduce_level_update(
 
     stored_entries = apply_level_switch_transaction(
         ledger=ledger,
-        level=level,
+        level=level_value,
         step=step_tuple,
         dims_spec_payload=_serialize_dims_spec(new_spec),
         level_shapes=updated_level_shapes if updated_level_shapes else None,
@@ -1743,7 +1769,7 @@ def reduce_level_update(
 
     logger.debug(
         "multiscale intent updated level=%d version=%s origin=%s",
-        level,
+        level_value,
         level_version,
         origin,
     )
@@ -1761,7 +1787,7 @@ def reduce_level_update(
         scope="multiscale",
         target="main",
         key="level",
-        value=level,
+        value=level_value,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,

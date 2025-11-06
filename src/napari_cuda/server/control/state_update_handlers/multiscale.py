@@ -55,7 +55,7 @@ async def handle_multiscale_level(ctx: "StateUpdateContext") -> bool:
     try:
         result = reduce_level_update(
             server._state_ledger,
-            applied={"level": int(level)},
+            level=int(level),
             intent_id=ctx.intent_id,
             timestamp=ctx.timestamp,
             origin='client.state.multiscale',
