@@ -34,8 +34,6 @@ def _apply_plane_restore_from_ledger(
 ) -> bool:
     ledger = server._state_ledger
     with server._state_lock:
-        lvl_entry = ledger.get("view_cache", "plane", "level")
-        step_entry = ledger.get("view_cache", "plane", "step")
         plane_entry = ledger.get("viewport", "plane", "state")
 
     if plane_entry is None or not isinstance(plane_entry.value, Mapping):
@@ -44,20 +42,12 @@ def _apply_plane_restore_from_ledger(
 
     plane_state = PlaneState(**dict(plane_entry.value))  # type: ignore[arg-type]
 
-    level_value: Optional[int] = None
-    if lvl_entry is not None and isinstance(lvl_entry.value, int):
-        level_value = int(lvl_entry.value)
-    if level_value is None:
-        level_value = plane_state.applied_level or plane_state.target_level
-
+    level_value = plane_state.applied_level or plane_state.target_level
     step_value: Optional[tuple[int, ...]] = None
-    if step_entry is not None and isinstance(step_entry.value, (tuple, list)):
-        step_value = tuple(int(v) for v in step_entry.value)
-    if step_value is None:
-        if plane_state.applied_step is not None:
-            step_value = tuple(int(v) for v in plane_state.applied_step)
-        elif plane_state.target_step is not None:
-            step_value = tuple(int(v) for v in plane_state.target_step)
+    if plane_state.applied_step is not None:
+        step_value = tuple(int(v) for v in plane_state.applied_step)
+    elif plane_state.target_step is not None:
+        step_value = tuple(int(v) for v in plane_state.target_step)
 
     center_value: Optional[tuple[float, float, float]] = None
     if plane_state.pose.center is not None:
@@ -69,9 +59,9 @@ def _apply_plane_restore_from_ledger(
 
     missing: list[str] = []
     if level_value is None:
-        missing.append("view_cache.plane.level")
+        missing.append("plane_state.level")
     if step_value is None:
-        missing.append("view_cache.plane.step")
+        missing.append("plane_state.step")
     if center_value is None:
         missing.append("viewport.plane.state.pose.center")
     if zoom_value is None:
@@ -136,7 +126,6 @@ def _apply_volume_restore_from_ledger(
     ledger = server._state_ledger
     with server._state_lock:
         volume_entry = ledger.get("viewport", "volume", "state")
-        level_entry = ledger.get("multiscale", "main", "level")
         center_entry = ledger.get("camera_volume", "main", "center")
         angles_entry = ledger.get("camera_volume", "main", "angles")
         distance_entry = ledger.get("camera_volume", "main", "distance")
@@ -149,8 +138,6 @@ def _apply_volume_restore_from_ledger(
     volume_state = VolumeState(**dict(volume_entry.value))  # type: ignore[arg-type]
 
     level_value: Optional[int] = volume_state.level
-    if level_value is None and level_entry is not None and isinstance(level_entry.value, int):
-        level_value = int(level_entry.value)
 
     center_value = volume_state.pose.center
     if (center_value is None or len(center_value) < 3) and center_entry is not None and center_entry.value is not None:

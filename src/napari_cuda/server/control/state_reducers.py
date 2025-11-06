@@ -171,27 +171,12 @@ def _store_plane_state(
     metadata: Optional[Mapping[str, Any]],
 ) -> None:
     payload = asdict(plane_state)
-    entries: list[tuple] = []
+    entry: tuple
     if metadata:
-        meta = dict(metadata)
-        entries.append(("viewport", "plane", "state", payload, meta))
+        entry = ("viewport", "plane", "state", payload, dict(metadata))
     else:
-        entries.append(("viewport", "plane", "state", payload))
-
-    if plane_state.applied_level is not None:
-        level_value = int(plane_state.applied_level)
-        if metadata:
-            entries.append(("view_cache", "plane", "level", level_value, dict(metadata)))
-        else:
-            entries.append(("view_cache", "plane", "level", level_value))
-    if plane_state.applied_step is not None:
-        step_value = tuple(int(v) for v in plane_state.applied_step)
-        if metadata:
-            entries.append(("view_cache", "plane", "step", step_value, dict(metadata)))
-        else:
-            entries.append(("view_cache", "plane", "step", step_value))
-
-    ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
+        entry = ("viewport", "plane", "state", payload)
+    ledger.batch_record_confirmed([entry], origin=origin, timestamp=timestamp)
 
 
 def _store_volume_state(
@@ -235,48 +220,6 @@ def _plain_volume_state(state: VolumeState | Mapping[str, Any] | None) -> Option
     if isinstance(state, Mapping):
         return dict(state)
     raise TypeError(f"unsupported volume state payload: {type(state)!r}")
-
-
-def _record_viewport_state(
-    ledger: ServerStateLedger,
-    *,
-    mode: RenderMode | str | None,
-    plane_state: PlaneState | Mapping[str, Any] | None,
-    volume_state: VolumeState | Mapping[str, Any] | None,
-    origin: str,
-    timestamp: float,
-    metadata: Optional[Mapping[str, Any]],
-) -> None:
-    entries: list[tuple] = []
-
-    if mode is not None:
-        if isinstance(mode, RenderMode):
-            mode_value = mode.name
-        else:
-            mode_value = str(mode)
-        if metadata:
-            entries.append(("viewport", "state", "mode", mode_value, dict(metadata)))
-        else:
-            entries.append(("viewport", "state", "mode", mode_value))
-
-    plane_payload = _plain_plane_state(plane_state)
-    if plane_payload is not None:
-        if metadata:
-            entries.append(("viewport", "plane", "state", plane_payload, dict(metadata)))
-        else:
-            entries.append(("viewport", "plane", "state", plane_payload))
-
-    volume_payload = _plain_volume_state(volume_state)
-    if volume_payload is not None:
-        if metadata:
-            entries.append(("viewport", "volume", "state", volume_payload, dict(metadata)))
-        else:
-            entries.append(("viewport", "volume", "state", volume_payload))
-
-    if not entries:
-        return
-
-    ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
 
 
 def clamp_level(level: object, levels: Sequence[Mapping[str, Any]]) -> int:
@@ -1330,16 +1273,6 @@ def reduce_view_update(
         origin,
     )
 
-    _record_viewport_state(
-        ledger,
-        mode=RenderMode.VOLUME if target_ndisplay >= 3 else RenderMode.PLANE,
-        plane_state=None,
-        volume_state=None,
-        origin=origin,
-        timestamp=ts,
-        metadata=metadata,
-    )
-
     return ServerLedgerUpdate(
         scope="view",
         target="main",
@@ -1665,10 +1598,6 @@ def reduce_level_update(
         level_metadata=metadata,
         level_shapes_metadata=metadata if metadata is not None and updated_level_shapes else None,
         downgraded_metadata=metadata if metadata is not None and downgraded is not None else None,
-        viewport_mode=mode_value,
-        viewport_plane_state=None,
-        viewport_volume_state=volume_payload,
-        viewport_metadata=metadata,
         origin=origin,
         timestamp=ts,
         op_seq=next_op_seq,
@@ -1681,6 +1610,16 @@ def reduce_level_update(
         _store_plane_state(
             ledger,
             plane_model,
+            origin=origin,
+            timestamp=ts,
+            metadata=_metadata_from_intent(intent_id),
+        )
+
+    if volume_payload is not None:
+        volume_model = VolumeState(**volume_payload)
+        _store_volume_state(
+            ledger,
+            volume_model,
             origin=origin,
             timestamp=ts,
             metadata=_metadata_from_intent(intent_id),

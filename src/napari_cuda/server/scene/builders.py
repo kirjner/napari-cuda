@@ -28,6 +28,7 @@ from napari_cuda.server.scene.models import (
     RenderLedgerSnapshot,
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
+from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.shared.dims_spec import dims_spec_from_payload, validate_ledger_against_dims_spec
 
 logger = logging.getLogger(__name__)
@@ -269,9 +270,11 @@ def snapshot_viewport_state(
 
     payload: dict[str, Any] = {}
 
-    mode_entry = snapshot.get(("viewport", "state", "mode"))
-    if mode_entry is not None and mode_entry.value is not None:
-        payload["mode"] = str(mode_entry.value)
+    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
+    if spec_entry is not None and spec_entry.value is not None:
+        spec = dims_spec_from_payload(spec_entry.value)
+        if spec is not None:
+            payload["mode"] = RenderMode.VOLUME.name if int(spec.ndisplay) >= 3 else RenderMode.PLANE.name
 
     plane_entry = snapshot.get(("viewport", "plane", "state"))
     if plane_entry is not None and plane_entry.value is not None:
