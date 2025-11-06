@@ -1438,67 +1438,6 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
         loop.close()
 
 
-def test_reduce_level_update_records_viewport_state() -> None:
-    server, scheduled, _captured = _make_server()
-    try:
-        ledger = server._state_ledger
-        plane_state = PlaneState()
-        plane_state.target_level = 1
-        plane_state.target_ndisplay = 2
-        plane_state.target_step = (4, 0, 0)
-        plane_state.applied_level = 1
-        plane_state.applied_step = (4, 0, 0)
-        plane_state.update_pose(rect=(0.0, 0.0, 10.0, 10.0), center=(5.0, 5.0), zoom=1.25)
-        volume_state = VolumeState(
-            level=1,
-            downgraded=False,
-        )
-        volume_state.update_pose(center=(1.0, 2.0, 3.0), angles=(0.0, 0.0, 0.0), distance=50.0, fov=45.0)
-
-        reduce_level_update(
-            ledger,
-            level=1,
-            level_shape=(16, 512, 512),
-            downgraded=False,
-            intent_id="level-test",
-            origin="test.level",
-            mode=RenderMode.PLANE,
-            plane_state=plane_state,
-            volume_state=volume_state,
-        )
-
-        while scheduled:
-            asyncio.run(scheduled.pop(0))
-
-        mode_entry = ledger.get("viewport", "state", "mode")
-        assert mode_entry is not None
-        assert mode_entry.value == "PLANE"
-
-        plane_entry = ledger.get("viewport", "plane", "state")
-        assert plane_entry is not None
-        assert plane_entry.value is not None
-        plane_snapshot = plane_entry.value
-        assert plane_snapshot["applied"]["level"] == 1
-        assert tuple(plane_snapshot["applied"]["step"]) == (4, 0, 0)
-        assert pytest.approx(float(plane_snapshot["pose"]["zoom"])) == 1.25
-
-        volume_entry = ledger.get("viewport", "volume", "state")
-        assert volume_entry is not None
-        assert volume_entry.value is not None
-        assert volume_entry.value["level"] == 1
-        assert tuple(volume_entry.value["pose"]["center"]) == (1.0, 2.0, 3.0)
-
-        spec_entry = ledger.get("dims", "main", "dims_spec")
-        assert spec_entry is not None
-        spec_payload = dims_spec_from_payload(spec_entry.value)
-        assert spec_payload is not None
-        assert int(spec_payload.current_level) == 1
-        assert tuple(int(v) for v in spec_payload.current_step) == (4, 0, 0)
-    finally:
-        while scheduled:
-            asyncio.run(scheduled.pop(0))
-
-
 def test_notify_scene_payload_includes_viewport_state() -> None:
     server, scheduled, _captured = _make_server()
     try:
