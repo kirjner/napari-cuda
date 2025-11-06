@@ -162,8 +162,6 @@ class ProxyViewer(ViewerModel):
                 dims.axis_labels = tuple(str(lbl) for lbl in axis_labels)
             if ndisplay is not None:
                 dims.ndisplay = int(ndisplay)
-            if displayed is not None:
-                dims.displayed = tuple(int(idx) for idx in displayed)
             if current_step is not None:
                 step_tuple = tuple(int(value) for value in current_step)
                 dims.current_step = step_tuple
