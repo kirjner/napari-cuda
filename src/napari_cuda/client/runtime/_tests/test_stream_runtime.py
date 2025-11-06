@@ -31,6 +31,12 @@ from napari_cuda.client.runtime.stream_runtime import (
     ClientStreamLoop,
     CommandError,
 )
+from napari_cuda.shared.dims_spec import (
+    AxisExtent,
+    DimsSpec,
+    DimsSpecAxis,
+    dims_spec_to_payload,
+)
 from napari_cuda.protocol import (
     FeatureToggle,
     build_error_command,
@@ -105,6 +111,8 @@ def _make_loop() -> ClientStreamLoop:
     clock_counter = count(100)
     loop._state_ledger = ClientStateLedger(clock=lambda: float(next(clock_counter)))
 
+    _seed_default_spec(loop._control_state)
+
     loop._presenter_facade = _PresenterStub()
     loop._layer_registry = RemoteLayerRegistry()
     loop._widget_to_video = lambda x, y: (float(x), float(y))
@@ -121,6 +129,69 @@ def _make_loop() -> ClientStreamLoop:
     loop._initialize_mirrors_and_emitters()
 
     return loop
+
+
+def _seed_default_spec(state: ControlStateContext) -> None:
+    spec = _make_spec(
+        current_step=[0, 0, 0],
+        ndisplay=2,
+        level_shapes=[[10, 10, 10]],
+        axis_labels=['z', 'y', 'x'],
+        order=[0, 1, 2],
+        displayed=[1, 2],
+    )
+    state.dims_spec = spec
+    state.dims_step_override = tuple(spec.current_step)
+    state.dims_ndisplay_override = int(spec.ndisplay)
+
+
+def _make_spec(
+    *,
+    current_step: Sequence[int],
+    ndisplay: int,
+    level_shapes: Sequence[Sequence[int]],
+    axis_labels: Sequence[str],
+    order: Sequence[int],
+    displayed: Sequence[int],
+) -> DimsSpec:
+    ndim = len(axis_labels)
+    axes: list[DimsSpecAxis] = []
+    for idx in range(ndim):
+        per_level_steps = [int(shape[idx]) for shape in level_shapes]
+        axes.append(
+            DimsSpecAxis(
+                index=idx,
+                label=str(axis_labels[idx]),
+                role=str(axis_labels[idx]),
+                displayed=idx in displayed,
+                order_position=order.index(idx),
+                current_step=current_step[idx] if idx < len(current_step) else 0,
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=tuple(per_level_steps),
+                per_level_world=tuple(
+                    AxisExtent(0.0, float(max(count - 1, 0)), 1.0) for count in per_level_steps
+                ),
+            )
+        )
+    level_entries = [{'index': idx, 'shape': list(shape)} for idx, shape in enumerate(level_shapes)]
+    return DimsSpec(
+        version=1,
+        ndim=len(level_shapes[0]) if level_shapes else len(current_step),
+        ndisplay=int(ndisplay),
+        order=tuple(int(v) for v in order),
+        displayed=tuple(int(v) for v in displayed),
+        current_level=0,
+        current_step=tuple(int(v) for v in current_step),
+        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in level_shapes),
+        plane_mode=ndisplay < 3,
+        axes=tuple(axes),
+        levels=tuple(level_entries),
+        downgraded=None,
+        labels=None,
+    )
 
 
 def test_toggle_ndisplay_requires_ready() -> None:
@@ -143,13 +214,13 @@ def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
     assert payload.key == 'ndisplay'
     assert payload.value == 3
 
-    loop._control_state.dims_meta['ndisplay'] = 2
+    loop._control_state.dims_ndisplay_override = 2
     loop._control_state.last_settings_send = 0.0
     assert loop.toggle_ndisplay(origin='ui') is True
     payload = loop._state_channel_stub.sent_frames[-1].payload
     assert payload.value == 3
 
-    loop._control_state.dims_meta['ndisplay'] = 3
+    loop._control_state.dims_ndisplay_override = 3
     loop._control_state.last_settings_send = 0.0
     assert loop.toggle_ndisplay(origin='ui') is True
     payload = loop._state_channel_stub.sent_frames[-1].payload
@@ -159,47 +230,48 @@ def test_toggle_ndisplay_flips_between_2d_and_3d() -> None:
 def test_handle_dims_update_caches_payload() -> None:
     loop = _make_loop()
 
-    meta = loop._control_state.dims_meta
-    meta.update(
-        {
-            'ndim': 3,
-            'order': [0, 1, 2],
-            'axis_labels': ['z', 'y', 'x'],
-            'range': [(0, 10), (0, 5), (0, 3)],
-            'displayed': [1, 2],
-        }
+    spec = _make_spec(
+        current_step=[1, 2, 0],
+        ndisplay=2,
+        level_shapes=[[11, 6, 4]],
+        axis_labels=['z', 'y', 'x'],
+        order=[0, 1, 2],
+        displayed=[1, 2],
     )
-
+    spec_payload = dims_spec_to_payload(spec)
+    assert spec_payload is not None
+    payload = {
+        'dims_spec': spec_payload,
+        'mode': 'plane' if spec.plane_mode else 'volume',
+        'step': list(spec.current_step),
+        'current_level': int(spec.current_level),
+        'level_shapes': [list(shape) for shape in spec.level_shapes],
+        'levels': [dict(entry) for entry in spec.levels],
+        'ndisplay': int(spec.ndisplay),
+    }
     frame = build_notify_dims(
         session_id='session-test',
-        payload={
-            'step': [1, 2, 0],
-            'levels': [{'index': 0, 'shape': [11, 6, 4]}],
-            'level_shapes': [[11, 6, 4]],
-            'current_level': 0,
-            'mode': 'plane',
-            'ndisplay': 2,
-            'axis_labels': ['z', 'y', 'x'],
-            'order': [0, 1, 2],
-            'displayed': [1, 2],
-        },
+        payload=payload,
         timestamp=1.5,
         frame_id='dims-1',
     )
 
     loop._dims_mirror.ingest_dims_notify(frame)
 
-    assert loop._loop_state.last_dims_payload == {
+    payload = dict(loop._loop_state.last_dims_payload)
+    dims_spec = payload.pop('dims_spec')
+    assert dims_spec is not None
+    assert payload == {
         'current_step': [1, 2, 0],
         'ndisplay': 2,
         'ndim': 3,
         'dims_range': [[0, 10], [0, 5], [0, 3]],
         'order': [0, 1, 2],
         'axis_labels': ['z', 'y', 'x'],
+        'level_shapes': [[11, 6, 4]],
         'displayed': [1, 2],
         'mode': 'plane',
         'volume': False,
-        'source': None,
     }
     assert loop._control_state.dims_ready is True
     assert loop._presenter_facade.calls

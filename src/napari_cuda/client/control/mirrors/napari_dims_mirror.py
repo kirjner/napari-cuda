@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from qtpy import QtCore
 
+from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.control.client_state_ledger import (
     ClientStateLedger,
     MirrorEvent,
@@ -18,9 +19,6 @@ from napari_cuda.shared.dims_spec import (
     DimsSpec,
     dims_spec_axis_index_for_target,
     dims_spec_axis_labels,
-    dims_spec_displayed,
-    dims_spec_level_shape,
-    dims_spec_order,
     dims_spec_primary_axis,
 )
 
@@ -81,43 +79,19 @@ class NapariDimsMirror:
 
         self._assert_gui_thread()
         state = self._state
-        meta = state.dims_meta
         was_ready = bool(state.dims_ready)
         payload = frame.payload
 
         dims_spec = payload.dims_spec
         assert isinstance(dims_spec, DimsSpec), 'notify.dims requires dims_spec'
 
-        meta['dims_spec'] = dims_spec
-
-        storage_step = [int(value) for value in dims_spec.current_step]
-        meta['current_step'] = storage_step
-        ndisplay_value = int(dims_spec.ndisplay)
-        meta['ndisplay'] = ndisplay_value
-        mode_text = 'volume' if ndisplay_value >= 3 else 'plane'
-        meta['mode'] = mode_text
-        meta['volume'] = not bool(dims_spec.plane_mode)
-
-        level_shapes = [[int(dim) for dim in shape] for shape in dims_spec.level_shapes]
-        meta['level_shapes'] = level_shapes
-
-        active_level = int(dims_spec.current_level)
-        assert 0 <= active_level < len(level_shapes), 'active level out of bounds for level_shapes'
-        active_shape = list(dims_spec_level_shape(dims_spec, active_level))
-        meta['active_level_shape'] = active_shape
-        meta['range'] = [[0, max(0, dim - 1)] for dim in active_shape]
-        meta['ndim'] = int(dims_spec.ndim)
-
-        meta['order'] = list(dims_spec_order(dims_spec))
-        meta['axis_labels'] = list(dims_spec_axis_labels(dims_spec))
-        meta['displayed'] = list(dims_spec_displayed(dims_spec))
-
-        if 'sizes' in meta:
-            meta.pop('sizes', None)
+        state.dims_spec = dims_spec
+        state.dims_step_override = tuple(int(value) for value in dims_spec.current_step)
+        state.dims_ndisplay_override = int(dims_spec.ndisplay)
+        state.primary_axis_index = dims_spec_primary_axis(dims_spec)
 
         multiscale_snapshot = _build_multiscale_snapshot(payload)
         if multiscale_snapshot is not None:
-            meta['multiscale'] = multiscale_snapshot
             state.multiscale_state = {
                 'level': multiscale_snapshot['level'],
                 'current_level': multiscale_snapshot['current_level'],
@@ -126,7 +100,6 @@ class NapariDimsMirror:
             if 'downgraded' in multiscale_snapshot:
                 state.multiscale_state['downgraded'] = multiscale_snapshot['downgraded']
         else:
-            meta['multiscale'] = None
             state.multiscale_state = {}
         self._apply_multiscale_to_presenter(multiscale_snapshot)
 
@@ -143,24 +116,22 @@ class NapariDimsMirror:
             if self._notify_first_ready is not None:
                 self._notify_first_ready()
 
-        state.primary_axis_index = _compute_primary_axis_index(meta)
-
         if logger.isEnabledFor(logging.DEBUG):
             level_val = multiscale_snapshot['current_level'] if multiscale_snapshot else None
             logger.debug(
                 'ingest_dims_notify: frame=%s step=%s level=%s shape=%s',
                 frame.envelope.frame_id,
-                storage_step,
+                list(snapshot_payload.get('current_step') or ()),
                 level_val,
-                active_shape,
+                snapshot_payload.get('dims_range'),
             )
-        if storage_step and self._log_dims_info:
+        if snapshot_payload.get('current_step') and self._log_dims_info:
             logger.info(
                 'notify.dims: step=%s ndisplay=%s order=%s labels=%s',
-                storage_step,
-                meta.get('ndisplay'),
-                meta.get('order'),
-                meta.get('axis_labels'),
+                snapshot_payload.get('current_step'),
+                snapshot_payload.get('ndisplay'),
+                snapshot_payload.get('order'),
+                snapshot_payload.get('axis_labels'),
             )
 
         self._mirror_confirmed_dims(reason='notify', payload=snapshot_payload)
@@ -215,15 +186,16 @@ class NapariDimsMirror:
         except Exception as exc:  # pragma: no cover - intentional crash path
             raise AssertionError(f"dims value must be int-like: {update.value!r}") from exc
 
-        meta = self._state.dims_meta
-        current = list(meta.get('current_step') or [])
+        state = self._state
+        spec = control_actions.ensure_dims_spec(state)
+        current = list(control_actions.resolve_current_step(state) or spec.current_step)
         while len(current) <= axis_idx:
             current.append(0)
         current[axis_idx] = value_int
-        meta['current_step'] = current
+        state.dims_step_override = tuple(int(v) for v in current)
 
-        self._state.dims_state[(str(update.target), str(update.key))] = value_int
-        self._state.primary_axis_index = _compute_primary_axis_index(meta)
+        state.dims_state[(str(update.target), str(update.key))] = value_int
+        state.primary_axis_index = dims_spec_primary_axis(spec)
         self._mirror_confirmed_dims(reason=f"axis:{axis_idx}")
 
     def _handle_ndisplay_update(self, update: MirrorEvent) -> None:
@@ -231,7 +203,7 @@ class NapariDimsMirror:
             ndisplay = int(update.value)
         except Exception as exc:  # pragma: no cover - intentional crash path
             raise AssertionError(f"ndisplay value must be int-like: {update.value!r}") from exc
-        self._state.dims_meta['ndisplay'] = ndisplay
+        self._state.dims_ndisplay_override = ndisplay
         self._mirror_confirmed_dims(reason="ndisplay")
 
     def _mirror_confirmed_dims(
@@ -371,62 +343,14 @@ def _record_dims_delta(
 
 
 def _build_consumer_dims_payload(state: ControlStateContext, loop_state: ClientLoopState) -> dict[str, Any]:
-    meta = state.dims_meta
-    payload: dict[str, Any] = {}
-
-    dims_spec = meta.get('dims_spec')
-    current_step = meta.get('current_step')
-    if isinstance(current_step, Sequence):
-        payload['current_step'] = [int(value) for value in current_step]
-    else:
-        payload['current_step'] = None
-
-    ndisplay = meta.get('ndisplay')
-    payload['ndisplay'] = int(ndisplay) if ndisplay is not None else None
-
-    ndim = meta.get('ndim')
-    payload['ndim'] = int(ndim) if ndim is not None else None
-
-    dims_range = meta.get('range')
-    if isinstance(dims_range, Sequence):
-        payload['dims_range'] = [list(pair) for pair in dims_range]  # ensure JSON-friendly
-    else:
-        payload['dims_range'] = None
-
-    order = meta.get('order')
-    if isinstance(order, Sequence):
-        payload['order'] = list(order)
-    else:
-        payload['order'] = None
-
-    labels = meta.get('axis_labels')
-    if isinstance(labels, Sequence):
-        payload['axis_labels'] = [str(label) for label in labels]
-    else:
-        payload['axis_labels'] = None
-
-    displayed = meta.get('displayed')
-    if isinstance(displayed, Sequence):
-        payload['displayed'] = [int(val) for val in displayed]
-    else:
-        payload['displayed'] = None
-
-    mode = meta.get('mode')
-    payload['mode'] = str(mode) if mode is not None else None
-
-    volume_flag = meta.get('volume')
-    payload['volume'] = bool(volume_flag) if volume_flag is not None else None
-
-    payload['source'] = meta.get('source')
-
-    payload['dims_spec'] = dims_spec if isinstance(dims_spec, DimsSpec) else None
+    payload = control_actions.build_dims_payload(state)
     loop_state.last_dims_payload = dict(payload)
 
     return payload
 
 
 def _record_multiscale_metadata(state: ControlStateContext, ledger: ClientStateLedger) -> None:
-    multiscale_meta = state.dims_meta.get('multiscale')
+    multiscale_meta = state.multiscale_state
     if not isinstance(multiscale_meta, Mapping):
         return
 
@@ -455,13 +379,12 @@ def _record_volume_metadata(state: ControlStateContext, ledger: ClientStateLedge
 
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
-    dims_spec = state.dims_meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        resolved = dims_spec_axis_index_for_target(dims_spec, target)
+    spec = state.dims_spec
+    if isinstance(spec, DimsSpec):
+        resolved = dims_spec_axis_index_for_target(spec, target)
         if resolved is not None:
             return resolved
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence):
+        labels = dims_spec_axis_labels(spec)
         for idx, label in enumerate(labels):
             text = str(label)
             if text == target or text.lower() == target_lower:
@@ -472,39 +395,15 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
         return int(target)
     except Exception:
         return None
-
-
-def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
-    dims_spec = meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        return dims_spec_primary_axis(dims_spec)
-    order = meta.get('order')
-    ndisplay = meta.get('ndisplay')
-    labels = meta.get('axis_labels')
-    nd = int(ndisplay) if ndisplay is not None else 2
-    idx_order: list[int] | None = None
-    if isinstance(order, Sequence) and len(order) > 0:
-        if all(isinstance(x, (int, float)) or (isinstance(x, str) and str(x).isdigit()) for x in order):
-            idx_order = [int(x) for x in order]
-        elif isinstance(labels, Sequence) and all(isinstance(x, str) for x in order):
-            label_to_index = {str(lbl): i for i, lbl in enumerate(labels)}
-            idx_order = [int(label_to_index.get(str(lbl), i)) for i, lbl in enumerate(order)]
-    if idx_order and len(idx_order) > nd:
-        return int(idx_order[0])
-    return 0
+    return None
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    dims_spec = state.dims_meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        labels = dims_spec_axis_labels(dims_spec)
+    spec = state.dims_spec
+    if isinstance(spec, DimsSpec):
+        labels = dims_spec_axis_labels(spec)
         if 0 <= axis_idx < len(labels):
             return labels[axis_idx]
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
-        label = labels[axis_idx]
-        if isinstance(label, str) and label.strip():
-            return label
     return str(axis_idx)
 
 

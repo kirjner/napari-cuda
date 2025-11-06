@@ -13,6 +13,7 @@ from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop import camera
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis
 
 
 def _make_state(qtbot: Any) -> tuple[
@@ -49,6 +50,46 @@ def _make_state(qtbot: Any) -> tuple[
         log_camera_info=False,
     )
     return control_state, cam_state, emitter, dispatched
+
+
+def _seed_volume_spec(state: ControlStateContext) -> None:
+    axis_labels = ['z', 'y', 'x']
+    level_shape = (16, 16, 16)
+    axes = tuple(
+        DimsSpecAxis(
+            index=i,
+            label=axis_labels[i],
+            role=axis_labels[i],
+            displayed=True,
+            order_position=i,
+            current_step=0,
+            margin_left_steps=0.0,
+            margin_right_steps=0.0,
+            margin_left_world=0.0,
+            margin_right_world=0.0,
+            per_level_steps=(level_shape[i],),
+            per_level_world=(AxisExtent(0.0, float(level_shape[i] - 1), 1.0),),
+        )
+        for i in range(3)
+    )
+    spec = DimsSpec(
+        version=1,
+        ndim=3,
+        ndisplay=3,
+        order=(0, 1, 2),
+        displayed=(0, 1, 2),
+        current_level=0,
+        current_step=(0, 0, 0),
+        level_shapes=(level_shape,),
+        plane_mode=False,
+        axes=axes,
+        levels=({'index': 0, 'shape': list(level_shape)},),
+        downgraded=None,
+        labels=None,
+    )
+    state.dims_spec = spec
+    state.dims_step_override = tuple(spec.current_step)
+    state.dims_ndisplay_override = int(spec.ndisplay)
 
 
 def test_handle_wheel_zoom_posts_camera_zoom(qtbot) -> None:
@@ -120,9 +161,8 @@ def test_handle_pointer_pan_posts_delta(qtbot) -> None:
 
 def test_handle_pointer_orbit_posts_delta(qtbot) -> None:
     control_state, cam_state, emitter, dispatched = _make_state(qtbot)
+    _seed_volume_spec(control_state)
     control_state.dims_ready = True
-    control_state.dims_meta['mode'] = 'volume'
-    control_state.dims_meta['ndisplay'] = 3
 
     camera.handle_pointer(
         emitter,

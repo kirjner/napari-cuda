@@ -303,7 +303,7 @@ class NapariDimsIntentEmitter:
             return False
         nd_value = int(ndisplay)
         nd_target = 3 if nd_value >= 3 else 2
-        cur = self._state.dims_meta.get('ndisplay')
+        cur = control_actions.resolve_ndisplay(self._state)
         if cur is not None and int(cur) == nd_target:
             return True
         ok, _ = _emit_state_update(

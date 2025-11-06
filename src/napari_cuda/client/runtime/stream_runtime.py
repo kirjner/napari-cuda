@@ -1378,13 +1378,9 @@ class ClientStreamLoop:
         if emitter is None:
             logger.debug("pointer event skipped: camera emitter unavailable")
             return
-        dims_meta = self._control_state.dims_meta
-        mode_obj = dims_meta.get('mode')
-        ndisplay_obj = dims_meta.get('ndisplay')
-        if isinstance(mode_obj, str) and isinstance(ndisplay_obj, int):
-            in_vol3d = (mode_obj.lower() == 'volume') and ndisplay_obj == 3
-        else:
-            in_vol3d = False
+        spec = self._control_state.dims_spec
+        ndisplay = control_actions.resolve_ndisplay(self._control_state)
+        in_vol3d = bool(spec is not None and ndisplay == 3 and not spec.plane_mode)
         camera.handle_pointer(
             emitter,
             self._camera_state,

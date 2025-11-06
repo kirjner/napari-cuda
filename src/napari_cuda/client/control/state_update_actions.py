@@ -18,6 +18,7 @@ from napari_cuda.shared.dims_spec import (
     DimsSpec,
     dims_spec_axis_index_for_target,
     dims_spec_axis_labels,
+    dims_spec_level_shape,
     dims_spec_primary_axis,
 )
 
@@ -33,21 +34,6 @@ from napari_cuda.client.control.client_state_ledger import (
 )
 
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
-
-
-def _default_dims_meta() -> dict[str, object | None]:
-    return {
-        'ndim': None,
-        'order': None,
-        'axis_labels': None,
-        'range': None,
-        'ndisplay': None,
-        'mode': None,
-        'volume': None,
-        'render': None,
-        'multiscale': None,
-        'dims_spec': None,
-    }
 
 
 def _normalize_camera_delta_value(value: Any) -> Any:
@@ -78,7 +64,9 @@ class ControlStateContext:
     """Mutable control state hoisted out of the loop object."""
 
     dims_ready: bool = False
-    dims_meta: dict[str, object | None] = field(default_factory=_default_dims_meta)
+    dims_spec: DimsSpec | None = None
+    dims_step_override: tuple[int, ...] | None = None
+    dims_ndisplay_override: int | None = None
     primary_axis_index: int | None = None
     session_id: Optional[str] = None
     ack_timeout_ms: Optional[int] = None
@@ -138,11 +126,17 @@ class ControlRuntime:
 
 def on_state_connected(state: ControlStateContext) -> None:
     state.dims_ready = False
+    state.dims_spec = None
+    state.dims_step_override = None
+    state.dims_ndisplay_override = None
     state.primary_axis_index = None
 
 
 def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContext) -> None:
     state.dims_ready = False
+    state.dims_spec = None
+    state.dims_step_override = None
+    state.dims_ndisplay_override = None
     state.primary_axis_index = None
     loop_state.pending_intents.clear()
     loop_state.last_dims_payload = None
@@ -183,28 +177,22 @@ def handle_notify_camera(
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    dims_spec = state.dims_meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        labels = dims_spec_axis_labels(dims_spec)
+    spec = state.dims_spec
+    if isinstance(spec, DimsSpec):
+        labels = dims_spec_axis_labels(spec)
         if 0 <= axis_idx < len(labels):
             return labels[axis_idx]
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence) and 0 <= axis_idx < len(labels):
-        label = labels[axis_idx]
-        if isinstance(label, str) and label.strip():
-            return label
     return str(axis_idx)
 
 
 def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional[int]:
     target_lower = target.lower()
-    dims_spec = state.dims_meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        resolved = dims_spec_axis_index_for_target(dims_spec, target)
+    spec = state.dims_spec
+    if isinstance(spec, DimsSpec):
+        resolved = dims_spec_axis_index_for_target(spec, target)
         if resolved is not None:
             return resolved
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence):
+        labels = dims_spec_axis_labels(spec)
         for idx, label in enumerate(labels):
             text = str(label)
             if text == target or text.lower() == target_lower:
@@ -219,6 +207,71 @@ def _axis_index_from_target(state: ControlStateContext, target: str) -> Optional
 
 def _runtime_key(scope: str, target: str, key: str) -> str:
     return f"{scope}:{target}:{key}"
+
+
+def ensure_dims_spec(state: ControlStateContext) -> DimsSpec:
+    spec = state.dims_spec
+    assert spec is not None, "dims_spec must be available"
+    return spec
+
+
+def resolve_current_step(state: ControlStateContext) -> tuple[int, ...] | None:
+    if state.dims_step_override is not None:
+        return state.dims_step_override
+    if state.dims_spec is None:
+        return None
+    return tuple(int(v) for v in state.dims_spec.current_step)
+
+
+def resolve_ndisplay(state: ControlStateContext) -> Optional[int]:
+    if state.dims_ndisplay_override is not None:
+        return state.dims_ndisplay_override
+    if state.dims_spec is None:
+        return None
+    return int(state.dims_spec.ndisplay)
+
+
+def build_dims_payload(state: ControlStateContext) -> dict[str, Any]:
+    spec = state.dims_spec
+    if spec is None:
+        return {
+            'current_step': None,
+            'ndisplay': None,
+            'ndim': None,
+            'dims_range': None,
+            'order': None,
+            'axis_labels': None,
+            'level_shapes': None,
+            'displayed': None,
+            'mode': None,
+            'volume': None,
+            'dims_spec': None,
+        }
+
+    current_step = resolve_current_step(state)
+    ndisplay = resolve_ndisplay(state)
+
+    level_shapes = [[int(dim) for dim in shape] for shape in spec.level_shapes]
+    try:
+        active_shape = list(dims_spec_level_shape(spec, spec.current_level))
+    except Exception:
+        active_shape = level_shapes[0] if level_shapes else []
+    dims_range = [[0, max(0, int(dim) - 1)] for dim in active_shape]
+
+    payload: dict[str, Any] = {
+        'current_step': list(current_step) if current_step is not None else None,
+        'ndisplay': ndisplay,
+        'ndim': int(spec.ndim),
+        'dims_range': dims_range,
+        'order': [int(idx) for idx in spec.order],
+        'axis_labels': [str(label) for label in dims_spec_axis_labels(spec)],
+        'level_shapes': level_shapes,
+        'displayed': [int(idx) for idx in spec.displayed],
+        'mode': 'volume' if ndisplay is not None and ndisplay >= 3 else 'plane',
+        'volume': not bool(spec.plane_mode),
+        'dims_spec': spec,
+    }
+    return payload
 
 
 def _emit_state_update(
@@ -295,134 +348,6 @@ def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: AckRec
             runtime.last_phase = None
 
 
-def _sync_dims_payload_from_meta(
-    state: ControlStateContext,
-    loop_state: ClientLoopState,
-) -> dict[str, Any]:
-    meta = state.dims_meta
-
-    current_step = meta.get('current_step')
-    if current_step is not None:
-        assert isinstance(current_step, Sequence)
-        payload_current_step = list(current_step)
-    else:
-        payload_current_step = None
-
-    dims_range = meta.get('range')
-    if dims_range is not None:
-        assert isinstance(dims_range, Sequence)
-        payload_range = list(dims_range)
-    else:
-        payload_range = None
-
-    order = meta.get('order')
-    if order is not None:
-        assert isinstance(order, Sequence)
-        payload_order = list(order)
-    else:
-        payload_order = None
-
-    axis_labels = meta.get('axis_labels')
-    if axis_labels is not None:
-        assert isinstance(axis_labels, Sequence)
-        payload_axis_labels = list(axis_labels)
-    else:
-        payload_axis_labels = None
-
-    displayed = meta.get('displayed')
-    if displayed is not None:
-        assert isinstance(displayed, Sequence)
-        payload_displayed = list(displayed)
-    else:
-        payload_displayed = None
-
-    payload = {
-        'current_step': payload_current_step,
-        'ndisplay': meta.get('ndisplay'),
-        'ndim': meta.get('ndim'),
-        'dims_range': payload_range,
-        'order': payload_order,
-        'axis_labels': payload_axis_labels,
-        'level_shapes': meta.get('level_shapes'),
-        'displayed': payload_displayed,
-        'mode': meta.get('mode'),
-        'volume': meta.get('volume'),
-        'source': meta.get('source'),
-    }
-
-    loop_state.last_dims_payload = payload
-    return payload
-
-
-def _seed_dims_baseline(
-    state: ControlStateContext,
-    state_ledger: ClientStateLedger,
-    payload: dict[str, Any],
-) -> None:
-    current_step = payload.get('current_step') or []
-    if isinstance(current_step, list):
-        for idx, value in enumerate(current_step):
-            if value is None:
-                continue
-            target_label = _axis_target_label(state, idx)
-            value_int = _coerce_step_value(value)
-            if value_int is None:
-                continue
-            state_ledger.record_confirmed(
-                'dims',
-                target_label,
-                'index',
-                value_int,
-                metadata={
-                    'axis_index': idx,
-                    'axis_target': target_label,
-                    'update_kind': 'baseline',
-                },
-            )
-
-    _seed_dims_indices(state, state_ledger, payload, update_kind='baseline')
-
-    ndisplay = payload.get('ndisplay')
-    if ndisplay is not None:
-        state_ledger.record_confirmed('view', 'main', 'ndisplay', int(ndisplay))
-
-    multiscale_meta = state.dims_meta.get('multiscale')
-    if isinstance(multiscale_meta, dict):
-        level_val = multiscale_meta.get('level')
-        if level_val is not None:
-            state_ledger.record_confirmed('multiscale', 'main', 'level', int(level_val))
-        policy_val = multiscale_meta.get('policy')
-        if policy_val is not None:
-            state_ledger.record_confirmed('multiscale', 'main', 'policy', str(policy_val))
-
-    # Volume state is seeded from notify.scene metadata, not dims.
-
-
-def _seed_dims_indices(
-    state: ControlStateContext,
-    state_ledger: ClientStateLedger,
-    payload: Mapping[str, Any],
-    *,
-    update_kind: str,
-) -> None:
-    current_step = payload.get('current_step')
-    if not isinstance(current_step, (list, tuple)):
-        return
-    for idx, value in enumerate(current_step):
-        if value is None:
-            continue
-        value_int = _coerce_step_value(value)
-        if value_int is None:
-            continue
-        target_label = _axis_target_label(state, idx)
-        metadata = {
-            'axis_index': idx,
-            'axis_target': target_label,
-            'update_kind': update_kind,
-        }
-        state_ledger.record_confirmed('dims', target_label, 'index', value_int, metadata=metadata)
-
-
 def _coerce_step_value(value: Any) -> Optional[int]:
     if isinstance(value, bool):
         return int(value)
@@ -435,42 +360,6 @@ def _coerce_step_value(value: Any) -> Optional[int]:
         return None
     return None
 
-def _apply_dims_meta_snapshot(
-    meta: dict[str, object | None],
-    snapshot: Mapping[str, Any],
-) -> None:
-    assert isinstance(snapshot, Mapping)
-
-    if 'ndim' in snapshot:
-        value = snapshot['ndim']
-        assert isinstance(value, int)
-        meta['ndim'] = value
-
-    if 'ndisplay' in snapshot:
-        value = snapshot['ndisplay']
-        assert isinstance(value, int)
-        meta['ndisplay'] = value
-
-    for key in ('order', 'axis_labels', 'range', 'displayed', 'current_step'):
-        if key in snapshot:
-            value = snapshot[key]
-            assert isinstance(value, Sequence)
-            meta[key] = list(value)
-
-    if 'volume' in snapshot:
-        meta['volume'] = bool(snapshot['volume'])
-
-    # No dims 'render' cache; volume state arrives via notify.scene metadata
-
-    if 'multiscale' in snapshot:
-        multiscale = snapshot['multiscale']
-        assert isinstance(multiscale, Mapping)
-        meta['multiscale'] = dict(multiscale)
-
-    if 'controls' in snapshot:
-        controls = snapshot['controls']
-        assert isinstance(controls, Mapping)
-        meta['controls'] = dict(controls)
 def mirror_dims_to_viewer(
     viewer_obj,
     ui_call,
@@ -517,7 +406,6 @@ def handle_dims_ack(
     if outcome.scope != "dims":
         return
 
-    _ = viewer_ref, ui_call
     _update_runtime_from_ack_outcome(state, outcome)
 
     axis_idx: Optional[int] = None
@@ -531,7 +419,8 @@ def handle_dims_ack(
         axis_idx = _axis_index_from_target(state, str(outcome.target))
 
     if outcome.status == "accepted":
-        payload = _sync_dims_payload_from_meta(state, loop_state)
+        payload = build_dims_payload(state)
+        loop_state.last_dims_payload = dict(payload)
         if presenter is not None:
             try:
                 presenter.apply_dims_update(dict(payload))
@@ -564,7 +453,21 @@ def handle_dims_ack(
         error.get("details"),
     )
 
-    payload = _sync_dims_payload_from_meta(state, loop_state)
+    confirmed_value = outcome.confirmed_value
+    if axis_idx is not None and confirmed_value is not None:
+        spec = ensure_dims_spec(state)
+        base_step = [int(v) for v in spec.current_step]
+        ensure_value = _coerce_step_value(confirmed_value)
+        if ensure_value is not None:
+            while len(base_step) <= axis_idx:
+                base_step.append(0)
+            base_step[axis_idx] = ensure_value
+            state.dims_step_override = tuple(base_step)
+            state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or "index"))] = ensure_value
+        state.primary_axis_index = dims_spec_primary_axis(spec)
+
+    payload = build_dims_payload(state)
+    loop_state.last_dims_payload = dict(payload)
     if presenter is not None:
         try:
             presenter.apply_dims_update(dict(payload))
@@ -572,15 +475,25 @@ def handle_dims_ack(
             logger.debug("presenter dims update failed", exc_info=True)
 
     if log_dims_info and axis_idx is not None:
-        confirmed_value = outcome.confirmed_value
-        if confirmed_value is None:
-            confirmed_value = state.dims_state.get((str(outcome.target or ""), str(outcome.key or "")))
         logger.info(
             "dims intent reverted: axis=%s target=%s value=%s",
             axis_idx,
             outcome.target,
             confirmed_value,
         )
+
+    viewer = viewer_ref() if callable(viewer_ref) else viewer_ref
+    mirror_dims_to_viewer(
+        viewer,
+        ui_call,
+        current_step=payload.get('current_step'),
+        ndisplay=payload.get('ndisplay'),
+        ndim=payload.get('ndim'),
+        dims_range=payload.get('dims_range'),
+        order=payload.get('order'),
+        axis_labels=payload.get('axis_labels'),
+        displayed=payload.get('displayed'),
+    )
 
 
 def handle_generic_ack(
@@ -594,7 +507,6 @@ def handle_generic_ack(
         return
 
     _update_runtime_from_ack_outcome(state, outcome)
-
 
     if outcome.status != "accepted":
         error = outcome.error or {}
@@ -613,88 +525,48 @@ def handle_generic_ack(
         key = outcome.key or ""
 
         if scope == 'view':
-            if confirmed_value is None:
-                confirmed_value = state.view_state.get(key)
-        if scope == 'dims':
-            axis_idx: Optional[int] = None
-            metadata = outcome.metadata or {}
-            if "axis_index" in metadata:
-                try:
-                    axis_idx = int(metadata["axis_index"])
-                except Exception:
-                    axis_idx = None
-            if axis_idx is None and outcome.target is not None:
-                axis_idx = _axis_index_from_target(state, str(outcome.target))
-
-        if scope == 'dims':
-            axis_idx: Optional[int] = None
-            metadata = outcome.metadata or {}
-            if "axis_index" in metadata:
-                try:
-                    axis_idx = int(metadata["axis_index"])
-                except Exception:
-                    axis_idx = None
-            if axis_idx is None and outcome.target is not None:
-                axis_idx = _axis_index_from_target(state, str(outcome.target))
-
-            if axis_idx is not None and confirmed_value is not None:
-                axis_label = metadata.get("axis_target") if isinstance(metadata, dict) else None
-                logger.warning(
-                    "ack.state dims rejected: axis=%s label=%s target=%s key=%s code=%s message=%s details=%s",
-                    axis_idx,
-                    axis_label,
-                    outcome.target,
-                    outcome.key,
-                    error.get("code"),
-                    error.get("message"),
-                    error.get("details"),
-                )
-
-                meta = state.dims_meta
-                current = list(meta.get('current_step') or [])
-                while len(current) <= axis_idx:
-                    current.append(0)
-                try:
-                    current[axis_idx] = int(confirmed_value)
-                except Exception:
-                    current[axis_idx] = 0
-                meta['current_step'] = current
-                state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or "index"))] = confirmed_value
-
-                payload = _sync_dims_payload_from_meta(state, loop_state)
-                state.dims_ready = True
-                state.primary_axis_index = _compute_primary_axis_index(meta)
-
+            confirmed = _int_or_none(confirmed_value if confirmed_value is not None else state.view_state.get(key))
+            if key == 'ndisplay' and confirmed is not None:
+                state.dims_ndisplay_override = confirmed
+                payload = build_dims_payload(state)
+                loop_state.last_dims_payload = dict(payload)
                 if presenter is not None:
                     try:
                         presenter.apply_dims_update(dict(payload))
                     except Exception:
                         logger.debug("presenter dims update failed", exc_info=True)
-
-                viewer_obj = viewer_ref() if callable(viewer_ref) else None  # type: ignore[misc]
-                if viewer_obj is not None:
-                        mirror_dims_to_viewer(
-                            viewer_obj,
-                            ui_call,
-                            current_step=payload.get('current_step'),
-                            ndisplay=payload.get('ndisplay'),
-                            ndim=payload.get('ndim'),
-                            dims_range=payload.get('dims_range'),
-                            order=payload.get('order'),
-                            axis_labels=payload.get('axis_labels'),
-                            displayed=payload.get('displayed'),
-                        )
             return
 
-        logger.warning(
-            "ack.state rejected: scope=%s target=%s key=%s code=%s message=%s details=%s",
-            outcome.scope,
-            outcome.target,
-            outcome.key,
-            error.get("code"),
-            error.get("message"),
-            error.get("details"),
-        )
+        if scope == 'dims':
+            metadata = outcome.metadata or {}
+            axis_idx: Optional[int] = None
+            if "axis_index" in metadata:
+                try:
+                    axis_idx = int(metadata["axis_index"])
+                except Exception:
+                    axis_idx = None
+            if axis_idx is None and outcome.target is not None:
+                axis_idx = _axis_index_from_target(state, str(outcome.target))
+            if axis_idx is not None and confirmed_value is not None:
+                spec = ensure_dims_spec(state)
+                base_step = [int(v) for v in spec.current_step]
+                ensure_value = _coerce_step_value(confirmed_value)
+                if ensure_value is not None:
+                    while len(base_step) <= axis_idx:
+                        base_step.append(0)
+                    base_step[axis_idx] = ensure_value
+                    state.dims_step_override = tuple(base_step)
+                    state.dims_state[(str(outcome.target or axis_idx), str(outcome.key or "index"))] = ensure_value
+                    state.primary_axis_index = dims_spec_primary_axis(spec)
+                payload = build_dims_payload(state)
+                loop_state.last_dims_payload = dict(payload)
+                if presenter is not None:
+                    try:
+                        presenter.apply_dims_update(dict(payload))
+                    except Exception:
+                        logger.debug("presenter dims update failed", exc_info=True)
+            return
+
         return
 
     logger.debug(
@@ -713,17 +585,9 @@ def handle_generic_ack(
         if confirmed_value is not None:
             state.view_state[key] = confirmed_value
             if key == 'ndisplay':
-                if isinstance(confirmed_value, (int, float)):
-                    state.dims_meta['ndisplay'] = int(confirmed_value)
-                else:
-                    state.dims_meta['ndisplay'] = None
-                meta_ndisplay = state.dims_meta.get('ndisplay')
-                if isinstance(meta_ndisplay, (int, float)):
-                    ndisplay_int = int(meta_ndisplay)
-                else:
-                    ndisplay_int = 2
-                state.dims_meta['mode'] = 'volume' if ndisplay_int >= 3 else 'plane'
-                payload = _sync_dims_payload_from_meta(state, loop_state)
+                state.dims_ndisplay_override = int(confirmed_value)
+                payload = build_dims_payload(state)
+                loop_state.last_dims_payload = dict(payload)
                 if presenter is not None:
                     try:
                         presenter.apply_dims_update(dict(payload))
@@ -733,13 +597,10 @@ def handle_generic_ack(
         state.volume_state[key] = confirmed_value
     elif scope == 'multiscale' and confirmed_value is not None:
         state.multiscale_state[key] = confirmed_value
-        ms_meta = state.dims_meta.setdefault('multiscale', {})
-        if isinstance(ms_meta, dict):
-            ms_meta[key] = confirmed_value
 
 
 def current_ndisplay(state: ControlStateContext) -> Optional[int]:
-    return _int_or_none(state.dims_meta.get('ndisplay'))
+    return resolve_ndisplay(state)
 
 
 def handle_key_event(
@@ -1173,33 +1034,34 @@ def multiscale_set_level(
 
 
 def hud_snapshot(state: ControlStateContext, *, video_size: tuple[Optional[int], Optional[int]], zoom_state: dict[str, object]) -> dict[str, object]:
-    meta = state.dims_meta
+    spec = state.dims_spec
     snap: dict[str, object] = {}
-    snap['ndisplay'] = _int_or_none(meta.get('ndisplay'))
-    snap['volume'] = _bool_or_none(meta.get('volume'))
+    snap['ndisplay'] = resolve_ndisplay(state)
+    snap['volume'] = None if spec is None else bool(not spec.plane_mode)
     snap['vol_mode'] = bool(_is_volume_mode(state))
 
-    controls = meta.get('controls') if isinstance(meta.get('controls'), dict) else None
-    if isinstance(controls, dict):
-        snap['rendering'] = controls.get('rendering')
-        clim = controls.get('contrast_limits')
-        if isinstance(clim, Sequence):
-            snap['clim_lo'] = _float_or_none(clim[0] if len(clim) > 0 else None)
-            snap['clim_hi'] = _float_or_none(clim[1] if len(clim) > 1 else None)
-        else:
-            snap['clim_lo'] = None
-            snap['clim_hi'] = None
-        snap['colormap'] = controls.get('colormap')
-        snap['opacity'] = _float_or_none(controls.get('opacity'))
-    # sample_step comes from volume state, not dims meta
+    rendering = state.volume_state.get('rendering') if state.volume_state else None
+    clim = state.volume_state.get('contrast_limits') if state.volume_state else None
+    colormap = state.volume_state.get('colormap') if state.volume_state else None
+    opacity = state.volume_state.get('opacity') if state.volume_state else None
+
+    snap['rendering'] = rendering
+    if isinstance(clim, Sequence):
+        snap['clim_lo'] = _float_or_none(clim[0] if len(clim) > 0 else None)
+        snap['clim_hi'] = _float_or_none(clim[1] if len(clim) > 1 else None)
+    else:
+        snap['clim_lo'] = None
+        snap['clim_hi'] = None
+    snap['colormap'] = colormap
+    snap['opacity'] = _float_or_none(opacity)
+
     snap['sample_step'] = _float_or_none(state.volume_state.get('sample_step')) if state.volume_state else None
 
-    multiscale = meta.get('multiscale') if isinstance(meta.get('multiscale'), dict) else None
-    if isinstance(multiscale, dict):
-        snap['ms_policy'] = multiscale.get('policy')
-        level_value = _int_or_none(multiscale.get('current_level'))
+    if isinstance(state.multiscale_state, dict):
+        levels_obj = state.multiscale_state.get('levels')
+        snap['ms_policy'] = state.multiscale_state.get('policy')
+        level_value = _int_or_none(state.multiscale_state.get('current_level'))
         snap['ms_level'] = level_value
-        levels_obj = multiscale.get('levels')
         if isinstance(levels_obj, Sequence):
             snap['ms_levels'] = len(levels_obj)
             if level_value is not None and 0 <= level_value < len(levels_obj):
@@ -1224,37 +1086,17 @@ def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]
         return int(state.primary_axis_index) if state.primary_axis_index is not None else 0
     if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
         return int(axis)
-    dims_spec = state.dims_meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        resolved = dims_spec_axis_index_for_target(dims_spec, str(axis))
+    spec = state.dims_spec
+    if isinstance(spec, DimsSpec):
+        resolved = dims_spec_axis_index_for_target(spec, str(axis))
         if resolved is not None:
             return resolved
-    labels = state.dims_meta.get('axis_labels')
-    if isinstance(labels, Sequence):
-        label_map = {str(lbl): i for i, lbl in enumerate(labels)}
+        labels = dims_spec_axis_labels(spec)
+        label_map = {str(lbl): idx for idx, lbl in enumerate(labels)}
         match = label_map.get(str(axis))
-        return int(match) if match is not None else None
+        if match is not None:
+            return int(match)
     return None
-
-
-def _compute_primary_axis_index(meta: dict[str, object | None]) -> Optional[int]:
-    dims_spec = meta.get('dims_spec')
-    if isinstance(dims_spec, DimsSpec):
-        return dims_spec_primary_axis(dims_spec)
-    order = meta.get('order')
-    ndisplay = meta.get('ndisplay')
-    labels = meta.get('axis_labels')
-    nd = int(ndisplay) if ndisplay is not None else 2
-    idx_order: list[int] | None = None
-    if isinstance(order, Sequence) and len(order) > 0:
-        if all(isinstance(x, (int, float)) or (isinstance(x, str) and str(x).isdigit()) for x in order):
-            idx_order = [int(x) for x in order]
-        elif isinstance(labels, Sequence) and all(isinstance(x, str) for x in order):
-            label_to_index = {str(lbl): i for i, lbl in enumerate(labels)}
-            idx_order = [int(label_to_index.get(str(lbl), i)) for i, lbl in enumerate(order)]
-    if idx_order and len(idx_order) > nd:
-        return int(idx_order[0])
-    return 0
 
 
 def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
@@ -1267,12 +1109,13 @@ def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
 
 
 def _is_volume_mode(state: ControlStateContext) -> bool:
-    mode = str(state.dims_meta.get('mode') or '').lower()
-    nd = int(state.dims_meta.get('ndisplay') or 2)
-    if mode:
-        return mode == 'volume' and nd == 3
-    vol = bool(state.dims_meta.get('volume'))
-    return vol and nd == 3
+    ndisplay = resolve_ndisplay(state)
+    if ndisplay is None:
+        return False
+    spec = state.dims_spec
+    if spec is None:
+        return ndisplay >= 3
+    return (not spec.plane_mode) and ndisplay >= 3
 
 
 def _is_axis_playing(viewer_obj, axis_index: int) -> bool:
@@ -1310,17 +1153,15 @@ def _ensure_lo_hi(lo: float, hi: float) -> tuple[float, float]:
 
 
 def _clamp_level(state: ControlStateContext, level: int) -> int:
-    multiscale = state.dims_meta.get('multiscale')
-    if isinstance(multiscale, dict):
-        levels = multiscale.get('levels')
-        if isinstance(levels, Sequence) and levels:
-            lo, hi = 0, len(levels) - 1
-            lv = int(level)
-            if lv < lo:
-                return lo
-            if lv > hi:
-                return hi
-            return lv
+    levels = state.multiscale_state.get('levels') if isinstance(state.multiscale_state, Mapping) else None
+    if isinstance(levels, Sequence) and levels:
+        lo, hi = 0, len(levels) - 1
+        lv = int(level)
+        if lv < lo:
+            return lo
+        if lv > hi:
+            return hi
+        return lv
     return int(level)
 
 

@@ -23,6 +23,7 @@ from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,
     DimsSpecAxis,
+    dims_spec_from_payload,
     dims_spec_to_payload,
 )
 
@@ -183,6 +184,43 @@ def _make_state() -> tuple[
     return state, loop_state, ledger, dispatch
 
 
+def _set_state_spec(
+    state: control_actions.ControlStateContext,
+    *,
+    current_step: Sequence[int],
+    ndisplay: int,
+    level_shapes: Sequence[Sequence[int]],
+    mode: str = 'plane',
+    axis_labels: Sequence[str] | None = None,
+    order: Sequence[int] | None = None,
+    displayed: Sequence[int] | None = None,
+    current_level: int = 0,
+    downgraded: bool | None = None,
+) -> NotifyDimsFrame:
+    frame = _make_notify_dims_frame(
+        current_step=current_step,
+        ndisplay=ndisplay,
+        level_shapes=level_shapes,
+        mode=mode,
+        axis_labels=axis_labels,
+        order=order,
+        displayed=displayed,
+        current_level=current_level,
+        downgraded=downgraded,
+    )
+    spec_payload = frame.payload.dims_spec
+    spec = (
+        spec_payload
+        if isinstance(spec_payload, DimsSpec)
+        else dims_spec_from_payload(spec_payload)
+    )
+    assert spec is not None
+    state.dims_spec = spec
+    state.dims_step_override = tuple(int(v) for v in spec.current_step)
+    state.dims_ndisplay_override = int(spec.ndisplay)
+    return frame
+
+
 def _ack_from_pending(pending: IntentRecord, *, status: str, applied_value: Any | None = None, error: dict[str, Any] | None = None) -> Any:
     payload: dict[str, Any] = {
         'intent_id': pending.intent_id,
@@ -208,16 +246,6 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
 
     presenter = PresenterStub()
     ready_calls: list[None] = []
-
-    state.dims_meta.update(
-        {
-            'ndim': 3,
-            'order': [0, 1, 2],
-            'axis_labels': ['z', 'y', 'x'],
-            'range': [(0, 10), (0, 5), (0, 3)],
-                'displayed': [1, 2],
-        }
-    )
 
     frame = _make_notify_dims_frame(
         current_step=[1, 2, 3],
@@ -262,10 +290,10 @@ def test_handle_dims_update_seeds_state_ledger() -> None:
         'dims_range': [[0, 10], [0, 5], [0, 3]],
         'order': [0, 1, 2],
         'axis_labels': ['z', 'y', 'x'],
+        'level_shapes': [[11, 6, 4]],
         'displayed': [1, 2],
         'mode': 'plane',
         'volume': False,
-        'source': None,
     }
     assert presenter.calls
     debug = ledger.dump_debug()
@@ -307,8 +335,10 @@ def test_handle_dims_update_modes_volume_flag() -> None:
 
     mirror.ingest_dims_notify(frame)
 
-    assert state.dims_meta['mode'] == 'volume'
-    assert state.dims_meta['volume'] is True
+    spec = state.dims_spec
+    assert spec is not None
+    assert spec.plane_mode is False
+    assert control_actions.resolve_ndisplay(state) == 3
     assert loop_state.last_dims_payload['volume'] is True
     assert presenter.calls[-1]['mode'] == 'volume'
 
@@ -349,15 +379,6 @@ def test_handle_dims_update_volume_adjusts_viewer_axes() -> None:
         tx_interval_ms=0,
     )
     mirror.attach_emitter(emitter)
-
-    state.dims_meta.update(
-        {
-            'ndim': 3,
-            'axis_labels': ['z', 'y', 'x'],
-            'order': [0, 1, 2],
-            'range': [[0, 5], [0, 5], [0, 5]],
-        }
-    )
 
     frame = _make_notify_dims_frame(
         current_step=[1, 2, 3],
@@ -406,16 +427,6 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
     )
     mirror.attach_emitter(emitter)
 
-
-    state.dims_meta.update(
-        {
-            'ndim': 3,
-            'axis_labels': ['z', 'y', 'x'],
-            'order': [0, 1, 2],
-            'range': [[0, 511], [0, 255], [0, 63]],
-        }
-    )
-
     frame = _make_notify_dims_frame(
         current_step=[0, 0, 0],
         ndisplay=2,
@@ -426,7 +437,7 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
 
     mirror.ingest_dims_notify(frame)
 
-    dims_range = state.dims_meta['range']
+    dims_range = loop_state.last_dims_payload['dims_range']
     assert dims_range and dims_range[2][1] == 31
 
     assert viewer.calls, 'viewer should receive updated dims metadata'
@@ -437,9 +448,13 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
 
 def test_hud_snapshot_carries_volume_state() -> None:
     state, _, ledger, _dispatch = _make_state()
-    state.dims_meta['ndisplay'] = 3
-    state.dims_meta['mode'] = 'volume'
-    state.dims_meta['volume'] = True
+    _set_state_spec(
+        state,
+        current_step=[0, 0, 0],
+        ndisplay=3,
+        level_shapes=[[4, 4, 4]],
+        mode='volume',
+    )
 
     snap = control_actions.hud_snapshot(
         state,
@@ -454,15 +469,6 @@ def test_hud_snapshot_carries_volume_state() -> None:
 
 def test_dims_notify_preserves_optional_metadata() -> None:
     state, loop_state, ledger, dispatch = _make_state()
-    state.dims_meta.update(
-        {
-            'ndim': 3,
-            'axis_labels': ['z', 'y', 'x'],
-            'order': [0, 1, 2],
-            'displayed': [1, 2],
-            'range': [[0, 255], [0, 127], [0, 63]],
-        }
-    )
 
     mirror = NapariDimsMirror(
         ledger=ledger,
@@ -493,9 +499,15 @@ def test_dims_notify_preserves_optional_metadata() -> None:
 
     mirror.ingest_dims_notify(frame)
 
-    assert state.dims_meta['axis_labels'] == ['z', 'y', 'x']
-    assert state.dims_meta['order'] == [0, 1, 2]
-    assert state.dims_meta['displayed'] == [1, 2]
+    spec = state.dims_spec
+    assert spec is not None
+    assert [axis.label for axis in spec.axes] == ['z', 'y', 'x']
+    assert list(spec.order) == [0, 1, 2]
+    assert list(spec.displayed) == [1, 2]
+    payload = loop_state.last_dims_payload
+    assert payload['axis_labels'] == ['z', 'y', 'x']
+    assert payload['order'] == [0, 1, 2]
+    assert payload['displayed'] == [1, 2]
 
 
 def test_dims_notify_populates_multiscale_state() -> None:
@@ -543,11 +555,6 @@ def test_dims_notify_populates_multiscale_state() -> None:
     assert ms_state['current_level'] == 1
     assert ms_state['downgraded'] is True
     assert len(ms_state['levels']) == 3
-    meta = state.dims_meta.get('multiscale')
-    assert isinstance(meta, dict)
-    assert meta['current_level'] == 1
-    assert meta['downgraded'] is True
-    assert len(meta['levels']) == 3
     assert presenter.multiscale_calls, 'presenter should receive multiscale snapshot'
     last_payload = presenter.multiscale_calls[-1]
     assert last_payload['current_level'] == 1
@@ -557,13 +564,6 @@ def test_dims_notify_populates_multiscale_state() -> None:
 def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
-    state.dims_meta.update(
-        {
-            'current_step': [148, 0, 0],
-            'axis_labels': ['z', 'y', 'x'],
-            'ndim': 3,
-        }
-    )
     viewer = ViewerStub()
     presenter = PresenterStub()
 
@@ -587,6 +587,17 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
         tx_interval_ms=0,
     )
     mirror.attach_emitter(emitter)
+
+    frame = _set_state_spec(
+        state,
+        current_step=[148, 0, 0],
+        ndisplay=2,
+        level_shapes=[[256, 128, 64]],
+        axis_labels=['z', 'y', 'x'],
+        order=[0, 1, 2],
+        displayed=[1, 2],
+    )
+    mirror.ingest_dims_notify(frame)
 
 
     pending = ledger.apply_local(
@@ -626,7 +637,8 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
         log_dims_info=True,
     )
 
-    assert state.dims_meta['current_step'][0] == 271
+    current_step = control_actions.resolve_current_step(state)
+    assert current_step is not None and current_step[0] == 271
     assert state.dims_state[('0', 'index')] == 271
     assert len(viewer.calls) >= 1, "viewer should receive applied dims update"
     assert len(presenter.calls) >= 1, "presenter should receive applied dims update"
@@ -635,7 +647,15 @@ def test_dims_ack_accepted_updates_viewer_with_applied_value() -> None:
 def test_dims_step_attaches_axis_metadata() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
-    state.dims_meta['current_step'] = [5, 0, 0]
+    _set_state_spec(
+        state,
+        current_step=[5, 0, 0],
+        ndisplay=2,
+        level_shapes=[[10, 10, 10]],
+        axis_labels=['0', '1', '2'],
+        order=[0, 1, 2],
+        displayed=[1, 2],
+    )
 
     emitter = NapariDimsIntentEmitter(
         ledger=ledger,
@@ -662,7 +682,15 @@ def test_dims_step_attaches_axis_metadata() -> None:
 def test_dims_set_index_suppresses_duplicate_value() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
-    state.dims_meta['current_step'] = [7]
+    _set_state_spec(
+        state,
+        current_step=[7],
+        ndisplay=2,
+        level_shapes=[[10]],
+        axis_labels=['0'],
+        order=[0],
+        displayed=[0],
+    )
     ledger.record_confirmed('dims', '0', 'index', 7, metadata={'axis_index': 0})
 
     emitter = NapariDimsIntentEmitter(
@@ -685,17 +713,6 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = False
 
-    # Seed baseline metadata/state
-    state.dims_meta.update(
-        {
-            'ndim': 1,
-            'order': [0],
-            'axis_labels': ['z'],
-            'range': [(0, 8)],
-            'range': [[0, 8]],
-            'displayed': [0],
-        }
-    )
     presenter = PresenterStub()
     viewer_updates: list[dict[str, Any]] = []
 
@@ -726,7 +743,15 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
     )
     mirror.attach_emitter(emitter)
 
-    frame = _make_notify_dims_frame(current_step=[4], ndisplay=2, level_shapes=[[9]])
+    frame = _set_state_spec(
+        state,
+        current_step=[4],
+        ndisplay=2,
+        level_shapes=[[9]],
+        axis_labels=['axis-0'],
+        order=[0],
+        displayed=[0],
+    )
 
     mirror.ingest_dims_notify(frame)
 
@@ -751,13 +776,23 @@ def test_handle_dims_ack_rejected_reverts_projection() -> None:
         log_dims_info=False,
     )
 
-    assert state.dims_meta['current_step'][0] == 4
+    current_step = control_actions.resolve_current_step(state)
+    assert current_step is not None and current_step[0] == 4
     assert viewer_updates
 
 
 def test_handle_generic_ack_updates_view_metadata() -> None:
     state, loop_state, ledger, dispatch = _make_state()
     state.dims_ready = True
+    _set_state_spec(
+        state,
+        current_step=[0, 0],
+        ndisplay=2,
+        level_shapes=[[8, 8]],
+        axis_labels=['0', '1'],
+        order=[0, 1],
+        displayed=[0, 1],
+    )
 
     emitter2 = NapariDimsIntentEmitter(
         ledger=ledger,
@@ -777,7 +812,7 @@ def test_handle_generic_ack_updates_view_metadata() -> None:
     presenter = PresenterStub()
     control_actions.handle_generic_ack(state, loop_state, outcome, presenter=presenter)
 
-    assert state.dims_meta['ndisplay'] == 2
+    assert control_actions.resolve_ndisplay(state) == 2
 
 
 def test_camera_zoom_bypasses_dedupe() -> None:

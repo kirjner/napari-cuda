@@ -12,6 +12,11 @@ from napari_cuda.client.control.client_state_ledger import (
 from napari_cuda.client.control.emitters import NapariDimsIntentEmitter
 from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+from napari_cuda.shared.dims_spec import (
+    AxisExtent,
+    DimsSpec,
+    DimsSpecAxis,
+)
 
 
 class FakeDispatch:
@@ -67,13 +72,7 @@ def emitter_setup() -> tuple[NapariDimsIntentEmitter, ControlStateContext, Clien
     )
     state = ControlStateContext.from_env(env)
     state.dims_ready = True
-    state.dims_meta.update(
-        {
-            'axis_labels': ['z', 'y', 'x'],
-            'order': [0, 1, 2],
-            'ndim': 3,
-        }
-    )
+    _seed_default_spec(state)
     loop_state = ClientLoopState()
     loop_state.control_state = state
     ledger = ClientStateLedger(clock=lambda: 0.0)
@@ -88,6 +87,46 @@ def emitter_setup() -> tuple[NapariDimsIntentEmitter, ControlStateContext, Clien
         tx_interval_ms=0,
     )
     return emitter, state, loop_state, ledger, dispatch
+
+
+def _seed_default_spec(state: ControlStateContext) -> None:
+    axis_labels = ['z', 'y', 'x']
+    level_shape = (10, 10, 10)
+    axes = tuple(
+        DimsSpecAxis(
+            index=i,
+            label=axis_labels[i],
+            role=axis_labels[i],
+            displayed=i in {1, 2},
+            order_position=i,
+            current_step=0,
+            margin_left_steps=0.0,
+            margin_right_steps=0.0,
+            margin_left_world=0.0,
+            margin_right_world=0.0,
+            per_level_steps=(level_shape[i],),
+            per_level_world=(AxisExtent(0.0, float(level_shape[i] - 1), 1.0),),
+        )
+        for i in range(3)
+    )
+    spec = DimsSpec(
+        version=1,
+        ndim=3,
+        ndisplay=2,
+        order=(0, 1, 2),
+        displayed=(1, 2),
+        current_level=0,
+        current_step=(0, 0, 0),
+        level_shapes=(level_shape,),
+        plane_mode=True,
+        axes=axes,
+        levels=({'index': 0, 'shape': list(level_shape)},),
+        downgraded=None,
+        labels=None,
+    )
+    state.dims_spec = spec
+    state.dims_step_override = tuple(spec.current_step)
+    state.dims_ndisplay_override = int(spec.ndisplay)
 
 
 def test_dims_step_dispatches_delta(emitter_setup) -> None:
@@ -132,7 +171,7 @@ def test_handle_wheel_forwards_primary_axis(emitter_setup) -> None:
 
 def test_view_set_ndisplay_dispatches(emitter_setup) -> None:
     emitter, state, _loop_state, _ledger, dispatch = emitter_setup
-    state.dims_meta['ndisplay'] = 2
+    state.dims_ndisplay_override = 2
 
     ok = emitter.view_set_ndisplay(3, origin='ui')
 
@@ -146,7 +185,7 @@ def test_view_set_ndisplay_dispatches(emitter_setup) -> None:
 
 def test_toggle_ndisplay_flips_target(emitter_setup) -> None:
     emitter, state, _loop_state, _ledger, dispatch = emitter_setup
-    state.dims_meta['ndisplay'] = 2
+    state.dims_ndisplay_override = 2
 
     ok = emitter.toggle_ndisplay(origin='ui')
 
