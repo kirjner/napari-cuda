@@ -9,13 +9,14 @@ from typing import TYPE_CHECKING, Any, Optional
 from qtpy import QtCore
 
 from napari_cuda.client.control import state_update_actions as control_actions
+from napari_cuda.client.control.dims_projection import project_dims, viewer_update_from_spec
 from napari_cuda.client.control.client_state_ledger import (
     AckReconciliation,
     ClientStateLedger,
     MirrorEvent,
 )
 from napari_cuda.protocol.messages import NotifyDimsFrame
-from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_axis_index_for_target, dims_spec_primary_axis, dims_spec_to_payload
+from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_axis_index_for_target, dims_spec_to_payload
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
@@ -81,7 +82,8 @@ class NapariDimsMirror:
         assert isinstance(dims_spec, DimsSpec), 'notify.dims requires dims_spec'
 
         state.dims_spec = dims_spec
-        state.primary_axis_index = dims_spec_primary_axis(dims_spec)
+        projection = project_dims(dims_spec)
+        state.primary_axis_index = projection.primary_axis
 
         multiscale_snapshot = _build_multiscale_snapshot(payload)
         if multiscale_snapshot is not None:
@@ -96,7 +98,7 @@ class NapariDimsMirror:
             state.multiscale_state = {}
         self._apply_multiscale_to_presenter(multiscale_snapshot)
 
-        viewer_update = control_actions.viewer_update_from_dims_spec(dims_spec)
+        viewer_update = viewer_update_from_spec(dims_spec, projection)
         self._loop_state.last_dims_spec = dims_spec
 
         axis_labels = viewer_update['axis_labels']
@@ -268,16 +270,11 @@ class NapariDimsMirror:
         if spec is None:
             spec = control_actions.ensure_dims_spec(self._state)
 
-        step = control_actions.projected_dims_step(self._ledger, spec)
-        ndisplay = control_actions.projected_ndisplay(self._ledger, spec)
-        viewer_update_local = control_actions.viewer_update_from_dims_spec(
-            spec,
-            step=step,
-            ndisplay=ndisplay,
-        )
+        projection = project_dims(spec, self._ledger)
+        viewer_update_local = viewer_update_from_spec(spec, projection)
 
         self._loop_state.last_dims_spec = spec
-        self._state.primary_axis_index = dims_spec_primary_axis(spec)
+        self._state.primary_axis_index = projection.primary_axis
 
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(

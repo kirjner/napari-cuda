@@ -13,7 +13,13 @@ from typing import (
 )
 
 from napari_cuda.protocol import NotifyCamera
-from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_axis_index_for_target, dims_spec_primary_axis
+from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_axis_index_for_target
+
+from .dims_projection import (
+    current_ndisplay as dims_current_ndisplay,
+    is_volume_mode as dims_is_volume_mode,
+    project_dims,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
@@ -171,63 +177,6 @@ def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
 def _runtime_key(scope: str, target: str, key: str) -> str:
     return f"{scope}:{target}:{key}"
 
-
-def viewer_update_from_dims_spec(
-    spec: DimsSpec,
-    *,
-    step: Sequence[int] | None = None,
-    ndisplay: int | None = None,
-) -> dict[str, Any]:
-    if step is None:
-        step = spec.current_step
-    if ndisplay is None:
-        ndisplay = int(spec.ndisplay)
-    level_shapes = spec.level_shapes
-    if 0 <= spec.current_level < len(level_shapes):
-        active_shape = level_shapes[spec.current_level]
-    else:
-        active_shape = ()
-    dims_range = tuple((0, max(0, int(dim) - 1)) for dim in active_shape)
-    axis_labels = tuple(axis.label for axis in spec.axes)
-    order = tuple(int(idx) for idx in spec.order)
-    displayed = tuple(int(idx) for idx in spec.displayed)
-    return {
-        'current_step': tuple(int(v) for v in step),
-        'ndisplay': int(ndisplay),
-        'ndim': int(spec.ndim),
-        'dims_range': dims_range,
-        'order': order,
-        'axis_labels': axis_labels,
-        'displayed': displayed,
-    }
-
-
-def projected_dims_step(ledger: ClientStateLedger, spec: DimsSpec) -> tuple[int, ...]:
-    values: list[int] = []
-    for axis in spec.axes:
-        label = axis.label
-        pending = ledger.latest_pending_value('dims', label, 'index')
-        if pending is not None:
-            values.append(int(pending))
-            continue
-        confirmed = ledger.confirmed_value('dims', label, 'index')
-        if confirmed is not None:
-            values.append(int(confirmed))
-            continue
-        values.append(int(axis.current_step))
-    return tuple(values)
-
-
-def projected_ndisplay(ledger: ClientStateLedger, spec: DimsSpec) -> int:
-    pending = ledger.latest_pending_value('view', 'main', 'ndisplay')
-    if pending is not None:
-        return int(pending)
-    confirmed = ledger.confirmed_value('view', 'main', 'ndisplay')
-    if confirmed is not None:
-        return int(confirmed)
-    return int(spec.ndisplay)
-
-
 def ensure_dims_spec(state: ControlStateContext) -> DimsSpec:
     spec = state.dims_spec
     assert spec is not None, "dims_spec must be available"
@@ -235,10 +184,7 @@ def ensure_dims_spec(state: ControlStateContext) -> DimsSpec:
 
 
 def current_ndisplay(state: ControlStateContext, ledger: ClientStateLedger) -> Optional[int]:
-    spec = state.dims_spec
-    if spec is None:
-        return None
-    return projected_ndisplay(ledger, spec)
+    return dims_current_ndisplay(state, ledger)
 
 
 def _emit_state_update(
@@ -818,11 +764,12 @@ def hud_snapshot(
     spec = state.dims_spec
     snap: dict[str, object] = {}
     if spec is not None:
-        ndisplay = projected_ndisplay(ledger, spec)
+        projection = project_dims(spec, ledger)
         snap['volume'] = bool(not spec.plane_mode)
-        snap['vol_mode'] = bool(not spec.plane_mode and ndisplay >= 3)
-        snap['ndisplay'] = int(ndisplay)
+        snap['vol_mode'] = bool(not spec.plane_mode and projection.ndisplay >= 3)
+        snap['ndisplay'] = projection.ndisplay
     else:
+        projection = None
         snap['volume'] = None
         snap['vol_mode'] = False
         snap['ndisplay'] = None
@@ -860,7 +807,8 @@ def hud_snapshot(
             snap['ms_levels'] = None
             snap['ms_path'] = None
 
-    snap['primary_axis'] = _int_or_none(state.primary_axis_index)
+    primary_axis = projection.primary_axis if projection is not None else state.primary_axis_index
+    snap['primary_axis'] = _int_or_none(primary_axis)
     snap.update(zoom_state)
     video_w, video_h = video_size
     snap['video_w'] = _int_or_none(video_w)
@@ -896,11 +844,7 @@ def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
 
 
 def _is_volume_mode(state: ControlStateContext, ledger: ClientStateLedger) -> bool:
-    spec = state.dims_spec
-    if spec is None:
-        return False
-    ndisplay = projected_ndisplay(ledger, spec)
-    return (not spec.plane_mode) and ndisplay >= 3
+    return dims_is_volume_mode(state, ledger)
 
 
 def _is_axis_playing(viewer_obj, axis_index: int) -> bool:
