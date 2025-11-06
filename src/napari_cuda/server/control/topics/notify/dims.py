@@ -13,6 +13,11 @@ from napari_cuda.server.control.protocol.runtime import (
     feature_enabled,
     state_session,
 )
+from napari_cuda.shared.dims_spec import (
+    dims_spec_axis_labels,
+    dims_spec_displayed,
+    dims_spec_order,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -30,12 +35,13 @@ async def _deliver_dims_state(
         return
 
     if getattr(server, "_log_dims_info", False):
+        spec = payload.dims_spec
         logger.info(
             "notify.dims: step=%s order=%s displayed=%s axis_labels=%s level_shapes=%s current_level=%s",
             payload.current_step,
-            payload.order,
-            payload.displayed,
-            payload.axis_labels,
+            dims_spec_order(spec),
+            dims_spec_displayed(spec),
+            dims_spec_axis_labels(spec),
             payload.level_shapes,
             payload.current_level,
         )

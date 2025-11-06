@@ -1034,9 +1034,6 @@ def _default_dims_snapshot() -> dict[str, Any]:
     return {
         "step": [0, 0, 0],
         "current_step": [0, 0, 0],
-        "axis_labels": ["z", "y", "x"],
-        "order": [0, 1, 2],
-        "displayed": [1, 2],
         "ndisplay": 2,
         "mode": "plane",
         "levels": [

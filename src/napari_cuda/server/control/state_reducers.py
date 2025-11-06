@@ -777,13 +777,6 @@ def _dims_entries_from_payload(
     )
 
     # mode is derived from view.ndisplay; do not persist dims.mode
-    if payload.order is not None:
-        entries.append(("dims", "main", "order", tuple(int(idx) for idx in payload.order)))
-    if payload.axis_labels is not None:
-        entries.append(("dims", "main", "axis_labels", tuple(str(label) for label in payload.axis_labels)))
-    if getattr(payload, "labels", None) is not None:
-        entries.append(("dims", "main", "labels", tuple(str(label) for label in payload.labels)))
-
     entries.append(("multiscale", "main", "level", int(payload.current_level)))
     entries.append(
         (
@@ -837,10 +830,6 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     ndisplay = int(dims_spec.ndisplay)
     mode = "volume" if ndisplay >= 3 else "plane"
 
-    axis_labels = dims_spec_axis_labels(dims_spec)
-    order = dims_spec_order(dims_spec)
-    displayed = dims_spec_displayed(dims_spec)
-
     labels_raw = optional("dims", "labels")
     labels = (
         tuple(str(label) for label in labels_raw)
@@ -856,9 +845,6 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
         downgraded=downgraded,
         mode=mode,
         ndisplay=ndisplay,
-        axis_labels=axis_labels,
-        order=order,
-        displayed=displayed,
         labels=labels,
         dims_spec=dims_spec,
     )
@@ -915,26 +901,6 @@ def reduce_bootstrap_state(
     )
     displayed_tuple = tuple(int(v) for v in displayed)
 
-    dims_payload = NotifyDimsPayload(
-        current_step=resolved_step,
-        level_shapes=resolved_level_shapes,
-        levels=resolved_levels,
-        current_level=resolved_current_level,
-        downgraded=False,
-        mode=mode_value,
-        ndisplay=resolved_ndisplay,
-        axis_labels=resolved_axis_labels if resolved_axis_labels else None,
-        order=resolved_order if resolved_order else None,
-        displayed=displayed_tuple if displayed_tuple else None,
-        labels=None,
-    )
-
-    entries = _dims_entries_from_payload(
-        dims_payload,
-        axis_index=axis_index,
-        axis_target=axis_target,
-    )
-
     axes_entries: list[DimsSpecAxis] = []
     order_lookup = {int(idx): pos for pos, idx in enumerate(resolved_order)}
     displayed_set = set(int(idx) for idx in displayed_tuple)
@@ -976,6 +942,23 @@ def reduce_bootstrap_state(
         levels=resolved_levels,
         downgraded=False,
         labels=None,
+    )
+
+    dims_payload = NotifyDimsPayload(
+        current_step=resolved_step,
+        level_shapes=resolved_level_shapes,
+        levels=resolved_levels,
+        current_level=resolved_current_level,
+        downgraded=False,
+        mode=mode_value,
+        ndisplay=resolved_ndisplay,
+        dims_spec=dims_spec,
+    )
+
+    entries = _dims_entries_from_payload(
+        dims_payload,
+        axis_index=axis_index,
+        axis_target=axis_target,
     )
 
     entries.append(("dims", "main", "dims_spec", _serialize_dims_spec(dims_spec)))
@@ -1071,17 +1054,17 @@ def reduce_dims_update(
     if len(step) < ndim:
         step.extend([0] * (ndim - len(step)))
 
+    current_spec = payload.dims_spec
+    assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
+
     idx = resolve_axis_index(
         axis,
-        order=payload.order,
-        axis_labels=payload.axis_labels,
+        order=dims_spec_order(current_spec),
+        axis_labels=dims_spec_axis_labels(current_spec),
         ndim=len(step),
     )
     if idx is None:
         raise ValueError("unable to resolve axis index for dims update")
-
-    current_spec = payload.dims_spec
-    assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
 
     spec_labels = dims_spec_axis_labels(current_spec)
     control_target = spec_labels[idx] if idx < len(spec_labels) else str(idx)
@@ -1130,10 +1113,10 @@ def reduce_dims_update(
         op_kind="dims-update",
     )
 
-    current_step_entry = stored_entries.get(("dims", "main", "current_step"))
-    assert current_step_entry is not None, "dims transaction must return current_step entry"
-    assert current_step_entry.version is not None, "dims transaction must yield versioned entry"
-    version = int(current_step_entry.version)
+    spec_entry = stored_entries.get(("dims", "main", "dims_spec"))
+    assert spec_entry is not None, "dims transaction must return dims_spec entry"
+    assert spec_entry.version is not None, "dims transaction must yield versioned spec entry"
+    version = int(spec_entry.version)
 
     logger.debug(
         "dims intent updated axis=%s prop=%s step=%s version=%d origin=%s",
@@ -1193,10 +1176,13 @@ def reduce_dims_margins_update(
     ts = _now(timestamp)
     payload = _ledger_dims_payload(ledger)
 
+    axes_spec = payload.dims_spec
+    assert isinstance(axes_spec, DimsSpec), "dims spec missing from ledger payload"
+
     idx = resolve_axis_index(
         axis,
-        order=payload.order,
-        axis_labels=payload.axis_labels,
+        order=dims_spec_order(axes_spec),
+        axis_labels=dims_spec_axis_labels(axes_spec),
         ndim=len(payload.current_step),
     )
     if idx is None:
@@ -1214,8 +1200,6 @@ def reduce_dims_margins_update(
         arr.extend([0.0] * (len(payload.current_step) - len(arr)))
     arr[idx] = float(value)
 
-    axes_spec = payload.dims_spec
-    assert isinstance(axes_spec, DimsSpec), "dims spec missing from ledger payload"
     axes_list = list(axes_spec.axes)
     axis_entry = axes_list[idx]
     if side_key == "margin_left":
@@ -1253,7 +1237,9 @@ def reduce_dims_margins_update(
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,
-        version=int(stored_entries[("dims", "main", "current_step")].version) if stored_entries[("dims", "main", "current_step")].version is not None else 0,
+        version=int(stored_entries[("dims", "main", "dims_spec")].version)
+        if stored_entries[("dims", "main", "dims_spec")].version is not None
+        else 0,
         dims_spec=new_spec,
     )
 
@@ -1270,6 +1256,8 @@ def reduce_view_update(
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     dims_payload = _ledger_dims_payload(ledger)
+    spec = dims_payload.dims_spec
+    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     if ndisplay is not None:
         target_ndisplay = 3 if int(ndisplay) >= 3 else 2
@@ -1281,7 +1269,7 @@ def reduce_view_update(
     metadata = _metadata_from_intent(resolved_intent_id)
 
     baseline_step = tuple(int(v) for v in dims_payload.current_step) if dims_payload.current_step else None
-    baseline_order = tuple(int(idx) for idx in dims_payload.order) if dims_payload.order is not None else None
+    baseline_order = dims_spec_order(spec)
 
     if target_ndisplay >= 3:
         plane_state = _load_plane_state(ledger)
@@ -1314,8 +1302,6 @@ def reduce_view_update(
     ndim = 0
     if baseline_step is not None:
         ndim = len(baseline_step)
-    elif baseline_order is not None:
-        ndim = len(baseline_order)
     if ndim <= 0:
         ndim = max(int(target_ndisplay), 1)
 
@@ -1329,9 +1315,6 @@ def reduce_view_update(
         order_value=order_value,
         target_ndisplay=target_ndisplay,
     )
-
-    spec = dims_payload.dims_spec
-    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     axes_list: list[DimsSpecAxis] = []
     order_lookup = {int(axis_idx): pos for pos, axis_idx in enumerate(order_value)}

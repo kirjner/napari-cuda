@@ -163,9 +163,6 @@ class ServerDimsMirror:
             downgraded=state["downgraded"],
             mode=state["mode"],
             ndisplay=state["ndisplay"],
-            axis_labels=state["axis_labels"],
-            order=state["order"],
-            displayed=state["displayed"],
             labels=state["labels"],
             dims_spec=state["dims_spec"],
         )

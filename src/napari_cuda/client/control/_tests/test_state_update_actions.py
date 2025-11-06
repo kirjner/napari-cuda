@@ -101,12 +101,6 @@ def _make_notify_dims_frame(
 
     if downgraded is not None:
         payload['downgraded'] = bool(downgraded)
-    if axis_labels is not None:
-        payload['axis_labels'] = [str(label) for label in axis_labels]
-    if order is not None:
-        payload['order'] = [int(index) for index in order]
-    if displayed is not None:
-        payload['displayed'] = [int(index) for index in displayed]
 
     ndim = len(level_shapes[0]) if level_shapes else len(step_values)
     resolved_labels = list(axis_labels) if axis_labels is not None else [f"axis-{i}" for i in range(ndim)]

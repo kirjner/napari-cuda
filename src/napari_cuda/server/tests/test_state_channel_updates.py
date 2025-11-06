@@ -205,19 +205,51 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     fake_ws.send = _fake_send  # type: ignore[attr-defined]
 
     server._state_clients = {fake_ws}
-    baseline_dims = NotifyDimsPayload.from_dict(
-        {
-            "step": [0, 0, 0],
-            "current_step": [0, 0, 0],
-            "level_shapes": [[10, 10, 10]],
-            "axis_labels": ["z", "y", "x"],
-            "order": [0, 1, 2],
-            "displayed": [0, 1, 2],
-            "ndisplay": 2,
-            "mode": "plane",
-            "levels": [{"index": 0, "shape": [10, 10, 10]}],
-            "current_level": 0,
-        }
+    baseline_axes = []
+    axis_labels = ("z", "y", "x")
+    for idx, label in enumerate(axis_labels):
+        baseline_axes.append(
+            DimsSpecAxis(
+                index=idx,
+                label=label,
+                role=label.lower(),
+                displayed=idx >= 1,
+                order_position=idx,
+                current_step=0,
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=(10,),
+                per_level_world=(AxisExtent(0.0, 9.0, 1.0),),
+            )
+        )
+
+    baseline_spec = DimsSpec(
+        version=1,
+        ndim=3,
+        ndisplay=2,
+        order=(0, 1, 2),
+        displayed=(1, 2),
+        current_level=0,
+        current_step=(0, 0, 0),
+        level_shapes=((10, 10, 10),),
+        plane_mode=True,
+        axes=tuple(baseline_axes),
+        levels=({"index": 0, "shape": [10, 10, 10]},),
+        downgraded=False,
+        labels=None,
+    )
+
+    baseline_dims = NotifyDimsPayload(
+        current_step=(0, 0, 0),
+        level_shapes=((10, 10, 10),),
+        levels=({"index": 0, "shape": [10, 10, 10]},),
+        current_level=0,
+        downgraded=None,
+        mode="plane",
+        ndisplay=2,
+        dims_spec=baseline_spec,
     )
     server._pixel = SimpleNamespace(bypass_until_key=False)
 
@@ -500,20 +532,88 @@ def _frames_of_type(frames: list[dict[str, Any]], frame_type: str) -> list[dict[
     return [frame for frame in frames if frame.get("type") == frame_type]
 
 def _make_dims_snapshot(**overrides: Any) -> dict[str, Any]:
+    overrides = dict(overrides)
+
+    base_level_shapes = overrides.pop("level_shapes", [[512, 256, 64], [256, 128, 32]])
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in base_level_shapes)
+    base_step = overrides.get("current_step", overrides.get("step", [0, 0, 0]))
+    current_step = tuple(int(v) for v in base_step)
+    ndim = len(level_shapes[0]) if level_shapes else len(current_step)
+
+    default_axis_labels = tuple(("z", "y", "x", "t", "c")[idx] if idx < 5 else f"axis-{idx}" for idx in range(ndim))
+    axis_labels = tuple(overrides.pop("axis_labels", default_axis_labels))
+    order_values = tuple(overrides.pop("order", tuple(range(ndim))))
+
+    ndisplay = int(overrides.get("ndisplay", 2))
+    displayed_default = tuple(range(max(0, ndim - ndisplay), ndim))
+    displayed = tuple(overrides.pop("displayed", displayed_default))
+
+    mode_value = overrides.get("mode", "volume" if ndisplay >= 3 else "plane")
+    current_level = int(overrides.get("current_level", 0))
+    downgraded = overrides.get("downgraded")
+    labels_value = overrides.pop("labels", None)
+
+    axes: list[DimsSpecAxis] = []
+    order_lookup = {int(idx): pos for pos, idx in enumerate(order_values)}
+    displayed_set = {int(idx) for idx in displayed}
+    for idx in range(ndim):
+        per_steps = tuple(shape[idx] if idx < len(shape) else 1 for shape in level_shapes)
+        per_world = tuple(
+            AxisExtent(start=0.0, stop=float(max(count - 1, 0)), step=1.0) for count in per_steps
+        )
+        current_step_val = current_step[idx] if idx < len(current_step) else 0
+        axes.append(
+            DimsSpecAxis(
+                index=idx,
+                label=axis_labels[idx],
+                role=axis_labels[idx].lower(),
+                displayed=idx in displayed_set,
+                order_position=int(order_lookup.get(idx, idx)),
+                current_step=current_step_val,
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=per_steps,
+                per_level_world=per_world,
+            )
+        )
+
+    levels_payload = overrides.get(
+        "levels",
+        [
+            {"index": idx, "shape": list(shape)}
+            for idx, shape in enumerate(level_shapes)
+        ],
+    )
+
+    base_spec = DimsSpec(
+        version=1,
+        ndim=ndim,
+        ndisplay=ndisplay,
+        order=order_values,
+        displayed=displayed,
+        current_level=current_level,
+        current_step=current_step,
+        level_shapes=level_shapes,
+        plane_mode=(mode_value != "volume"),
+        axes=tuple(axes),
+        levels=tuple(dict(level) for level in levels_payload),
+        downgraded=downgraded,
+        labels=None if labels_value is None else tuple(str(v) for v in labels_value),
+    )
+
     base = {
         "step": [0, 0, 0],
         "current_step": [0, 0, 0],
-        "axis_labels": ["z", "y", "x"],
-        "order": [0, 1, 2],
-        "displayed": [1, 2],
-        "ndisplay": 2,
-        "mode": "plane",
-        "levels": [
-            {"index": 0, "shape": [512, 256, 64]},
-            {"index": 1, "shape": [256, 128, 32]},
-        ],
-        "current_level": 0,
-        "level_shapes": [[512, 256, 64], [256, 128, 32]],
+        "ndisplay": ndisplay,
+        "mode": mode_value,
+        "levels": levels_payload,
+        "current_level": current_level,
+        "level_shapes": [list(shape) for shape in level_shapes],
+        "downgraded": downgraded,
+        "labels": labels_value,
+        "dims_spec": dims_spec_to_payload(base_spec),
     }
     base.update(overrides)
     return base

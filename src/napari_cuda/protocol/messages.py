@@ -673,11 +673,20 @@ class NotifyDimsPayload:
     downgraded: bool | None
     mode: str
     ndisplay: int
-    axis_labels: tuple[str, ...] | None
-    order: tuple[int, ...] | None
-    displayed: tuple[int, ...] | None
+    dims_spec: DimsSpec
     labels: tuple[str, ...] | None = None
-    dims_spec: DimsSpec | None = None
+
+    @property
+    def axis_labels(self) -> tuple[str, ...]:
+        return tuple(axis.label for axis in self.dims_spec.axes)
+
+    @property
+    def order(self) -> tuple[int, ...]:
+        return tuple(int(idx) for idx in self.dims_spec.order)
+
+    @property
+    def displayed(self) -> tuple[int, ...]:
+        return tuple(int(idx) for idx in self.dims_spec.displayed)
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -693,17 +702,9 @@ class NotifyDimsPayload:
 
         if self.downgraded is not None:
             payload["downgraded"] = bool(self.downgraded)
-        if self.axis_labels is not None:
-            payload["axis_labels"] = [str(lbl) for lbl in self.axis_labels]
-        if self.order is not None:
-            payload["order"] = [int(idx) for idx in self.order]
-        if self.displayed is not None:
-            payload["displayed"] = [int(idx) for idx in self.displayed]
         if self.labels is not None:
             payload["labels"] = [str(label) for label in self.labels]
-        dims_payload = dims_spec_to_payload(self.dims_spec)
-        if dims_payload is not None:
-            payload["dims_spec"] = dims_payload
+        payload["dims_spec"] = dims_spec_to_payload(self.dims_spec)
         return payload
 
     @classmethod
@@ -711,8 +712,8 @@ class NotifyDimsPayload:
         mapping = _as_mapping(data, "notify.dims payload")
         _ensure_keyset(
             mapping,
-            required=("step", "levels", "current_level", "mode", "ndisplay", "level_shapes"),
-            optional=("downgraded", "axis_labels", "order", "displayed", "labels", "current_step", "dims_spec"),
+            required=("step", "levels", "current_level", "mode", "ndisplay", "level_shapes", "dims_spec"),
+            optional=("downgraded", "labels", "current_step"),
             context="notify.dims payload",
         )
 
@@ -723,27 +724,6 @@ class NotifyDimsPayload:
         downgraded_value = mapping.get("downgraded")
         downgraded = bool(downgraded_value) if downgraded_value is not None else None
 
-        axis_labels_value = mapping.get("axis_labels")
-        axis_labels = (
-            tuple(str(lbl) for lbl in _as_sequence(axis_labels_value, "notify.dims payload.axis_labels"))
-            if axis_labels_value is not None
-            else None
-        )
-
-        order_value = mapping.get("order")
-        order = (
-            tuple(int(idx) for idx in _as_sequence(order_value, "notify.dims payload.order"))
-            if order_value is not None
-            else None
-        )
-
-        displayed_value = mapping.get("displayed")
-        displayed = (
-            tuple(int(idx) for idx in _as_sequence(displayed_value, "notify.dims payload.displayed"))
-            if displayed_value is not None
-            else None
-        )
-
         labels_value = mapping.get("labels")
         labels = (
             tuple(str(lbl) for lbl in _as_sequence(labels_value, "notify.dims payload.labels"))
@@ -753,6 +733,8 @@ class NotifyDimsPayload:
 
         dims_spec_value = mapping.get("dims_spec")
         dims_spec = dims_spec_from_payload(dims_spec_value)
+        if dims_spec is None:
+            raise ValueError("notify.dims payload requires dims_spec")
 
         level_shapes_value = mapping["level_shapes"]
         level_shapes_seq = _as_sequence(level_shapes_value, "notify.dims payload.level_shapes")
@@ -774,9 +756,6 @@ class NotifyDimsPayload:
             downgraded=downgraded,
             mode=str(mapping["mode"]),
             ndisplay=int(mapping["ndisplay"]),
-            axis_labels=axis_labels,
-            order=order,
-            displayed=displayed,
             labels=labels,
             dims_spec=dims_spec,
         )
