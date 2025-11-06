@@ -229,85 +229,6 @@ def _current_ndisplay(ledger: ServerStateLedger) -> int:
     return 2
 
 
-def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
-    entry = ledger.get("viewport", "plane", "state")
-    if entry is not None and isinstance(entry.value, Mapping):
-        payload = dict(entry.value)
-        if "intent" in payload and "request" not in payload:
-            payload["request"] = payload.pop("intent")
-        return PlaneState(**payload)
-    return PlaneState()
-
-
-def _plane_from_payload(value: PlaneState | Mapping[str, Any] | None) -> PlaneState:
-    if value is None:
-        return PlaneState()
-    if isinstance(value, PlaneState):
-        return PlaneState(**dict(value.__dict__))
-    if isinstance(value, Mapping):
-        payload = dict(value)
-        if "intent" in payload and "request" not in payload:
-            payload["request"] = payload.pop("intent")
-        return PlaneState(**payload)
-    raise TypeError(f"unsupported plane state payload: {type(value)!r}")
-
-
-def _store_plane_state(
-    ledger: ServerStateLedger,
-    plane_state: PlaneState,
-    *,
-    origin: str,
-    timestamp: float,
-    metadata: Optional[Mapping[str, Any]],
-) -> None:
-    payload = asdict(plane_state)
-    entries: list[tuple] = []
-    if metadata:
-        meta = dict(metadata)
-        entries.append(("viewport", "plane", "state", payload, meta))
-    else:
-        entries.append(("viewport", "plane", "state", payload))
-
-    if plane_state.applied_level is not None:
-        level_value = int(plane_state.applied_level)
-        if metadata:
-            entries.append(("view_cache", "plane", "level", level_value, dict(metadata)))
-        else:
-            entries.append(("view_cache", "plane", "level", level_value))
-    if plane_state.applied_step is not None:
-        step_value = tuple(int(v) for v in plane_state.applied_step)
-        if metadata:
-            entries.append(("view_cache", "plane", "step", step_value, dict(metadata)))
-        else:
-            entries.append(("view_cache", "plane", "step", step_value))
-
-    ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
-
-
-def _metadata_from_intent(intent_id: Optional[str]) -> Optional[dict[str, Any]]:
-    if not intent_id:
-        return None
-    return {"intent_id": intent_id}
-
-
-def _current_ndisplay(ledger: ServerStateLedger) -> int:
-    entry = ledger.get("view", "main", "ndisplay")
-    if entry is not None and isinstance(entry.value, int):
-        return int(entry.value)
-    return 2
-
-
-def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
-    entry = ledger.get("viewport", "plane", "state")
-    if entry is not None and isinstance(entry.value, Mapping):
-        payload = dict(entry.value)
-        try:
-            return PlaneState(**payload)
-        except Exception:
-            logger.debug("failed to deserialize plane state payload", exc_info=True)
-    return PlaneState()
-
-
 def _load_volume_state(ledger: ServerStateLedger) -> VolumeState:
     entry = ledger.get("viewport", "volume", "state")
     if entry is not None and isinstance(entry.value, Mapping):
@@ -1514,7 +1435,7 @@ def reduce_view_update(
     spec = dims_payload.dims_spec
     assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
-    axes_list: list[AxesSpecAxis] = []
+    axes_list: list[DimsSpecAxis] = []
     order_lookup = {int(axis_idx): pos for pos, axis_idx in enumerate(order_value)}
     displayed_set = {int(idx) for idx in displayed_value}
     for axis in spec.axes:
@@ -1868,7 +1789,7 @@ def reduce_level_update(
     else:
         step_tuple = normalized_step
 
-    axes_list: list[AxesSpecAxis] = []
+    axes_list: list[DimsSpecAxis] = []
     for axis in spec.axes:
         axis_index = int(axis.index)
         current_step_value = step_tuple[axis_index] if axis_index < len(step_tuple) else axis.current_step

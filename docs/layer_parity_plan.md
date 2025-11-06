@@ -166,16 +166,16 @@ keeping the existing tuple fields available for callers that still depend on
 them. The work lands in two aggressive phases so we can validate each step
 without stalling the stream pipeline.
 
-### Phase 1 – AxesSpec alongside ledger tuples (current)
+### Phase 1 – DimsSpec alongside ledger tuples (current)
 
-- Introduce immutable `AxesSpec` / `AxesSpecAxis` dataclasses in
-  `src/napari_cuda/shared/axis_spec.py` with a strict builder that derives the
+- Introduce immutable `DimsSpec` / `DimsSpecAxis` dataclasses in
+  `src/napari_cuda/shared/dims_spec.py` with a strict builder that derives the
   spec from the confirmed ledger snapshot. Assertions guard against missing or
   divergent tuple data.
 - Extend `RenderLedgerSnapshot` and `NotifyDimsPayload` so both tuples and the
   derived spec travel together end-to-end (reducers → snapshot builders → notify
   payloads → runtime apply code).
-- Update the EGL apply path and client mirrors to prefer the `AxesSpec` values
+- Update the EGL apply path and client mirrors to prefer the `DimsSpec` values
   while still asserting that historical tuples match. No fallbacks, no
   try/except.
 - Tests: shared spec round-trip coverage, server notify/state-channel checks,
@@ -186,7 +186,7 @@ without stalling the stream pipeline.
 
 - Once all runtime/client consumers are spec-native and coverage passes, stop
   writing tuple keys from reducers and emit them only for any remaining legacy
-  mirror. Validate that all downstream paths rely purely on `AxesSpec`.
+  mirror. Validate that all downstream paths rely purely on `DimsSpec`.
 - Remove tuple plumbing and associated helpers (`_ledger_dims_payload`
   fallbacks, `_tuple_or_none` helpers, etc.). Update docs/tests to treat the
   spec as the single source of truth.
@@ -196,7 +196,7 @@ without stalling the stream pipeline.
 ### Trackers / Follow-ups
 
 - [ ] Audit remaining tuple reads (`snapshot.displayed`, `dims_meta['order']`,
-      margin helpers) and convert them to use `AxesSpec`.
+      margin helpers) and convert them to use `DimsSpec`.
 - [ ] Add end-to-end regression exercising view toggles and margin updates with
       tuples removed.
 - [ ] Update external integration docs once tuple removal is complete.
