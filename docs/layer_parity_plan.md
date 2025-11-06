@@ -31,6 +31,8 @@ Current State Snapshot
 * Sanitizers everywhere: reducers clamp/index/proportional helpers,
   mirror/client code re-normalises steps/orders/labels, runtime planners
   clamp again, and metadata only exists to ferry intent IDs/axis hints.
+* Notify pipeline now emits spec-only payloads; axis/order/displayed metadata is derived from `DimsSpec` rather than
+  duplicated in the wire format.
 
 -----------------------------------------------------------------------
 
@@ -69,13 +71,10 @@ Workstreams & Sequencing
   `range`, etc.) once call sites fold into helpers.
 * Refresh tests/fixtures to construct `DimsSpec` payloads directly.
 
-### 3. Protocol Flip
-* Change `NotifyDimsPayload` so `dims_spec` is required and the legacy
-  tuple fields are removed.
-* Update server/client serialization + tests (notify frames, state-channel
-  replay, client runtime) to assert spec-only payloads.
-* Provide a short-lived compatibility shim if needed (feature flag or
-  version gate), then delete tuple parsing.
+### 3. Protocol Flip (DONE)
+* `NotifyDimsPayload` now requires `dims_spec` and no longer transports the legacy tuple fields.
+* Server/client serialization + tests (notify frames, state-channel replay, client runtime) assert spec-only payloads.
+* Tuple parsing paths have been removed.
 
 ### 4. Server Reducer Cleanup
 * Stop writing tuple keys from `_dims_entries_from_payload` and related
