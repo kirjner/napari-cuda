@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -28,16 +28,6 @@ class ServerDimsMirror:
     """Project server ledger updates into notify.dims broadcasts."""
 
     _WATCH_KEYS: tuple[_Key, ...] = (
-        _Key("view", "main", "ndisplay"),
-        _Key("view", "main", "displayed"),
-        _Key("dims", "main", "current_step"),
-        _Key("dims", "main", "order"),
-        _Key("dims", "main", "axis_labels"),
-        _Key("dims", "main", "labels"),
-        _Key("multiscale", "main", "level"),
-        _Key("multiscale", "main", "levels"),
-        _Key("multiscale", "main", "level_shapes"),
-        _Key("multiscale", "main", "downgraded"),
         _Key("scene", "main", "op_state"),
         _Key("dims", "main", "dims_spec"),
     )
@@ -121,19 +111,10 @@ class ServerDimsMirror:
     def _extract_state(
         self, snapshot: dict[tuple[str, str, str], LedgerEntry]
     ) -> dict[str, Any]:
-        required = {
-            ("dims", "main", "current_step"),
-            ("multiscale", "main", "level"),
-            ("multiscale", "main", "levels"),
-            ("multiscale", "main", "level_shapes"),
-            ("view", "main", "ndisplay"),
-            ("dims", "main", "dims_spec"),
-        }
-        for key in required:
-            if key not in snapshot:
-                raise ValueError("ledger missing required dims entry")
-
-        spec_entry = snapshot[("dims", "main", "dims_spec")]
+        entry = snapshot.get(("dims", "main", "dims_spec"))
+        if entry is None:
+            raise ValueError("ledger missing dims_spec entry")
+        spec_entry = entry
         assert isinstance(spec_entry, LedgerEntry), "ledger dims_spec entry malformed"
         spec_payload = spec_entry.value
         dims_spec = dims_spec_from_payload(spec_payload)
@@ -148,9 +129,9 @@ class ServerDimsMirror:
         displayed = tuple(int(idx) for idx in dims_spec.displayed)
         order = tuple(int(idx) for idx in dims_spec.order)
         axis_labels = tuple(axis.label for axis in dims_spec.axes)
-        labels = self._optional_str_tuple(snapshot.get(("dims", "main", "labels")))
-        downgraded = self._optional_bool(snapshot.get(("multiscale", "main", "downgraded")))
-        levels = self._as_level_sequence(snapshot[("multiscale", "main", "levels")].value)
+        labels = tuple(str(lbl) for lbl in dims_spec.labels) if dims_spec.labels is not None else None
+        downgraded = dims_spec.downgraded
+        levels = tuple(dict(level) for level in dims_spec.levels)
 
         return {
             "current_step": current_step,
@@ -184,71 +165,6 @@ class ServerDimsMirror:
         )
 
     # ------------------------------------------------------------------
-    @staticmethod
-    def _as_int_tuple(value: Any) -> tuple[int, ...]:
-        if value is None:
-            raise ValueError("expected integer sequence, received None")
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            return tuple(int(v) for v in value)
-        raise TypeError(f"expected integer sequence, received {type(value)!r}")
-
-    @staticmethod
-    def _as_shape_sequence(value: Any) -> tuple[tuple[int, ...], ...]:
-        if value is None:
-            raise ValueError("expected shape sequence, received None")
-        shapes: list[tuple[int, ...]] = []
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            for entry in value:
-                shapes.append(ServerDimsMirror._as_int_tuple(entry))
-            return tuple(shapes)
-        raise TypeError(f"expected shape sequence, received {type(value)!r}")
-
-    @staticmethod
-    def _as_level_sequence(value: Any) -> tuple[dict[str, Any], ...]:
-        if value is None:
-            raise ValueError("expected level sequence, received None")
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            levels: list[dict[str, Any]] = []
-            for entry in value:
-                if isinstance(entry, dict):
-                    levels.append(dict(entry))
-                else:
-                    raise TypeError("level descriptors must be mappings")
-            return tuple(levels)
-        raise TypeError(f"expected level sequence, received {type(value)!r}")
-
-    @staticmethod
-    def _optional_int_tuple(entry: Any) -> Optional[tuple[int, ...]]:
-        if entry is None:
-            return None
-        assert isinstance(entry, LedgerEntry), "expected ledger entry"
-        value = entry.value
-        if value is None:
-            return None
-        return ServerDimsMirror._as_int_tuple(value)
-
-    @staticmethod
-    def _optional_str_tuple(entry: Any) -> Optional[tuple[str, ...]]:
-        if entry is None:
-            return None
-        assert isinstance(entry, LedgerEntry), "expected ledger entry"
-        value = entry.value
-        if value is None:
-            return None
-        if isinstance(value, Iterable) and not isinstance(value, (str, bytes)):
-            return tuple(str(v) for v in value)
-        raise TypeError(f"expected string sequence, received {type(value)!r}")
-
-    @staticmethod
-    def _optional_bool(entry: Any) -> Optional[bool]:
-        if entry is None:
-            return None
-        assert isinstance(entry, LedgerEntry), "expected ledger entry"
-        value = entry.value
-        if value is None:
-            return None
-        return bool(value)
-
     def _compute_state_signature(self, state: dict[str, Any]) -> SignatureToken:
         return dims_content_signature(
             current_step=state["current_step"],

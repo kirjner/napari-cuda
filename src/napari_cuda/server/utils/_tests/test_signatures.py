@@ -47,6 +47,9 @@ def _sample_axes_spec() -> DimsSpec:
         level_shapes=level_shapes,
         plane_mode=True,
         axes=tuple(axes),
+        levels=tuple({"index": idx, "shape": list(shape)} for idx, shape in enumerate(level_shapes)),
+        downgraded=False,
+        labels=None,
     )
 
 

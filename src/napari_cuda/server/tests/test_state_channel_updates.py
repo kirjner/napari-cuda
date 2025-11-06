@@ -9,6 +9,8 @@ from collections.abc import Coroutine, Mapping
 from types import SimpleNamespace
 from typing import Any, Optional
 
+from dataclasses import replace
+
 import pytest
 
 from napari_cuda.protocol import (
@@ -54,6 +56,7 @@ from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
 from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
 from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.camera import CameraCommandQueue
+from napari_cuda.shared.dims_spec import dims_spec_from_payload
 from napari_cuda.server.scene.viewport import (
     PlaneState,
     RenderMode,
@@ -70,6 +73,12 @@ from napari_cuda.server.scene import (
     snapshot_volume_state,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.shared.dims_spec import (
+    AxisExtent,
+    DimsSpec,
+    DimsSpecAxis,
+    dims_spec_to_payload,
+)
 
 
 class _CaptureWorker:
@@ -477,6 +486,14 @@ def _record_dims_to_ledger(
         ("multiscale", "main", "downgraded", payload.downgraded),
     ]
     server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
+    spec = _dims_spec_from_notify_payload(payload)
+    server._state_ledger.record_confirmed(
+        "dims",
+        "main",
+        "dims_spec",
+        dims_spec_to_payload(spec),
+        origin=origin,
+    )
 
 
 def _frames_of_type(frames: list[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:
@@ -500,6 +517,53 @@ def _make_dims_snapshot(**overrides: Any) -> dict[str, Any]:
     }
     base.update(overrides)
     return base
+
+
+def _dims_spec_from_notify_payload(payload: NotifyDimsPayload) -> DimsSpec:
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes)
+    current_step = tuple(int(v) for v in payload.current_step)
+    ndim = len(current_step)
+    axis_labels = tuple(payload.axis_labels or [f"axis-{idx}" for idx in range(ndim)])
+    displayed = tuple(payload.displayed or tuple(range(max(0, ndim - int(payload.ndisplay)), ndim)))
+    axes: list[DimsSpecAxis] = []
+    for idx in range(ndim):
+        per_steps = tuple(shape[idx] if idx < len(shape) else 1 for shape in level_shapes)
+        per_world = tuple(
+            AxisExtent(start=0.0, stop=float(max(count - 1, 0)), step=1.0) for count in per_steps
+        )
+        current_step_val = current_step[idx] if idx < len(current_step) else 0
+        axes.append(
+            DimsSpecAxis(
+                index=idx,
+                label=axis_labels[idx],
+                role=axis_labels[idx],
+                displayed=idx in displayed,
+                order_position=idx,
+                current_step=current_step_val,
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=per_steps,
+                per_level_world=per_world,
+            )
+        )
+    levels = tuple(dict(level) for level in payload.levels)
+    return DimsSpec(
+        version=1,
+        ndim=ndim,
+        ndisplay=int(payload.ndisplay),
+        order=tuple(payload.order or tuple(range(ndim))),
+        displayed=displayed,
+        current_level=int(payload.current_level),
+        current_step=current_step,
+        level_shapes=level_shapes,
+        plane_mode=int(payload.ndisplay) < 3,
+        axes=tuple(axes),
+        levels=levels,
+        downgraded=bool(payload.downgraded) if payload.downgraded is not None else False,
+        labels=tuple(payload.labels) if payload.labels is not None else None,
+    )
 
 
 
@@ -704,10 +768,12 @@ def test_dims_update_emits_ack_and_notify() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
-    dims_entry = server._state_ledger.get("dims", "main", "current_step")
-    assert dims_entry is not None
-    assert tuple(int(v) for v in dims_entry.value) == (5, 0, 0)
-    assert dims_entry.version is not None
+    spec_entry = server._state_ledger.get("dims", "main", "dims_spec")
+    assert spec_entry is not None
+    spec_payload = dims_spec_from_payload(spec_entry.value)
+    assert spec_payload is not None
+    assert tuple(int(v) for v in spec_payload.current_step) == (5, 0, 0)
+    assert spec_entry.version is not None
 
     acks = _frames_of_type(captured, "ack.state")
     assert len(acks) == 1
@@ -716,7 +782,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
     assert ack_payload["in_reply_to"] == "state-dims-1"
     assert ack_payload["status"] == "accepted"
     assert ack_payload["applied_value"] == 5
-    assert ack_payload["version"] == dims_entry.version
+    assert ack_payload["version"] == spec_entry.version
 
     notify_payload = NotifyDimsPayload.from_dict(
         _make_dims_snapshot(
@@ -862,7 +928,10 @@ def test_volume_rendering_update() -> None:
     assert ack_payload["version"] == volume_entry.version
 
     layer_frames = _frames_of_type(captured, "notify.layers")
-    assert not layer_frames
+    assert layer_frames
+    latest_layer_payload = layer_frames[-1]["payload"]
+    assert latest_layer_payload["layer_id"] == "layer-0"
+    assert latest_layer_payload["controls"]["rendering"] == "iso"
 
 
 def test_camera_zoom_update_emits_notify() -> None:
@@ -1419,10 +1488,12 @@ def test_reduce_level_update_records_viewport_state() -> None:
         assert volume_entry.value["level"] == 1
         assert tuple(volume_entry.value["pose"]["center"]) == (1.0, 2.0, 3.0)
 
-        cache_level = ledger.get("view_cache", "plane", "level")
-        assert cache_level is not None and int(cache_level.value) == 1
-        cache_step = ledger.get("view_cache", "plane", "step")
-        assert cache_step is not None and tuple(int(v) for v in cache_step.value) == (4, 0, 0)
+        spec_entry = ledger.get("dims", "main", "dims_spec")
+        assert spec_entry is not None
+        spec_payload = dims_spec_from_payload(spec_entry.value)
+        assert spec_payload is not None
+        assert int(spec_payload.current_level) == 1
+        assert tuple(int(v) for v in spec_payload.current_step) == (4, 0, 0)
     finally:
         while scheduled:
             asyncio.run(scheduled.pop(0))
@@ -1503,10 +1574,12 @@ def test_reduce_plane_restore_updates_viewport_state() -> None:
         assert tuple(plane_snapshot["applied"]["step"]) == (6, 0, 0)
         assert pytest.approx(float(plane_snapshot["pose"]["zoom"])) == 1.1
 
-        cache_level = ledger.get("view_cache", "plane", "level")
-        assert cache_level is not None and int(cache_level.value) == 2
-        cache_step = ledger.get("view_cache", "plane", "step")
-        assert cache_step is not None and tuple(int(v) for v in cache_step.value) == (6, 0, 0)
+        spec_entry = ledger.get("dims", "main", "dims_spec")
+        assert spec_entry is not None
+        spec_payload = dims_spec_from_payload(spec_entry.value)
+        assert spec_payload is not None
+        assert int(spec_payload.current_level) == 2
+        assert tuple(int(v) for v in spec_payload.current_step) == (6, 0, 0)
     finally:
         while scheduled:
             asyncio.run(scheduled.pop(0))

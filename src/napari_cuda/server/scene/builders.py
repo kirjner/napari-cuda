@@ -905,27 +905,18 @@ def build_ledger_snapshot(
     volume_distance_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "distance"))
     volume_fov_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "fov"))
 
-    dims_entry = snapshot.get(("dims", "main", "current_step"))
-    current_step = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "current_step"), int)
-    dims_version = None if dims_entry is None else _version_or_none(dims_entry.version)
+    current_step = tuple(int(v) for v in dims_spec.current_step)
+    dims_version = _version_or_none(spec_entry.version)
 
-    view_entry_key = ("view", "main", "ndisplay")
-    view_entry = snapshot.get(view_entry_key)
-    ndisplay_val = _int_or_none(_ledger_value(snapshot, "view", "main", "ndisplay"))
-    dims_mode = None
-    if ndisplay_val is not None:
-        dims_mode = "volume" if int(ndisplay_val) >= 3 else "plane"
-    displayed_axes = _tuple_or_none(_ledger_value(snapshot, "view", "main", "displayed"), int)
-    order_axes = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "order"), int)
-    axis_labels = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "axis_labels"), str)
-    dims_labels = _tuple_or_none(_ledger_value(snapshot, "dims", "main", "labels"), str)
-    level_shapes = _shape_sequence(_ledger_value(snapshot, "multiscale", "main", "level_shapes"))
-    multiscale_level_entry_key = ("multiscale", "main", "level")
-    multiscale_level_entry = snapshot.get(multiscale_level_entry_key)
-    current_level = _int_or_none(_ledger_value(snapshot, "multiscale", "main", "level"))
-    multiscale_level_version = (
-        None if multiscale_level_entry is None else _version_or_none(multiscale_level_entry.version)
-    )
+    ndisplay_val = int(dims_spec.ndisplay)
+    dims_mode = "volume" if ndisplay_val >= 3 else "plane"
+    displayed_axes = tuple(int(idx) for idx in dims_spec.displayed)
+    order_axes = tuple(int(idx) for idx in dims_spec.order)
+    axis_labels = tuple(axis.label for axis in dims_spec.axes)
+    dims_labels = tuple(str(lbl) for lbl in dims_spec.labels) if dims_spec.labels is not None else None
+    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
+    current_level = int(dims_spec.current_level)
+    multiscale_level_version = dims_version
 
     defaults = default_volume_state()
     volume_mode = _string_or_none(_ledger_value(snapshot, "volume", "main", "rendering"), fallback=defaults.get("mode"))
@@ -1039,7 +1030,7 @@ def build_ledger_snapshot(
         volume_fov=volume_fov_float,
         current_step=current_step,
         ndisplay=ndisplay_val,
-        view_version=_version_or_none(view_entry.version) if view_entry is not None else None,
+        view_version=dims_version,
         displayed=displayed_axes,
         order=order_axes,
         axis_labels=axis_labels,

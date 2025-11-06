@@ -34,7 +34,12 @@ from websockets.exceptions import ConnectionClosedOK
 from websockets.protocol import State
 
 from napari.components import viewer_model
-from napari_cuda.protocol import NotifyStreamPayload
+from napari_cuda.protocol import (
+    NOTIFY_LAYERS_TYPE,
+    NOTIFY_SCENE_TYPE,
+    NOTIFY_STREAM_TYPE,
+    NotifyStreamPayload,
+)
 from napari_cuda.protocol.messages import NotifyDimsPayload, SessionHello
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control import (
@@ -86,6 +91,12 @@ from napari_cuda.server.scene import (
     snapshot_volume_state,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.shared.dims_spec import (
+    AxisExtent,
+    DimsSpec,
+    DimsSpecAxis,
+    dims_spec_to_payload,
+)
 
 _SENTINEL = object()
 
@@ -124,6 +135,9 @@ class FakeStateWebSocket:
         self.transport = SimpleNamespace(get_extra_info=lambda *_: None)
         self.remote_address = remote_address
         self._closed_event = loop.create_future()
+        self._on_send: Callable[[Any, str], None] | None = None
+        self._napari_cuda_heartbeat_task = None
+        self._napari_cuda_shutdown = False
 
     def __hash__(self) -> int:  # pragma: no cover - matches websockets protocol
         return id(self)
@@ -153,6 +167,8 @@ class FakeStateWebSocket:
 
     async def send(self, payload: str) -> None:
         self.sent.append(payload)
+        if self._on_send is not None:
+            self._on_send(self, payload)
 
     async def close(self, *_: Any, **__: Any) -> None:
         if self.state is State.CLOSED:
@@ -574,6 +590,7 @@ class StateServerHarness:
 
         self.server = self._build_server()
         self.websocket = FakeStateWebSocket(loop)
+        self.websocket._on_send = self._state_send
         self._ingest_task: asyncio.Task[Any] | None = None
 
     # ------------------------------------------------------------------ public API
@@ -692,6 +709,7 @@ class StateServerHarness:
         server._state_clients: set[Any] = set()
         server._schedule_coro = self._schedule_coro
         server._state_ledger = ServerStateLedger()
+        worker._ledger = server._state_ledger
         server._update_client_gauges = lambda: None
         server._camera_queue = CameraCommandQueue()
 
@@ -735,13 +753,13 @@ class StateServerHarness:
 
         server._resumable_store = ResumableHistoryStore(
             {
-                state_channel_handler.NOTIFY_SCENE_TYPE: ResumableRetention(),
-                state_channel_handler.NOTIFY_LAYERS_TYPE: ResumableRetention(
+                NOTIFY_SCENE_TYPE: ResumableRetention(),
+                NOTIFY_LAYERS_TYPE: ResumableRetention(
                     min_deltas=512,
                     max_deltas=2048,
                     max_age_s=300.0,
                 ),
-                state_channel_handler.NOTIFY_STREAM_TYPE: ResumableRetention(
+                NOTIFY_STREAM_TYPE: ResumableRetention(
                     min_deltas=1,
                     max_deltas=32,
                 ),
@@ -991,6 +1009,14 @@ class StateServerHarness:
             ("multiscale", "main", "downgraded", payload.downgraded),
         ]
         server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
+        if payload.dims_spec is not None:
+            server._state_ledger.record_confirmed(
+                "dims",
+                "main",
+                "dims_spec",
+                dims_spec_to_payload(payload.dims_spec),
+                origin=origin,
+            )
 
 
 def frames_of_type(frames: Iterable[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:
@@ -998,6 +1024,13 @@ def frames_of_type(frames: Iterable[dict[str, Any]], frame_type: str) -> list[di
 
 
 def _default_dims_snapshot() -> dict[str, Any]:
+    level_shapes = [[512, 256, 64], [256, 128, 32]]
+    spec = _build_dims_spec(
+        current_level=0,
+        current_step=(0, 0, 0),
+        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in level_shapes),
+        ndisplay=2,
+    )
     return {
         "step": [0, 0, 0],
         "current_step": [0, 0, 0],
@@ -1011,5 +1044,56 @@ def _default_dims_snapshot() -> dict[str, Any]:
             {"index": 1, "shape": [256, 128, 32]},
         ],
         "current_level": 0,
-        "level_shapes": [[512, 256, 64], [256, 128, 32]],
+        "level_shapes": level_shapes,
+        "dims_spec": dims_spec_to_payload(spec),
     }
+
+
+def _build_dims_spec(
+    *,
+    current_level: int,
+    current_step: tuple[int, ...],
+    level_shapes: tuple[tuple[int, ...], ...],
+    ndisplay: int,
+) -> DimsSpec:
+    ndim = len(current_step)
+    axis_labels = tuple(("z", "y", "x", "t", "c")[idx] if idx < 5 else f"axis-{idx}" for idx in range(ndim))
+    displayed = tuple(range(max(0, ndim - ndisplay), ndim))
+    axes: list[DimsSpecAxis] = []
+    for idx in range(ndim):
+        per_steps = tuple(shape[idx] if idx < len(shape) else 1 for shape in level_shapes)
+        per_world = tuple(
+            AxisExtent(start=0.0, stop=float(max(count - 1, 0)), step=1.0) for count in per_steps
+        )
+        axes.append(
+            DimsSpecAxis(
+                index=idx,
+                label=axis_labels[idx],
+                role=axis_labels[idx],
+                displayed=idx in displayed,
+                order_position=idx,
+                current_step=int(current_step[idx]),
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=per_steps,
+                per_level_world=per_world,
+            )
+        )
+    levels = tuple({"index": idx, "shape": list(shape)} for idx, shape in enumerate(level_shapes))
+    return DimsSpec(
+        version=1,
+        ndim=ndim,
+        ndisplay=int(ndisplay),
+        order=tuple(range(ndim)),
+        displayed=displayed,
+        current_level=int(current_level),
+        current_step=tuple(int(v) for v in current_step),
+        level_shapes=level_shapes,
+        plane_mode=ndisplay < 3,
+        axes=tuple(axes),
+        levels=levels,
+        downgraded=False,
+        labels=None,
+    )

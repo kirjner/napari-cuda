@@ -15,7 +15,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
-from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis
+from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis, dims_spec_to_payload
 
 
 def _make_axes_spec(
@@ -62,6 +62,9 @@ def _make_axes_spec(
         level_shapes=level_shapes,
         plane_mode=ndisplay < 3,
         axes=tuple(axes),
+        levels=tuple({"index": idx, "shape": list(shape)} for idx, shape in enumerate(level_shapes)),
+        downgraded=False,
+        labels=None,
     )
 
 
@@ -80,6 +83,18 @@ def _seed_ledger(worker: _StubWorker, spec: DimsSpec) -> None:
         tuple(tuple(int(dim) for dim in shape) for shape in spec.level_shapes),
         origin="test",
     )
+    ledger.record_confirmed(
+        "multiscale",
+        "main",
+        "levels",
+        tuple(dict(level) for level in spec.levels),
+        origin="test",
+    )
+    if spec.downgraded is not None:
+        ledger.record_confirmed("multiscale", "main", "downgraded", bool(spec.downgraded), origin="test")
+    if spec.labels is not None:
+        ledger.record_confirmed("dims", "main", "labels", tuple(str(label) for label in spec.labels), origin="test")
+    ledger.record_confirmed("dims", "main", "dims_spec", dims_spec_to_payload(spec), origin="test")
 
 
 class _NoopEvent:

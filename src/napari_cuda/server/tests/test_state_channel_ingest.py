@@ -14,6 +14,13 @@ from napari_cuda.server.runtime.render_loop.applying import (
 )
 from napari_cuda.server.scene.viewport import PlaneState
 from napari_cuda.server.tests._helpers.state_channel import StateServerHarness
+from napari_cuda.shared.dims_spec import (
+    AxisExtent,
+    DimsSpec,
+    DimsSpecAxis,
+    dims_spec_from_payload,
+    dims_spec_to_payload,
+)
 
 
 def _hello_payload(*, scene: bool = True, layers: bool = True, stream: bool = True) -> dict[str, object]:
@@ -74,6 +81,56 @@ def _plane_state_payload(
     plane_state.applied_step = step
     plane_state.update_pose(rect=rect, center=center, zoom=zoom)
     return asdict(plane_state)
+
+
+def _build_dims_spec(
+    *,
+    current_level: int,
+    current_step: tuple[int, ...],
+    level_shapes: tuple[tuple[int, ...], ...],
+    ndisplay: int = 2,
+) -> DimsSpec:
+    ndim = len(current_step)
+    axis_labels = tuple(("z", "y", "x", "t", "c")[idx] if idx < 5 else f"axis-{idx}" for idx in range(ndim))
+    displayed = tuple(range(max(0, ndim - ndisplay), ndim))
+    axes: list[DimsSpecAxis] = []
+    for idx in range(ndim):
+        per_steps = tuple(shape[idx] if idx < len(shape) else 1 for shape in level_shapes)
+        per_world = tuple(
+            AxisExtent(start=0.0, stop=float(max(count - 1, 0)), step=1.0) for count in per_steps
+        )
+        axes.append(
+            DimsSpecAxis(
+                index=idx,
+                label=axis_labels[idx],
+                role=axis_labels[idx],
+                displayed=idx in displayed,
+                order_position=idx,
+                current_step=int(current_step[idx]),
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=per_steps,
+                per_level_world=per_world,
+            )
+        )
+    levels = tuple({"index": idx, "shape": list(shape)} for idx, shape in enumerate(level_shapes))
+    return DimsSpec(
+        version=1,
+        ndim=ndim,
+        ndisplay=int(ndisplay),
+        order=tuple(range(ndim)),
+        displayed=displayed,
+        current_level=int(current_level),
+        current_step=tuple(int(v) for v in current_step),
+        level_shapes=level_shapes,
+        plane_mode=ndisplay < 3,
+        axes=tuple(axes),
+        levels=levels,
+        downgraded=False,
+        labels=None,
+    )
 
 
 def test_ingest_state_rejects_missing_features() -> None:
@@ -142,18 +199,16 @@ def test_view_toggle_triggers_plane_restore_once() -> None:
 async def _test_view_toggle_triggers_plane_restore_once() -> None:
     loop = asyncio.get_running_loop()
     harness = StateServerHarness(loop)
-    from napari_cuda.server.control import (
-        control_channel_server as state_channel_handler,
-    )
+    from napari_cuda.server.control.state_update_handlers import view as view_handlers
 
-    orig_plane_restore = state_channel_handler.reduce_plane_restore
+    orig_plane_restore = view_handlers.reduce_plane_restore
     calls: list[dict[str, object]] = []
 
     def _wrapped_plane_restore(*args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append({"args": args, "kwargs": kwargs})
         return orig_plane_restore(*args, **kwargs)
 
-    state_channel_handler.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
+    view_handlers.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -173,13 +228,22 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
             center=plane_center,
             zoom=plane_zoom,
         )
+        level_shapes = ((240, 256, 1), (120, 128, 1))
+        dims_spec = _build_dims_spec(
+            current_level=1,
+            current_step=(60, 0, 0),
+            level_shapes=level_shapes,
+            ndisplay=3,
+        )
         ledger.batch_record_confirmed(
             [
-                ("view_cache", "plane", "level", plane_level),
-                ("view_cache", "plane", "step", plane_step),
                 ("viewport", "plane", "state", plane_state),
                 ("multiscale", "main", "level", 1),
                 ("dims", "main", "current_step", (60, 0, 0)),
+                ("multiscale", "main", "level_shapes", level_shapes),
+                ("multiscale", "main", "levels", tuple(dict(level) for level in dims_spec.levels)),
+                ("multiscale", "main", "downgraded", False),
+                ("dims", "main", "dims_spec", dims_spec_to_payload(dims_spec)),
             ],
             origin="test.seed",
         )
@@ -213,9 +277,11 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         assert len(calls) == 1
         scene_level = harness.server._state_ledger.get("multiscale", "main", "level")
         assert scene_level is not None and int(scene_level.value) == plane_level
-        dims_step_entry = harness.server._state_ledger.get("dims", "main", "current_step")
-        assert dims_step_entry is not None
-        assert tuple(int(v) for v in dims_step_entry.value) == plane_step
+        spec_entry = harness.server._state_ledger.get("dims", "main", "dims_spec")
+        assert spec_entry is not None
+        spec_payload = dims_spec_from_payload(spec_entry.value)
+        assert spec_payload is not None
+        assert tuple(int(v) for v in spec_payload.current_step) == plane_step
         assert len(harness.server._camera_queue) == 0
         harness.queue_client_payload(_make_update("frame-repeat", 2))
         ack_repeat = await harness.wait_for_frame(
@@ -225,7 +291,7 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         assert ack_repeat["payload"]["status"] == "accepted"
         assert len(calls) == 1
     finally:
-        state_channel_handler.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
+        view_handlers.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
         await harness.stop()
 
 
@@ -236,18 +302,16 @@ def test_view_toggle_skips_plane_restore_without_cache() -> None:
 async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
     loop = asyncio.get_running_loop()
     harness = StateServerHarness(loop)
-    from napari_cuda.server.control import (
-        control_channel_server as state_channel_handler,
-    )
+    from napari_cuda.server.control.state_update_handlers import view as view_handlers
 
-    orig_plane_restore = state_channel_handler.reduce_plane_restore
+    orig_plane_restore = view_handlers.reduce_plane_restore
     calls: list[dict[str, object]] = []
 
     def _wrapped_plane_restore(*args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append({"args": args, "kwargs": kwargs})
         return orig_plane_restore(*args, **kwargs)
 
-    state_channel_handler.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
+    view_handlers.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -273,7 +337,7 @@ async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
         assert ack["payload"]["status"] == "accepted"
         assert calls == []
     finally:
-        state_channel_handler.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
+        view_handlers.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
         await harness.stop()
 
 
@@ -308,12 +372,21 @@ async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
             cached_plane_state,
             origin="test.seed",
         )
+        level_shapes = ((200, 200, 1), (150, 150, 1), (100, 100, 1))
+        dims_spec = _build_dims_spec(
+            current_level=0,
+            current_step=(0, 0, 0),
+            level_shapes=level_shapes,
+            ndisplay=3,
+        )
         ledger.batch_record_confirmed(
             [
-                ("view_cache", "plane", "level", level),
-                ("view_cache", "plane", "step", step),
                 ("multiscale", "main", "level", 0),
                 ("dims", "main", "current_step", (0, 0, 0)),
+                ("multiscale", "main", "level_shapes", level_shapes),
+                ("multiscale", "main", "levels", tuple(dict(entry) for entry in dims_spec.levels)),
+                ("multiscale", "main", "downgraded", False),
+                ("dims", "main", "dims_spec", dims_spec_to_payload(dims_spec)),
             ],
             origin="test.seed",
         )

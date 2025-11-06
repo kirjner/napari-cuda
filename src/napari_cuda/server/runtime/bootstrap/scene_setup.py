@@ -13,6 +13,7 @@ from napari_cuda.server.data.roi import (
     plane_wh_for_level,
 )
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
+from napari_cuda.server.runtime.render_loop.plan import ledger_access
 from napari_cuda.server.scene.viewport import RenderMode
 
 logger = logging.getLogger(__name__)
@@ -78,12 +79,7 @@ def ensure_scene_source(worker: Any) -> ZarrSceneSource:
         ledger_step = None
         ledger = worker._ledger
         assert ledger is not None, "state ledger must be attached before ensure_scene_source"
-        entry = ledger.get("dims", "main", "current_step")
-        if entry is not None and isinstance(entry.value, (list, tuple)):
-            ledger_step = tuple(int(v) for v in entry.value)
-        if ledger_step is None:
-            initial_step = source.initial_step(level=target_level)
-            ledger_step = tuple(int(v) for v in initial_step)
+        ledger_step = ledger_access.step(ledger)
         step = source.set_current_slice(ledger_step, int(target_level))
 
     descriptor = source.level_descriptors[source.current_level]

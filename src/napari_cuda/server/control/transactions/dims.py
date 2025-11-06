@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from typing import Optional
+from typing import Any, Optional
 
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
@@ -26,7 +26,6 @@ def apply_dims_step_transaction(
 ) -> dict[PropertyKey, LedgerEntry]:
     """Record the requested dims step in the ledger and return stored entries."""
 
-    step_tuple: tuple[int, ...] = tuple(int(v) for v in step)
     entries: list[tuple] = []
     if op_seq is not None:
         entries.append(("scene", "main", "op_seq", int(op_seq)))
@@ -34,19 +33,10 @@ def apply_dims_step_transaction(
             entries.append(("scene", "main", "op_state", str(op_state)))
         if op_kind is not None:
             entries.append(("scene", "main", "op_kind", str(op_kind)))
-    if metadata is None:
-        entries.append(("dims", "main", "current_step", step_tuple))
-    else:
-        entries.append(
-            (
-                "dims",
-                "main",
-                "current_step",
-                step_tuple,
-                dict(metadata),
-            )
-        )
-    entries.append(("dims", "main", "dims_spec", dict(dims_spec_payload)))
+    spec_entry = ("dims", "main", "dims_spec", dict(dims_spec_payload))
+    if metadata is not None:
+        spec_entry = spec_entry + (dict(metadata),)
+    entries.append(spec_entry)
 
     return ledger.batch_record_confirmed(
         entries,

@@ -26,6 +26,7 @@ from napari_cuda.server.runtime.bootstrap.scene_setup import (
 from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
+    dims_spec as ledger_dims_spec,
     step as ledger_step,
 )
 from napari_cuda.server.scene.viewport import (
@@ -295,16 +296,15 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
         return
     worker._viewport_state.mode = RenderMode.PLANE
     facade = ViewerBootstrapInterface(worker)
-    lvl_entry = worker._ledger.get("view_cache", "plane", "level")
-    step_entry = worker._ledger.get("view_cache", "plane", "step")
-    assert lvl_entry is not None, "plane restore requires view_cache.plane.level"
-    assert step_entry is not None, "plane restore requires view_cache.plane.step"
+    spec = ledger_dims_spec(worker._ledger)
+    assert spec is not None, "plane restore requires dims spec"
+    lvl_idx = int(spec.current_level)
+    step_tuple = tuple(int(v) for v in spec.current_step)
     if logger.isEnabledFor(logging.INFO):
         logger.info(
-            "toggle.exit_3d: restore level=%s step=%s", str(lvl_entry.value), str(step_entry.value)
+            "toggle.exit_3d: restore level=%s step=%s", lvl_idx, step_tuple
         )
     source = worker._ensure_scene_source()
-    lvl_idx = int(lvl_entry.value)
     plane_entry = worker._ledger.get("viewport", "plane", "state")
     assert plane_entry is not None and isinstance(plane_entry.value, dict), "plane camera cache missing viewport state"
     plane_state = PlaneState(**dict(plane_entry.value))  # type: ignore[arg-type]
@@ -312,7 +312,6 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
     rect_pose = plane_state.pose.rect
     assert rect_pose is not None, "plane camera cache missing rect"
     rect = tuple(float(v) for v in rect_pose)
-    step_tuple = tuple(int(v) for v in step_entry.value)
 
     view = worker.view
     if view is not None:

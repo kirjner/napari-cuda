@@ -6,10 +6,9 @@ This module defines the applied dims snapshot document and helpers.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Sequence, Tuple, TYPE_CHECKING
+from typing import Any, Iterable, Mapping, Sequence, Tuple
 
-if TYPE_CHECKING:  # pragma: no cover
-    from napari_cuda.server.state_ledger import LedgerEntry
+from napari_cuda.server.state_ledger import LedgerEntry
 
 
 _DIMS_SPEC_VERSION = 1
@@ -62,6 +61,9 @@ class DimsSpec:
     level_shapes: tuple[tuple[int, ...], ...]
     plane_mode: bool
     axes: tuple[DimsSpecAxis, ...]
+    levels: tuple[Mapping[str, Any], ...]
+    downgraded: bool | None
+    labels: tuple[str, ...] | None
 
     def axis_by_label(self, label: str) -> DimsSpecAxis:
         target = str(label)
@@ -82,84 +84,12 @@ LedgerSnapshot = Mapping[tuple[str, str, str], Any]
 
 
 def build_dims_spec_from_ledger(snapshot: LedgerSnapshot) -> DimsSpec:
-    current_step_raw = _require_value(snapshot, "dims", "main", "current_step")
-    level_shapes_raw = _require_value(snapshot, "multiscale", "main", "level_shapes")
-    current_level_raw = _require_value(snapshot, "multiscale", "main", "level")
-    ndisplay_raw = _require_value(snapshot, "view", "main", "ndisplay")
-    order_raw = _require_value(snapshot, "dims", "main", "order")
-    displayed_raw = _require_value(snapshot, "view", "main", "displayed")
-
-    axis_labels_value = _optional_value(snapshot, "dims", "main", "axis_labels")
-    margin_left_value = _optional_value(snapshot, "dims", "main", "margin_left")
-    margin_right_value = _optional_value(snapshot, "dims", "main", "margin_right")
-
-    current_step = _as_int_tuple(current_step_raw)
-    level_shapes = _as_shape_tuple(level_shapes_raw)
-    current_level = int(current_level_raw)
-    ndisplay = int(ndisplay_raw)
-    order = _as_int_tuple(order_raw)
-    displayed = _as_int_tuple(displayed_raw)
-
-    ndim_candidates = [
-        len(current_step),
-        len(order),
-    ]
-    if level_shapes:
-        reference_level = min(max(current_level, 0), len(level_shapes) - 1)
-        ndim_candidates.append(len(level_shapes[reference_level]))
-    if axis_labels_value is not None:
-        ndim_candidates.append(len(tuple(str(v) for v in axis_labels_value)))
-    ndim = max([value for value in ndim_candidates if value > 0], default=1)
-
-    axis_labels = _resolve_axis_labels(axis_labels_value, ndim)
-
-    margin_left_steps = _coerce_margin_array(margin_left_value, ndim)
-    margin_right_steps = _coerce_margin_array(margin_right_value, ndim)
-
-    axes: list[DimsSpecAxis] = []
-    for axis_index in range(ndim):
-        axis_label = axis_labels[axis_index]
-        role = _infer_axis_role(axis_label, axis_index)
-
-        order_position = order.index(axis_index)
-        displayed_flag = axis_index in displayed
-        current_step_value = current_step[axis_index] if axis_index < len(current_step) else 0
-
-        per_level_steps = _extract_axis_steps(level_shapes, axis_index)
-        per_level_world = tuple(_extent_for_step(count) for count in per_level_steps)
-
-        margin_left_step = margin_left_steps[axis_index]
-        margin_right_step = margin_right_steps[axis_index]
-
-        axes.append(
-            DimsSpecAxis(
-                index=axis_index,
-                label=axis_label,
-                role=role,
-                displayed=displayed_flag,
-                order_position=order_position,
-                current_step=current_step_value,
-                margin_left_steps=margin_left_step,
-                margin_right_steps=margin_right_step,
-                margin_left_world=margin_left_step,
-                margin_right_world=margin_right_step,
-                per_level_steps=per_level_steps,
-                per_level_world=per_level_world,
-            )
-        )
-
-    return DimsSpec(
-        version=_DIMS_SPEC_VERSION,
-        ndim=ndim,
-        ndisplay=ndisplay,
-        order=order,
-        displayed=displayed,
-        current_level=current_level,
-        current_step=current_step,
-        level_shapes=level_shapes,
-        plane_mode=ndisplay < 3,
-        axes=tuple(axes),
-    )
+    entry = snapshot.get(("dims", "main", "dims_spec"))
+    assert entry is not None, "ledger missing dims_spec entry"
+    assert isinstance(entry, LedgerEntry), "ledger dims_spec entry malformed"
+    spec = dims_spec_from_payload(entry.value)
+    assert spec is not None, "dims spec payload missing"
+    return spec
 
 
 def dims_spec_to_payload(spec: DimsSpec | None) -> dict[str, Any] | None:
@@ -197,6 +127,9 @@ def dims_spec_to_payload(spec: DimsSpec | None) -> dict[str, Any] | None:
         "level_shapes": [list(shape) for shape in spec.level_shapes],
         "plane_mode": spec.plane_mode,
         "axes": dims_payload,
+        "levels": [dict(level) for level in spec.levels],
+        "downgraded": spec.downgraded,
+        "labels": list(spec.labels) if spec.labels is not None else None,
     }
 
 
@@ -235,6 +168,28 @@ def dims_spec_from_payload(data: Mapping[str, Any] | None) -> DimsSpec | None:
                 ),
             )
         )
+    levels_entry = data.get("levels")
+    assert isinstance(levels_entry, Sequence), "dims spec payload requires levels sequence"
+    levels: list[Mapping[str, Any]] = []
+    for entry in levels_entry:
+        assert isinstance(entry, Mapping), "dims spec levels entry must be mapping"
+        levels.append(dict(entry))
+
+    labels_entry = data.get("labels")
+    labels: tuple[str, ...] | None
+    if labels_entry is None:
+        labels = None
+    else:
+        assert isinstance(labels_entry, Sequence), "dims spec labels entry must be sequence"
+        labels = tuple(str(v) for v in labels_entry)
+
+    downgraded_entry = data.get("downgraded")
+    downgraded_value: bool | None
+    if downgraded_entry is None:
+        downgraded_value = None
+    else:
+        downgraded_value = bool(downgraded_entry)
+
     return DimsSpec(
         version=int(data["version"]),
         ndim=int(data["ndim"]),
@@ -246,6 +201,9 @@ def dims_spec_from_payload(data: Mapping[str, Any] | None) -> DimsSpec | None:
         level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in data["level_shapes"]),
         plane_mode=bool(data["plane_mode"]),
         axes=tuple(dims_payload),
+        levels=tuple(levels),
+        downgraded=downgraded_value,
+        labels=labels,
     )
 
 
@@ -259,25 +217,12 @@ def dims_spec_from_notify_payload(payload: Any) -> DimsSpec | None:
 
 
 def validate_ledger_against_dims_spec(spec: DimsSpec, snapshot: LedgerSnapshot) -> None:
-    current_step_raw = _require_value(snapshot, "dims", "main", "current_step")
-    level_shapes_raw = _require_value(snapshot, "multiscale", "main", "level_shapes")
-    current_level_raw = _require_value(snapshot, "multiscale", "main", "level")
-    ndisplay_raw = _require_value(snapshot, "view", "main", "ndisplay")
-    order_raw = _require_value(snapshot, "dims", "main", "order")
-    displayed_raw = _require_value(snapshot, "view", "main", "displayed")
-    axis_labels_raw = _optional_value(snapshot, "dims", "main", "axis_labels")
-
-    assert spec.current_step == _as_int_tuple(current_step_raw), "ledger current_step mismatch"
-    assert spec.level_shapes == _as_shape_tuple(level_shapes_raw), "ledger level_shapes mismatch"
-    assert spec.current_level == int(current_level_raw), "ledger current_level mismatch"
-    assert spec.ndisplay == int(ndisplay_raw), "ledger ndisplay mismatch"
-    assert spec.order == _as_int_tuple(order_raw), "ledger order mismatch"
-    assert spec.displayed == _as_int_tuple(displayed_raw), "ledger displayed mismatch"
-
-    if axis_labels_raw is not None:
-        axis_labels = tuple(str(v) for v in axis_labels_raw)
-        for axis in spec.axes:
-            assert axis.label == axis_labels[axis.index], "ledger axis_labels mismatch"
+    entry = snapshot.get(("dims", "main", "dims_spec"))
+    assert entry is not None, "ledger missing dims_spec entry"
+    assert isinstance(entry, LedgerEntry), "ledger dims_spec entry malformed"
+    snapshot_spec = dims_spec_from_payload(entry.value)
+    assert snapshot_spec is not None, "dims spec payload missing"
+    assert snapshot_spec == spec, "dims spec payload mismatch"
 
 
 def _as_int_tuple(value: Any) -> tuple[int, ...]:
@@ -292,67 +237,6 @@ def _as_shape_tuple(value: Any) -> tuple[tuple[int, ...], ...]:
         assert isinstance(entry, Iterable), "level_shapes entry must be iterable"
         shapes.append(tuple(int(dim) for dim in entry))
     return tuple(shapes)
-
-
-def _extent_for_step(count: int) -> AxisExtent:
-    size = max(int(count), 0)
-    if size <= 0:
-        return AxisExtent(start=0.0, stop=0.0, step=1.0)
-    stop = float(size - 1)
-    return AxisExtent(start=0.0, stop=stop, step=1.0)
-
-
-def _require_value(snapshot: LedgerSnapshot, scope: str, target: str, key: str) -> Any:
-    value = _optional_value(snapshot, scope, target, key)
-    assert value is not None, f"ledger missing {scope}/{key}"
-    return value
-
-
-def _optional_value(snapshot: LedgerSnapshot, scope: str, target: str, key: str) -> Any:
-    entry = snapshot.get((scope, target, key))
-    if entry is None:
-        return None
-    return entry.value if hasattr(entry, "value") else entry
-
-
-def _resolve_axis_labels(raw: Any, ndim: int) -> tuple[str, ...]:
-    if raw is None:
-        return _default_axis_labels(ndim)
-    labels = tuple(str(v) for v in raw)
-    assert len(labels) == ndim, "axis_labels length mismatch"
-    return labels
-
-
-def _coerce_margin_array(raw: Any, ndim: int) -> tuple[float, ...]:
-    if raw is None:
-        return tuple(0.0 for _ in range(ndim))
-    assert isinstance(raw, Iterable), "margin values must be iterable"
-    values = tuple(float(v) for v in raw)
-    assert len(values) == ndim, "margin array length mismatch"
-    return values
-
-
-def _extract_axis_steps(level_shapes: tuple[tuple[int, ...], ...], axis_index: int) -> tuple[int, ...]:
-    entries: list[int] = []
-    for shape in level_shapes:
-        assert axis_index < len(shape), "axis index exceeds level shape"
-        entries.append(int(shape[axis_index]))
-    return tuple(entries)
-
-
-def _infer_axis_role(label: str, index: int) -> str:
-    text = label.strip().lower()
-    if text in {"z", "depth"}:
-        return "z"
-    if text in {"y", "row"}:
-        return "y"
-    if text in {"x", "col", "column"}:
-        return "x"
-    if text in {"c", "channel"}:
-        return "channel"
-    if text in {"t", "time"}:
-        return "time"
-    return f"axis-{index}"
 
 
 __all__ = [
