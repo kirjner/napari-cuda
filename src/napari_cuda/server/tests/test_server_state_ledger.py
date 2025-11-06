@@ -39,13 +39,14 @@ def test_record_confirmed_dedupes_identical_value() -> None:
     clock_steps = iter([1.0, 2.0])
     ledger = ServerStateLedger(clock=lambda: float(next(clock_steps)))
 
-    first = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
-    assert first.value == 2
+    value = {"ndisplay": 2}
+    first = ledger.record_confirmed("dims", "main", "dims_spec", dict(value), origin="worker")
+    assert first.value == value
 
-    deduped = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
+    deduped = ledger.record_confirmed("dims", "main", "dims_spec", dict(value), origin="worker")
     assert deduped is first
 
-    stored = ledger.get("view", "main", "ndisplay")
+    stored = ledger.get("dims", "main", "dims_spec")
     assert stored is not None
     assert stored.timestamp == pytest.approx(1.0)
 
@@ -80,13 +81,13 @@ def test_batch_record_confirmed_rejects_invalid_entry_length() -> None:
 
 def test_snapshot_returns_copy() -> None:
     ledger = ServerStateLedger(clock=lambda: 5.0)
-    ledger.record_confirmed("view", "main", "ndisplay", 3, origin="worker")
+    ledger.record_confirmed("dims", "main", "dims_spec", {"ndisplay": 3}, origin="worker")
 
     snap = ledger.snapshot()
-    assert ("view", "main", "ndisplay") in snap
+    assert ("dims", "main", "dims_spec") in snap
 
-    ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
-    assert snap[("view", "main", "ndisplay")].value == 3
+    ledger.record_confirmed("dims", "main", "dims_spec", {"ndisplay": 2}, origin="worker")
+    assert snap[("dims", "main", "dims_spec")].value == {"ndisplay": 3}
 
 
 def test_metadata_requires_mapping() -> None:
@@ -125,21 +126,21 @@ def test_record_confirmed_assigns_monotonic_versions() -> None:
 def test_record_confirmed_accepts_version_override() -> None:
     ledger = ServerStateLedger()
     entry = ledger.record_confirmed(
-        "view",
+        "dims",
         "main",
-        "ndisplay",
-        3,
+        "dims_spec",
+        {"ndisplay": 3},
         origin="worker",
         version=99,
     )
     assert entry.version == 99
 
-    stored = ledger.get("view", "main", "ndisplay")
+    stored = ledger.get("dims", "main", "dims_spec")
     assert stored is not None
     assert stored.version == 99
-    assert ledger.current_version("view", "main", "ndisplay") == 99
+    assert ledger.current_version("dims", "main", "dims_spec") == 99
 
-    next_entry = ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
+    next_entry = ledger.record_confirmed("dims", "main", "dims_spec", {"ndisplay": 2}, origin="worker")
     assert next_entry.version == 100
 
 
@@ -172,7 +173,7 @@ def test_clear_scope_removes_entries_and_versions() -> None:
     ledger = ServerStateLedger()
     ledger.record_confirmed("layer", "layer-1", "visible", True, origin="worker")
     ledger.record_confirmed("layer", "layer-1", "opacity", 0.5, origin="worker")
-    ledger.record_confirmed("view", "main", "ndisplay", 2, origin="worker")
+    ledger.record_confirmed("dims", "main", "dims_spec", {"ndisplay": 2}, origin="worker")
 
     removed = ledger.clear_scope("layer", target="layer-1")
     assert removed == 2
@@ -180,7 +181,7 @@ def test_clear_scope_removes_entries_and_versions() -> None:
     assert ledger.get("layer", "layer-1", "visible") is None
     assert ledger.get("layer", "layer-1", "opacity") is None
     assert ledger.current_version("layer", "layer-1", "visible") is None
-    assert ledger.get("view", "main", "ndisplay") is not None
+    assert ledger.get("dims", "main", "dims_spec") is not None
 
 
 def test_clear_scope_supports_target_prefix() -> None:

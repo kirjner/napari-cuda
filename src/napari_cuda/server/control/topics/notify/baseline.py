@@ -22,6 +22,7 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumePlan,
 )
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
+from napari_cuda.shared.dims_spec import dims_spec_from_payload
 from .dims import broadcast_dims_state, send_dims_state
 from .layers import (
     send_layer_baseline,
@@ -95,11 +96,11 @@ def _viewer_settings(server: Any) -> dict[str, Any]:
     width = int(server.width)
     height = int(server.height)
     fps = float(server.cfg.fps)
-    ndisplay_entry = server._state_ledger.get("view", "main", "ndisplay")
-    assert (
-        ndisplay_entry is not None and isinstance(ndisplay_entry.value, int)
-    ), "viewer settings require ledger ndisplay entry"
-    use_volume = int(ndisplay_entry.value) >= 3
+    spec_entry = server._state_ledger.get("dims", "main", "dims_spec")
+    assert spec_entry is not None, "viewer settings require dims_spec entry"
+    spec = dims_spec_from_payload(getattr(spec_entry, "value", None))
+    assert spec is not None, "dims_spec payload missing"
+    use_volume = int(spec.ndisplay) >= 3
     return {
         "fps_target": fps,
         "canvas_size": [width, height],

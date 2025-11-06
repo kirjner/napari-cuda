@@ -155,7 +155,7 @@ def snapshot_versions(snapshot: RenderLedgerSnapshot) -> VersionGate:
     if snapshot.dims_version is not None:
         entries.append((("dims", "main", "current_step"), int(snapshot.dims_version)))
     if snapshot.view_version is not None:
-        entries.append((("view", "main", "ndisplay"), int(snapshot.view_version)))
+        entries.append((("dims", "main", "dims_spec"), int(snapshot.view_version)))
     if snapshot.multiscale_level_version is not None:
         entries.append((("multiscale", "main", "level"), int(snapshot.multiscale_level_version)))
     if snapshot.camera_versions:

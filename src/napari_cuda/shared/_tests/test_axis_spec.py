@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from napari_cuda.server.state_ledger import LedgerEntry
 from napari_cuda.shared.dims_spec import (
     dims_spec_from_payload as axes_spec_from_payload,
     dims_spec_to_payload as axes_spec_to_payload,
@@ -10,24 +11,88 @@ from napari_cuda.shared.dims_spec import (
 )
 
 
-class _Entry:
-    __slots__ = ("value",)
-
-    def __init__(self, value) -> None:
-        self.value = value
-
-
-def _snapshot() -> dict[tuple[str, str, str], _Entry]:
+def _spec_payload() -> dict[str, object]:
     return {
-        ("dims", "main", "current_step"): _Entry((5, 1, 0)),
-        ("multiscale", "main", "level_shapes"): _Entry(((10, 20, 30), (4, 12, 15))),
-        ("multiscale", "main", "level"): _Entry(1),
-        ("view", "main", "ndisplay"): _Entry(3),
-        ("dims", "main", "order"): _Entry((0, 1, 2)),
-        ("view", "main", "displayed"): _Entry((0, 1, 2)),
-        ("dims", "main", "axis_labels"): _Entry(("z", "y", "x")),
-        ("dims", "main", "margin_left"): _Entry((0.0, 0.0, 0.0)),
-        ("dims", "main", "margin_right"): _Entry((0.0, 0.0, 0.0)),
+        "version": 1,
+        "ndim": 3,
+        "ndisplay": 3,
+        "order": [0, 1, 2],
+        "displayed": [0, 1, 2],
+        "current_level": 1,
+        "current_step": [5, 1, 0],
+        "level_shapes": [[10, 20, 30], [4, 12, 15]],
+        "plane_mode": False,
+        "axes": [
+            {
+                "index": 0,
+                "label": "z",
+                "role": "z",
+                "displayed": True,
+                "order_pos": 0,
+                "current_step": 5,
+                "margin_left_steps": 0.0,
+                "margin_right_steps": 0.0,
+                "margin_left_world": 0.0,
+                "margin_right_world": 0.0,
+                "per_level_steps": [10, 4],
+                "per_level_world": [
+                    {"start": 0.0, "stop": 9.0, "step": 1.0},
+                    {"start": 0.0, "stop": 3.0, "step": 1.0},
+                ],
+            },
+            {
+                "index": 1,
+                "label": "y",
+                "role": "y",
+                "displayed": True,
+                "order_pos": 1,
+                "current_step": 1,
+                "margin_left_steps": 0.0,
+                "margin_right_steps": 0.0,
+                "margin_left_world": 0.0,
+                "margin_right_world": 0.0,
+                "per_level_steps": [20, 12],
+                "per_level_world": [
+                    {"start": 0.0, "stop": 19.0, "step": 1.0},
+                    {"start": 0.0, "stop": 11.0, "step": 1.0},
+                ],
+            },
+            {
+                "index": 2,
+                "label": "x",
+                "role": "x",
+                "displayed": True,
+                "order_pos": 2,
+                "current_step": 0,
+                "margin_left_steps": 0.0,
+                "margin_right_steps": 0.0,
+                "margin_left_world": 0.0,
+                "margin_right_world": 0.0,
+                "per_level_steps": [30, 15],
+                "per_level_world": [
+                    {"start": 0.0, "stop": 29.0, "step": 1.0},
+                    {"start": 0.0, "stop": 14.0, "step": 1.0},
+                ],
+            },
+        ],
+        "levels": [
+            {"index": 0, "shape": [10, 20, 30]},
+            {"index": 1, "shape": [4, 12, 15]},
+        ],
+        "downgraded": False,
+        "labels": ["z", "y", "x"],
+    }
+
+
+def _snapshot() -> dict[tuple[str, str, str], LedgerEntry]:
+    return {
+        ("dims", "main", "dims_spec"): LedgerEntry(
+            value=_spec_payload(),
+            timestamp=0.0,
+            origin="test",
+            metadata=None,
+            version=None,
+        ),
     }
 
 
@@ -65,6 +130,14 @@ def test_validate_ledger_against_spec_detects_mismatch() -> None:
 
     validate_ledger_against_spec(spec, snapshot)
 
-    snapshot[("view", "main", "ndisplay")] = _Entry(2)
+    mismatched = dict(_spec_payload())
+    mismatched["ndisplay"] = 2
+    snapshot[("dims", "main", "dims_spec")] = LedgerEntry(
+        value=mismatched,
+        timestamp=0.0,
+        origin="test",
+        metadata=None,
+        version=None,
+    )
     with pytest.raises(AssertionError):
         validate_ledger_against_spec(spec, snapshot)

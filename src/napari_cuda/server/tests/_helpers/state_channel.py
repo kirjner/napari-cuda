@@ -95,6 +95,7 @@ from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,
     DimsSpecAxis,
+    dims_spec_from_payload,
     dims_spec_to_payload,
 )
 
@@ -716,11 +717,13 @@ class StateServerHarness:
         base_metrics = NotifyDimsPayload.from_dict(_default_dims_snapshot())
 
         def _current_ndisplay() -> int:
-            entry = server._state_ledger.get("view", "main", "ndisplay")
+            entry = server._state_ledger.get("dims", "main", "dims_spec")
             if entry is None or entry.value is None:
                 return int(base_metrics.ndisplay)
-            value = int(entry.value)
-            return 3 if value >= 3 else 2
+            spec = dims_spec_from_payload(entry.value)
+            if spec is None:
+                return int(base_metrics.ndisplay)
+            return 3 if int(spec.ndisplay) >= 3 else 2
 
         server._current_ndisplay = _current_ndisplay
 
@@ -971,42 +974,7 @@ class StateServerHarness:
         origin: str = "worker.state.dims",
     ) -> None:
         entries = [
-            ("view", "main", "ndisplay", int(payload.ndisplay)),
-            (
-                "view",
-                "main",
-                "displayed",
-                tuple(int(idx) for idx in payload.displayed) if payload.displayed is not None else None,
-            ),
             ("dims", "main", "current_step", tuple(int(v) for v in payload.current_step)),
-            ("dims", "main", "mode", str(payload.mode)),
-            (
-                "dims",
-                "main",
-                "order",
-                tuple(int(idx) for idx in payload.order) if payload.order is not None else None,
-            ),
-            (
-                "dims",
-                "main",
-                "axis_labels",
-                tuple(str(label) for label in payload.axis_labels) if payload.axis_labels is not None else None,
-            ),
-            (
-                "dims",
-                "main",
-                "labels",
-                tuple(str(label) for label in payload.labels) if getattr(payload, "labels", None) is not None else None,
-            ),
-            ("multiscale", "main", "level", int(payload.current_level)),
-            ("multiscale", "main", "levels", tuple(dict(level) for level in payload.levels)),
-            (
-                "multiscale",
-                "main",
-                "level_shapes",
-                tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes),
-            ),
-            ("multiscale", "main", "downgraded", payload.downgraded),
         ]
         server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
         if payload.dims_spec is not None:
@@ -1024,7 +992,7 @@ def frames_of_type(frames: Iterable[dict[str, Any]], frame_type: str) -> list[di
 
 
 def _default_dims_snapshot() -> dict[str, Any]:
-    level_shapes = [[512, 256, 64], [256, 128, 32]]
+    level_shapes = [[512, 256, 64], [256, 128, 32], [128, 64, 16]]
     spec = _build_dims_spec(
         current_level=0,
         current_step=(0, 0, 0),

@@ -170,7 +170,7 @@ def test_snapshot_versions_apply_updates_mapping() -> None:
     cache: dict[tuple[str, str, str], int] = {}
     gate.apply(cache)
     assert cache[("dims", "main", "current_step")] == 3
-    assert cache[("view", "main", "ndisplay")] == 4
+    assert cache[("dims", "main", "dims_spec")] == 4
     assert cache[("multiscale", "main", "level")] == 5
     assert cache[("camera_plane", "main", "zoom")] == 6
     assert cache[("camera_volume", "main", "fov")] == 7

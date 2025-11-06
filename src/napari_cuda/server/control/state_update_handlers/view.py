@@ -18,6 +18,7 @@ from napari_cuda.server.scene import (
     VolumeState,
     snapshot_render_state,
 )
+from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
 if TYPE_CHECKING:
     from napari_cuda.server.control.control_channel_server import StateUpdateContext
@@ -231,9 +232,12 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
         return True
 
     ndisplay = 3 if int(raw_value) >= 3 else 2
-    prev_entry = server._state_ledger.get("view", "main", "ndisplay")
-    prev_ndisplay = int(prev_entry.value) if prev_entry is not None and isinstance(prev_entry.value, int) else (
-        3 if server._initial_mode is RenderMode.VOLUME else 2
+    prev_spec_entry = server._state_ledger.get("dims", "main", "dims_spec")
+    prev_spec = dims_spec_from_payload(getattr(prev_spec_entry, "value", None)) if prev_spec_entry is not None else None
+    prev_ndisplay = (
+        int(prev_spec.ndisplay)
+        if prev_spec is not None
+        else (3 if server._initial_mode is RenderMode.VOLUME else 2)
     )
     was_volume = prev_ndisplay >= 3
     if getattr(server, "_log_dims_info", False):

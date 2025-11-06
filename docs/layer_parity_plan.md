@@ -12,35 +12,30 @@ metadata cleanup.
 Current State Snapshot
 ----------------------
 
-* Ledger: every reducer writes `dims_spec`; legacy tuple entries
-  (`dims/main/order`, `axis_labels`, `displayed`, `labels`,
-  `current_step`) are still emitted by `_dims_entries_from_payload`.
-* Notify pipeline: `NotifyDimsPayload` carries both the spec and tuple
-  fields; `ServerDimsMirror` reconstructs tuples from the spec before
-  broadcasting.
-* Client control/runtime: `NapariDimsMirror` and `state_update_actions`
-  cache tuple metadata in `dims_meta` even though they store the spec.
-* Render snapshot + worker application: snapshots persist tuple metadata
-  (`order`, `displayed`, `axis_labels`) and the render loop asserts that
-  those match the spec.
-* Tests/fixtures: state-channel and runtime suites still manufacture
-  tuple payloads; spec usage only supplements them.
-* Ledger metadata: `view/main/ndisplay` and `multiscale/main/*` entries
-  mirror spec data; viewport caches (`viewport/**`, `view_cache/**`)
-  keep redundant plane/volume state.
-* Sanitizers everywhere: reducers clamp/index/proportional helpers,
-  mirror/client code re-normalises steps/orders/labels, runtime planners
-  clamp again, and metadata only exists to ferry intent IDs/axis hints.
-* Notify pipeline now emits spec-only payloads; axis/order/displayed metadata is derived from `DimsSpec` rather than
-  duplicated in the wire format.
+* Notify pipeline: `NotifyDimsPayload` is now spec-only; server and client
+  paths rely on `dims_spec` for axis/order/displayed metadata.
+* Ledger: reducers still write legacy mirrors (`view/main/ndisplay`,
+  `multiscale/main/{level,level_shapes,levels,downgraded}`,
+  `dims/main/current_step`) alongside the spec; bootstrap + level-switch
+  transactions expect those tuples.
+* Viewport persistence: `_record_viewport_state` and `_store_*` continue
+  to emit `viewport/**` and `view_cache/**` rows even though the same
+  pose data lives inside `PlaneState` / `VolumeState`.
+* Client runtime: `NapariDimsMirror`, emitters, and control fixtures
+  maintain tuple-heavy `dims_meta` caches and helper shims despite storing
+  the canonical spec.
+* Tests/fixtures: state-channel helpers fabricate the legacy tuple
+  entries; integration tests assert on the redundant ledger scopes.
+* Sanitizers everywhere: many reducers/mirrors still normalize tuples the
+  spec already validates; helper proliferation makes reasoning harder.
 
 -----------------------------------------------------------------------
 
 Target End State
 ----------------
 
-1. `DimsSpec` is the sole source of dims truth: no tuple metadata written
-   to the ledger or broadcast over notify channels.
+1. `DimsSpec` stored in the ledger remains the authoritative dims record;
+   no auxiliary tuple metadata is written or broadcast alongside it.
 2. Client, server, and worker code path derive everything from spec via
    shared helpers; tuple caches disappear.
 3. Notify protocol treats `dims_spec` as required; compat fields are
@@ -55,53 +50,38 @@ Target End State
 Workstreams & Sequencing
 ------------------------
 
-### 1. Shared Helpers (Pure Functions)
-* Add helper functions in `shared/dims_spec.py` for recurring derived
-  values (axis labels, displayed axes, order, clamped levels/steps,
-  primary axis, etc.).
-* Replace ad-hoc tuple reconstruction and clamp/normalise helpers in
-  reducers, mirrors, render builders, and client control/runtime code
-  with calls to the helpers.
-* Add unit coverage for the helpers (spec round-trips, remap/clamp).
+### 1. Server Ledger Cleanup
+* Rip out legacy tuple writes in `_dims_entries_from_payload`,
+  `reduce_bootstrap_state`, `reduce_level_update`, `reduce_dims_update`,
+  `reduce_plane_restore`, and the related transaction helpers; rely on
+  `DimsSpec` plus the minimum multiscale metadata still required for
+  restore flows.
+* Collapse `_ledger_dims_payload` into a spec-first accessor (or inline
+  where it is now trivial) so reducers stop rehydrating tuples.
+* Simplify or delete transaction helpers that become one-line
+  `batch_record_confirmed` calls once redundant entries disappear.
 
-### 2. Client Spec Adoption
-* Update `NapariDimsMirror`, `state_update_actions`, emitters, and runtime
-  planners to rely exclusively on helpers + the stored `DimsSpec`.
-* Delete `dims_meta` tuple caches (`order`, `axis_labels`, `displayed`,
-  `range`, etc.) once call sites fold into helpers.
-* Refresh tests/fixtures to construct `DimsSpec` payloads directly.
+### 2. Viewport & Pose Simplification
+* Remove `_record_viewport_state`, `view_cache/**`, and `viewport/**`
+  ledger writes; persist pose information only inside `PlaneState /
+  VolumeState` or the spec if absolutely necessary.
+* Update restore handlers, scene snapshot builders, worker bootstrap,
+  and tests to consume the streamlined pose sources.
 
-### 3. Protocol Flip (DONE)
-* `NotifyDimsPayload` now requires `dims_spec` and no longer transports the legacy tuple fields.
-* Server/client serialization + tests (notify frames, state-channel replay, client runtime) assert spec-only payloads.
-* Tuple parsing paths have been removed.
+### 3. Client & Fixture Lean-Out
+* Prune tuple-heavy `dims_meta` caches in `NapariDimsMirror`,
+  `state_update_actions`, and emitters; derive any needed metadata on the
+  fly from the stored spec.
+* Replace `_make_dims_snapshot`, `_record_dims_to_ledger`, and similar
+  test helpers with spec-only factories; drop assertions that reference
+  the removed ledger scopes.
 
-### 4. Server Reducer Cleanup
-* Stop writing tuple keys from `_dims_entries_from_payload` and related
-  reducers/transactions (`reduce_bootstrap_state`, `reduce_level_update`,
-  `reduce_dims_update`, `reduce_plane_restore`).
-* Replace `_ledger_dims_payload` with a spec-returning helper; migrate all
-  callers to use the spec.
-* Update render snapshot builders to source data through helpers and drop
-  tuple assertions.
-* Drop metadata arguments for dims-related ledger writes; rely on
-  `ServerLedgerUpdate` fields + spec helpers for axis/intent routing.
-
-### 5. Mirror & Metadata Pruning
-* Simplify `ServerDimsMirror` and any client/runtime mirrors to forward
-  spec-only payloads.
-* Delete redundant viewport/view_cache ledger entries unless a surviving
-  consumer needs pose persistence; document or replace them with a
-  spec-derived representation if required.
-* Strip dims metadata consumption (axis/intent) from client/server
-  mirrors and ack logic once helpers cover resolution; delete the
-  legacy clamp/normalize helpers uncovered in the audit.
-
-### 6. Final Sweep
-* Remove tuple-era compatibility helpers, docs, and fixtures.
-* Run full CI (`uv run pytest -q`, relevant slow/integration suites, type
-  checks) to confirm spec-only flow.
-* Update release notes / consolidation log to capture the migration.
+### 4. Final Sweep
+* Delete dead normalization helpers uncovered during the cleanup to keep
+  the surface area small.
+* Run the focused suites (`client/control`, `server/control`,
+  `state_channel`) and then full `uv run pytest -q` to verify parity.
+* Refresh this plan + release notes once the ledger is spec-only end to end.
 
 -----------------------------------------------------------------------
 

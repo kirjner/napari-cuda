@@ -127,6 +127,7 @@ from napari_cuda.server.scene import (
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.utils.websocket import safe_send
 from napari_cuda.server.control.state_reducers import reduce_thumbnail_capture
+from napari_cuda.shared.dims_spec import dims_spec_from_payload
 import hashlib
 import time
 
@@ -779,12 +780,11 @@ class EGLHeadlessServer:
         ledger = self._state_ledger
         assert ledger is not None, "state ledger unavailable"
 
-        entry = ledger.get("view", "main", "ndisplay")
-        assert entry is not None, "ledger missing view/ndisplay"
-
-        value = entry.value
-        assert isinstance(value, int), "ledger ndisplay must be int"
-        return 3 if value >= 3 else 2
+        spec_entry = ledger.get("dims", "main", "dims_spec")
+        assert spec_entry is not None, "ledger missing dims_spec entry"
+        spec = dims_spec_from_payload(getattr(spec_entry, "value", None))
+        assert spec is not None, "dims_spec payload missing"
+        return 3 if int(spec.ndisplay) >= 3 else 2
 
     def _start_mirrors_if_needed(self) -> None:
         if not self._mirrors_started:
@@ -793,9 +793,11 @@ class EGLHeadlessServer:
             self._mirrors_started = True
 
     def _viewer_settings(self) -> dict[str, Any]:
-        entry = self._state_ledger.get("view", "main", "ndisplay")
-        assert entry is not None and isinstance(entry.value, int), "ndisplay not initialised"
-        use_volume = int(entry.value) >= 3
+        spec_entry = self._state_ledger.get("dims", "main", "dims_spec")
+        assert spec_entry is not None, "ndisplay not initialised"
+        spec = dims_spec_from_payload(getattr(spec_entry, "value", None))
+        assert spec is not None, "dims_spec payload missing"
+        use_volume = int(spec.ndisplay) >= 3
         return {
             "fps_target": float(self.cfg.fps),
             "canvas_size": [int(self.width), int(self.height)],

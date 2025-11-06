@@ -71,29 +71,6 @@ def _make_axes_spec(
 def _seed_ledger(worker: _StubWorker, spec: DimsSpec) -> None:
     ledger = worker._ledger
     ledger.record_confirmed("dims", "main", "current_step", spec.current_step, origin="test")
-    ledger.record_confirmed("view", "main", "ndisplay", int(spec.ndisplay), origin="test")
-    ledger.record_confirmed("dims", "main", "order", tuple(int(v) for v in spec.order), origin="test")
-    ledger.record_confirmed("view", "main", "displayed", tuple(int(v) for v in spec.displayed), origin="test")
-    ledger.record_confirmed("dims", "main", "axis_labels", tuple(axis.label for axis in spec.axes), origin="test")
-    ledger.record_confirmed("multiscale", "main", "level", int(spec.current_level), origin="test")
-    ledger.record_confirmed(
-        "multiscale",
-        "main",
-        "level_shapes",
-        tuple(tuple(int(dim) for dim in shape) for shape in spec.level_shapes),
-        origin="test",
-    )
-    ledger.record_confirmed(
-        "multiscale",
-        "main",
-        "levels",
-        tuple(dict(level) for level in spec.levels),
-        origin="test",
-    )
-    if spec.downgraded is not None:
-        ledger.record_confirmed("multiscale", "main", "downgraded", bool(spec.downgraded), origin="test")
-    if spec.labels is not None:
-        ledger.record_confirmed("dims", "main", "labels", tuple(str(label) for label in spec.labels), origin="test")
     ledger.record_confirmed("dims", "main", "dims_spec", dims_spec_to_payload(spec), origin="test")
 
 

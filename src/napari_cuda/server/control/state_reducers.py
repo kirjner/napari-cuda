@@ -132,9 +132,11 @@ def _metadata_from_intent(intent_id: Optional[str]) -> Optional[dict[str, Any]]:
 
 
 def _current_ndisplay(ledger: ServerStateLedger) -> int:
-    entry = ledger.get("view", "main", "ndisplay")
-    if entry is not None and isinstance(entry.value, int):
-        return int(entry.value)
+    spec_entry = ledger.get("dims", "main", "dims_spec")
+    if spec_entry is not None and isinstance(spec_entry.value, Mapping):
+        spec = dims_spec_from_payload(spec_entry.value)
+        if spec is not None:
+            return int(spec.ndisplay)
     return 2
 
 
@@ -761,10 +763,6 @@ def _dims_entries_from_payload(
 ) -> list[tuple[Any, ...]]:
     entries: list[tuple[Any, ...]] = []
 
-    entries.append(("view", "main", "ndisplay", int(payload.ndisplay)))
-    if payload.displayed is not None:
-        entries.append(("view", "main", "displayed", tuple(int(idx) for idx in payload.displayed)))
-
     current_step = tuple(int(v) for v in payload.current_step)
     entries.append(
         (
@@ -775,26 +773,6 @@ def _dims_entries_from_payload(
             {"axis_index": axis_index, "axis_target": axis_target},
         )
     )
-
-    # mode is derived from view.ndisplay; do not persist dims.mode
-    entries.append(("multiscale", "main", "level", int(payload.current_level)))
-    entries.append(
-        (
-            "multiscale",
-            "main",
-            "levels",
-            tuple(dict(level) for level in payload.levels),
-        )
-    )
-    entries.append(
-        (
-            "multiscale",
-            "main",
-            "level_shapes",
-            tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes),
-        )
-    )
-    entries.append(("multiscale", "main", "downgraded", payload.downgraded))
 
     return entries
 
@@ -810,30 +788,17 @@ def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
     assert dims_spec is not None, "dims spec ledger entry missing payload"
     validate_ledger_against_dims_spec(dims_spec, snapshot)
 
-    def require(scope: str, key: str) -> Any:
-        entry = snapshot.get((scope, "main", key))
-        if entry is None:
-            raise AssertionError(f"ledger missing {scope}/{key}")
-        return entry.value
-
-    def optional(scope: str, key: str) -> Any:
-        entry = snapshot.get((scope, "main", key))
-        return None if entry is None else entry.value
-
     current_step = tuple(int(v) for v in dims_spec.current_step)
     level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
-    levels_raw = require("multiscale", "levels")
-    levels = tuple(dict(level) for level in levels_raw)
+    levels = tuple(dict(level) for level in dims_spec.levels)
     current_level = int(dims_spec.current_level)
-    downgraded_raw = optional("multiscale", "downgraded")
-    downgraded = None if downgraded_raw is None else bool(downgraded_raw)
+    downgraded = None if dims_spec.downgraded is None else bool(dims_spec.downgraded)
     ndisplay = int(dims_spec.ndisplay)
-    mode = "volume" if ndisplay >= 3 else "plane"
+    mode = "plane" if dims_spec.plane_mode else "volume"
 
-    labels_raw = optional("dims", "labels")
     labels = (
-        tuple(str(label) for label in labels_raw)
-        if labels_raw is not None
+        tuple(str(label) for label in dims_spec.labels)
+        if dims_spec.labels is not None
         else None
     )
 
@@ -994,10 +959,10 @@ def reduce_bootstrap_state(
     assert dims_entry.version is not None, "bootstrap transaction must yield dims version"
     dims_version = int(dims_entry.version)
 
-    view_entry = stored_entries.get(("view", "main", "ndisplay"))
-    assert view_entry is not None, "bootstrap transaction must return view entry"
-    assert view_entry.version is not None, "bootstrap transaction must yield view version"
-    view_version = int(view_entry.version)
+    spec_entry = stored_entries.get(("dims", "main", "dims_spec"))
+    assert spec_entry is not None, "bootstrap transaction must return dims_spec entry"
+    assert spec_entry.version is not None, "bootstrap transaction must yield spec version"
+    spec_version = int(spec_entry.version)
 
     dims_intent_id = f"dims-bootstrap-{uuid.uuid4().hex}"
     view_intent_id = f"view-bootstrap-{uuid.uuid4().hex}"
@@ -1023,7 +988,7 @@ def reduce_bootstrap_state(
         intent_id=view_intent_id,
         timestamp=ts,
         origin=origin,
-        version=view_version,
+        version=spec_version,
         dims_spec=dims_spec,
     )
 
@@ -1262,8 +1227,7 @@ def reduce_view_update(
     if ndisplay is not None:
         target_ndisplay = 3 if int(ndisplay) >= 3 else 2
     else:
-        entry = ledger.get("view", "main", "ndisplay")
-        target_ndisplay = int(entry.value) if entry is not None and isinstance(entry.value, int) else 2
+        target_ndisplay = 3 if int(dims_payload.dims_spec.ndisplay) >= 3 else 2
 
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
     metadata = _metadata_from_intent(resolved_intent_id)
@@ -1352,10 +1316,10 @@ def reduce_view_update(
         timestamp=ts,
     )
 
-    ndisplay_entry = stored_entries.get(("view", "main", "ndisplay"))
-    assert ndisplay_entry is not None, "view toggle transaction must return ndisplay entry"
-    assert ndisplay_entry.version is not None, "view toggle transaction must yield versioned entry"
-    version = int(ndisplay_entry.version)
+    spec_entry = stored_entries.get(("dims", "main", "dims_spec"))
+    assert spec_entry is not None, "view toggle transaction must return dims_spec entry"
+    assert spec_entry.version is not None, "view toggle transaction must yield versioned dims_spec entry"
+    version = int(spec_entry.version)
 
     logger.debug(
         "view intent updated ndisplay=%d order=%s displayed=%s version=%d origin=%s",
@@ -1455,6 +1419,16 @@ def reduce_plane_restore(
     dims_payload = _ledger_dims_payload(ledger)
     spec = dims_payload.dims_spec
     assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
+
+    if level_idx >= len(spec.level_shapes):
+        level_shapes_list = [tuple(int(dim) for dim in shape) for shape in spec.level_shapes]
+        if level_shapes_list:
+            template_shape = level_shapes_list[-1]
+        else:
+            template_shape = tuple(1 for _ in step_tuple)
+        while len(level_shapes_list) <= level_idx:
+            level_shapes_list.append(tuple(int(dim) for dim in template_shape))
+        spec = replace(spec, level_shapes=tuple(level_shapes_list))
 
     step_tuple = dims_spec_clamp_step(spec, int(level_idx), step_tuple)
 
@@ -1700,6 +1674,17 @@ def reduce_level_update(
         op_seq=next_op_seq,
         op_kind="level-update",
     )
+
+    plane_payload = _plain_plane_state(plane_state)
+    if plane_payload is not None:
+        plane_model = PlaneState(**plane_payload)
+        _store_plane_state(
+            ledger,
+            plane_model,
+            origin=origin,
+            timestamp=ts,
+            metadata=_metadata_from_intent(intent_id),
+        )
 
     level_entry = stored_entries.get(("multiscale", "main", "level"))
     assert level_entry is not None, "level switch transaction must return level entry"

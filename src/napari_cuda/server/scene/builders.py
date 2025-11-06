@@ -134,6 +134,22 @@ def snapshot_multiscale_state(
     if downgraded_entry is not None and downgraded_entry.value is not None:
         state["downgraded"] = bool(downgraded_entry.value)
 
+    if "current_level" not in state or "levels" not in state or "level_shapes" not in state or "downgraded" not in state:
+        spec_entry = snapshot.get(("dims", "main", "dims_spec"))
+        if spec_entry is not None and spec_entry.value is not None:
+            spec = dims_spec_from_payload(spec_entry.value)
+            if spec is not None:
+                if "current_level" not in state:
+                    state["current_level"] = int(spec.current_level)
+                if "levels" not in state and spec.levels:
+                    state["levels"] = [dict(level) for level in spec.levels]
+                if "level_shapes" not in state and spec.level_shapes:
+                    state["level_shapes"] = [
+                        [int(dim) for dim in shape] for shape in spec.level_shapes
+                    ]
+                if "downgraded" not in state and spec.downgraded is not None:
+                    state["downgraded"] = bool(spec.downgraded)
+
     return state
 
 

@@ -10,37 +10,80 @@ from napari_cuda.server.scene import (
     snapshot_scene,
 )
 from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.shared.dims_spec import (
+    AxisExtent,
+    DimsSpec,
+    DimsSpecAxis,
+    dims_spec_to_payload,
+)
 
 
 def _seed_plane_ledger(ndisplay: int = 2) -> ServerStateLedger:
     ledger = ServerStateLedger()
-    ledger.record_confirmed("view", "main", "ndisplay", ndisplay, origin="test.plane")
-    displayed_axes: tuple[int, ...] = (1, 2) if ndisplay == 2 else (0, 1, 2)
-    ledger.record_confirmed("view", "main", "displayed", displayed_axes, origin="test.plane")
     ledger.record_confirmed("dims", "main", "current_step", (0, 0, 0), origin="test.plane")
-    ledger.record_confirmed("dims", "main", "order", (0, 1, 2), origin="test.plane")
-    ledger.record_confirmed("dims", "main", "axis_labels", ("z", "y", "x"), origin="test.plane")
-    ledger.record_confirmed("multiscale", "main", "level", 0, origin="test.plane")
-    ledger.record_confirmed(
-        "multiscale",
-        "main",
-        "levels",
-        (
-            {
-                "index": 0,
-                "shape": [10, 20, 30],
-                "downsample": [1.0, 1.0, 1.0],
-            },
+    axes = (
+        DimsSpecAxis(
+            index=0,
+            label="z",
+            role="z",
+            displayed=ndisplay >= 3,
+            order_position=0,
+            current_step=0,
+            margin_left_steps=0.0,
+            margin_right_steps=0.0,
+            margin_left_world=0.0,
+            margin_right_world=0.0,
+            per_level_steps=(10,),
+            per_level_world=(AxisExtent(start=0.0, stop=9.0, step=1.0),),
         ),
-        origin="test.plane",
+        DimsSpecAxis(
+            index=1,
+            label="y",
+            role="y",
+            displayed=True,
+            order_position=1,
+            current_step=0,
+            margin_left_steps=0.0,
+            margin_right_steps=0.0,
+            margin_left_world=0.0,
+            margin_right_world=0.0,
+            per_level_steps=(20,),
+            per_level_world=(AxisExtent(start=0.0, stop=19.0, step=1.0),),
+        ),
+        DimsSpecAxis(
+            index=2,
+            label="x",
+            role="x",
+            displayed=True,
+            order_position=2,
+            current_step=0,
+            margin_left_steps=0.0,
+            margin_right_steps=0.0,
+            margin_left_world=0.0,
+            margin_right_world=0.0,
+            per_level_steps=(30,),
+            per_level_world=(AxisExtent(start=0.0, stop=29.0, step=1.0),),
+        ),
     )
-    ledger.record_confirmed(
-        "multiscale",
-        "main",
-        "level_shapes",
-        ((10, 20, 30),),
-        origin="test.plane",
+    displayed_axes: tuple[int, ...] = (1, 2) if ndisplay == 2 else (0, 1, 2)
+    spec = DimsSpec(
+        version=1,
+        ndim=3,
+        ndisplay=ndisplay,
+        order=(0, 1, 2),
+        displayed=displayed_axes,
+        current_level=0,
+        current_step=(0, 0, 0),
+        level_shapes=((10, 20, 30),),
+        plane_mode=ndisplay < 3,
+        axes=axes,
+        levels=(
+            {"index": 0, "shape": [10, 20, 30], "downsample": [1.0, 1.0, 1.0]},
+        ),
+        downgraded=False,
+        labels=("z", "y", "x"),
     )
+    ledger.record_confirmed("dims", "main", "dims_spec", dims_spec_to_payload(spec), origin="test.plane")
     ledger.record_confirmed(
         "camera_plane",
         "main",

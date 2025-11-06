@@ -10,6 +10,7 @@ from typing import Optional
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, layer_content_signature
+from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[str, LayerVisualState, Optional[str], float], Awaitable[None]]
@@ -69,10 +70,12 @@ class ServerLayerMirror:
             self._started = True
         snapshot = self._ledger.snapshot()
         ledger_snapshot = build_ledger_snapshot(self._ledger, snapshot)
-        nd_entry = snapshot.get(("view", "main", "ndisplay"))
+        spec_entry = snapshot.get(("dims", "main", "dims_spec"))
         with self._lock:
-            if nd_entry is not None and nd_entry.value is not None:
-                self._ndisplay = int(nd_entry.value)
+            if spec_entry is not None and spec_entry.value is not None:
+                spec = dims_spec_from_payload(spec_entry.value)
+                if spec is not None:
+                    self._ndisplay = int(spec.ndisplay)
             self._pending.clear()
             self._pending_versions.clear()
             self._pending_intents.clear()
@@ -98,7 +101,7 @@ class ServerLayerMirror:
                 finalize=True,
             )
         self._ledger.subscribe("scene", "main", "op_state", self._on_op_state)
-        self._ledger.subscribe("view", "main", "ndisplay", self._on_ndisplay)
+        self._ledger.subscribe("dims", "main", "dims_spec", self._on_dims_spec)
         self._ledger.subscribe_all(self._on_event)
 
     # ------------------------------------------------------------------
@@ -137,8 +140,7 @@ class ServerLayerMirror:
         self._flush(to_flush, intents, event.timestamp)
 
     # ------------------------------------------------------------------
-    def _on_ndisplay(self, event: LedgerEvent) -> None:
-        value = int(event.value)
+    def _handle_ndisplay(self, value: int) -> None:
         with self._lock:
             previous_enabled = self._volume_enabled_locked()
             self._ndisplay = value
@@ -160,11 +162,19 @@ class ServerLayerMirror:
                         self._last_versions.pop((layer_id, key), None)
                         self._pending_versions.pop((layer_id, key), None)
 
+    def _on_dims_spec(self, event: LedgerEvent) -> None:
+        spec = dims_spec_from_payload(event.value if isinstance(event.value, Mapping) else None)
+        if spec is None:
+            return
+        self._handle_ndisplay(int(spec.ndisplay))
+
     # ------------------------------------------------------------------
     def _on_event(self, event: LedgerEvent) -> None:
         scope = str(event.scope)
-        if scope == "view" and event.key == "ndisplay":
-            self._on_ndisplay(event)
+        if scope == "dims" and event.key == "dims_spec":
+            spec = dims_spec_from_payload(event.value if isinstance(event.value, Mapping) else None)
+            if spec is not None:
+                self._handle_ndisplay(int(spec.ndisplay))
             return
         if scope not in {"layer", "volume", "multiscale"}:
             return

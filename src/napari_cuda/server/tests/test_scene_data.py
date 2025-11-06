@@ -16,21 +16,6 @@ def test_snapshot_render_state_preserves_dims_metadata() -> None:
         [
             ("scene", "main", "op_seq", 4),
             ("dims", "main", "current_step", (5, 0, 0)),
-            ("dims", "main", "order", (0, 1, 2)),
-            ("view", "main", "ndisplay", 2),
-            ("view", "main", "displayed", (1, 2)),
-            ("multiscale", "main", "level", 1),
-            ("multiscale", "main", "level_shapes", ((10, 20, 30), (5, 10, 15))),
-            (
-                "multiscale",
-                "main",
-                "levels",
-                (
-                    {"index": 0, "shape": [10, 20, 30]},
-                    {"index": 1, "shape": [5, 10, 15]},
-                ),
-            ),
-            ("multiscale", "main", "downgraded", False),
         ],
         origin="test",
     )

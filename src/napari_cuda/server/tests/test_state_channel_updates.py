@@ -257,11 +257,13 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     server._state_ledger = ServerStateLedger()
 
     def _current_ndisplay() -> int:
-        entry = server._state_ledger.get("view", "main", "ndisplay")
+        entry = server._state_ledger.get("dims", "main", "dims_spec")
         if entry is None or entry.value is None:
             return int(baseline_dims.ndisplay)
-        value = int(entry.value)
-        return 3 if value >= 3 else 2
+        spec = dims_spec_from_payload(entry.value)
+        if spec is None:
+            return int(baseline_dims.ndisplay)
+        return 3 if int(spec.ndisplay) >= 3 else 2
 
     server._current_ndisplay = _current_ndisplay
 
@@ -480,42 +482,7 @@ def _record_dims_to_ledger(
     origin: str = "worker.state.dims",
 ) -> None:
     entries = [
-        ("view", "main", "ndisplay", int(payload.ndisplay)),
-        (
-            "view",
-            "main",
-            "displayed",
-            tuple(int(idx) for idx in payload.displayed) if payload.displayed is not None else None,
-        ),
         ("dims", "main", "current_step", tuple(int(v) for v in payload.current_step)),
-        ("dims", "main", "mode", str(payload.mode)),
-        (
-            "dims",
-            "main",
-            "order",
-            tuple(int(idx) for idx in payload.order) if payload.order is not None else None,
-        ),
-        (
-            "dims",
-            "main",
-            "axis_labels",
-            tuple(str(label) for label in payload.axis_labels) if payload.axis_labels is not None else None,
-        ),
-        (
-            "dims",
-            "main",
-            "labels",
-            tuple(str(label) for label in payload.labels) if getattr(payload, "labels", None) is not None else None,
-        ),
-        ("multiscale", "main", "level", int(payload.current_level)),
-        ("multiscale", "main", "levels", tuple(dict(level) for level in payload.levels)),
-        (
-            "multiscale",
-            "main",
-            "level_shapes",
-            tuple(tuple(int(dim) for dim in shape) for shape in payload.level_shapes),
-        ),
-        ("multiscale", "main", "downgraded", payload.downgraded),
     ]
     server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
     spec = _dims_spec_from_notify_payload(payload)
@@ -534,7 +501,7 @@ def _frames_of_type(frames: list[dict[str, Any]], frame_type: str) -> list[dict[
 def _make_dims_snapshot(**overrides: Any) -> dict[str, Any]:
     overrides = dict(overrides)
 
-    base_level_shapes = overrides.pop("level_shapes", [[512, 256, 64], [256, 128, 32]])
+    base_level_shapes = overrides.pop("level_shapes", [[512, 256, 64], [256, 128, 32], [128, 64, 16]])
     level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in base_level_shapes)
     base_step = overrides.get("current_step", overrides.get("step", [0, 0, 0]))
     current_step = tuple(int(v) for v in base_step)
@@ -917,12 +884,13 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
-    view_entry = server._state_ledger.get("view", "main", "ndisplay")
-    assert view_entry is not None
-    assert int(view_entry.value) == 3
-    assert view_entry.version is not None
-    entry = server._state_ledger.get("view", "main", "ndisplay")
-    assert entry is not None and int(entry.value) == 3
+    spec_entry = server._state_ledger.get("dims", "main", "dims_spec")
+    assert spec_entry is not None
+    spec_payload = dims_spec_from_payload(spec_entry.value)
+    assert spec_payload is not None
+    assert int(spec_payload.ndisplay) == 3
+    assert spec_entry.version is not None
+    assert server._state_ledger.get("view", "main", "ndisplay") is None
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"
@@ -931,7 +899,7 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     assert ack_payload["in_reply_to"] == "state-view-1"
     assert ack_payload["status"] == "accepted"
     assert ack_payload["applied_value"] == 3
-    assert ack_payload["version"] == view_entry.version
+    assert ack_payload["version"] == spec_entry.version
 
     interim_dims = _frames_of_type(captured, "notify.dims")
     if interim_dims:
@@ -951,12 +919,12 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     _record_dims_to_ledger(server, notify_payload)
     _drain_scheduled(scheduled)
 
-    dims_entry = server._state_ledger.get("view", "main", "ndisplay")
-    assert dims_entry is not None
-    assert int(dims_entry.value) == 3
-    level_entry = server._state_ledger.get("multiscale", "main", "level")
-    assert level_entry is not None
-    assert int(level_entry.value) == 1
+    spec_entry = server._state_ledger.get("dims", "main", "dims_spec")
+    assert spec_entry is not None
+    spec_payload = dims_spec_from_payload(spec_entry.value)
+    assert spec_payload is not None
+    assert int(spec_payload.ndisplay) == 3
+    assert int(spec_payload.current_level) == 1
 
 
 

@@ -34,6 +34,7 @@ from napari_cuda.server.scene import (
 import numpy as np
 from napari_cuda.server.runtime.ipc.mailboxes.worker_intent import ThumbnailCapture
 from napari_cuda.server.utils.signatures import layer_inputs_signature
+from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
 from .egl import EGLRendererWorker
 
@@ -167,12 +168,15 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
             policy_state = snapshot_multiscale_state(server._state_ledger.snapshot())
 
-            use_volume_entry = server._state_ledger.get("view", "main", "ndisplay")
-            use_volume_flag = False
-            if use_volume_entry is not None and isinstance(use_volume_entry.value, int):
-                use_volume_flag = int(use_volume_entry.value) >= 3
-            elif server._initial_mode is RenderMode.VOLUME:
-                use_volume_flag = True
+            spec_entry = server._state_ledger.get("dims", "main", "dims_spec")
+            if spec_entry is not None:
+                spec = dims_spec_from_payload(getattr(spec_entry, "value", None))
+            else:
+                spec = None
+            if spec is not None:
+                use_volume_flag = int(spec.ndisplay) >= 3
+            else:
+                use_volume_flag = server._initial_mode is RenderMode.VOLUME
 
             worker = EGLRendererWorker(
                 width=server.width,

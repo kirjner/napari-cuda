@@ -183,8 +183,10 @@ async def _test_ingest_state_applies_view_update() -> None:
             timeout=3.0,
         )
         assert ack["payload"]["status"] == "accepted"
-        entry = harness.server._state_ledger.get("view", "main", "ndisplay")
-        assert entry is not None and int(entry.value) == 3
+        spec_entry = harness.server._state_ledger.get("dims", "main", "dims_spec")
+        assert spec_entry is not None
+        spec = dims_spec_from_payload(spec_entry.value)
+        assert spec is not None and int(spec.ndisplay) == 3
 
         await harness.drain_scheduled()
         assert harness.server._ensure_keyframe_calls >= 2
