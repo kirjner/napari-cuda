@@ -229,6 +229,17 @@ def _current_ndisplay(ledger: ServerStateLedger) -> int:
     return 2
 
 
+def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
+    entry = ledger.get("viewport", "plane", "state")
+    if entry is not None and isinstance(entry.value, Mapping):
+        payload = dict(entry.value)
+        try:
+            return PlaneState(**payload)
+        except Exception:
+            logger.debug("failed to deserialize plane state payload", exc_info=True)
+    return PlaneState()
+
+
 def _load_volume_state(ledger: ServerStateLedger) -> VolumeState:
     entry = ledger.get("viewport", "volume", "state")
     if entry is not None and isinstance(entry.value, Mapping):
