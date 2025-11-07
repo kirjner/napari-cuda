@@ -48,6 +48,7 @@ from napari_cuda.client.runtime.client_loop import (
 from napari_cuda.client.runtime.client_loop.client_loop_config import (
     load_client_loop_config,
 )
+from napari_cuda.client.runtime.client_loop.key_handlers import handle_key_event
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.runtime.client_loop.pipelines import (
     build_pyav_pipeline,
@@ -1050,7 +1051,7 @@ class ClientStreamLoop:
         camera.reset_camera(emitter, origin='keys')
 
     def _on_key_event(self, data: dict) -> bool:
-        return control_actions.handle_key_event(
+        return handle_key_event(
             data,
             reset_camera=self._reset_camera,
             step_primary=lambda delta: self.dims_step('primary', delta, origin='keys'),
@@ -1207,29 +1208,6 @@ class ClientStreamLoop:
     # --- Intents API --------------------------------------------------------------
     # --- Mode helpers -----------------------------------------------------------
     # --- Small utilities (no behavior change) ----------------------------------
-    # --- View HUD snapshot (for overlay) ----------------------------------------
-    def view_hud_snapshot(self) -> dict:
-        """Return a compact snapshot of 3D view/volume tuning state.
-
-        Safe to call from GUI timer; avoids raising on missing fields.
-        """
-        cam_state = self._camera_state
-        zoom_state = {
-            'last_zoom_factor': cam_state.last_zoom_factor,
-            'last_zoom_widget_px': cam_state.last_zoom_widget_px,
-            'last_zoom_video_px': cam_state.last_zoom_video_px,
-            'last_zoom_anchor_px': cam_state.last_zoom_anchor_px,
-            'last_pan_dx': cam_state.last_pan_dx_sent,
-            'last_pan_dy': cam_state.last_pan_dy_sent,
-            'zoom_base': float(cam_state.zoom_base),
-        }
-        return control_actions.hud_snapshot(
-            self._control_state,
-            self._state_ledger,
-            video_size=(self._vid_w, self._vid_h),
-            zoom_state=zoom_state,
-        )
-
     def dims_step(self, axis: int | str, delta: int, *, origin: str = 'ui') -> bool:
         emitter = self._dims_emitter
         if emitter is None:

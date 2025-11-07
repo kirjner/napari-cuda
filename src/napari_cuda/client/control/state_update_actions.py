@@ -71,60 +71,6 @@ def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContex
 def current_ndisplay(state: ControlStateContext, ledger: ClientStateLedger) -> Optional[int]:
     return dims_current_ndisplay(state, ledger)
 
-
-
-
-def handle_key_event(
-    data: dict,
-    *,
-    reset_camera: Callable[[], None],
-    step_primary: Callable[[int], None],
-) -> bool:
-    try:
-        from qtpy import QtCore  # type: ignore
-    except Exception:
-        logger.debug("key handler skipped: QtCore unavailable", exc_info=True)
-        return False
-
-    key_raw = data.get('key')
-    key = int(key_raw) if key_raw is not None else -1
-    mods = int(data.get('mods') or 0)
-    txt = str(data.get('text') or '')
-
-    keypad_mask = int(QtCore.Qt.KeypadModifier)
-    keypad_only = (mods & ~keypad_mask) == 0 and (mods & keypad_mask) != 0
-
-    if txt == '0' and mods == 0:
-        logger.info("keycb: '0' -> camera.reset")
-        reset_camera()
-        return True
-    if key == int(QtCore.Qt.Key_0) and (mods == 0 or keypad_only):
-        logger.info("keycb: Key_0 -> camera.reset")
-        reset_camera()
-        return True
-
-    k_left = int(QtCore.Qt.Key_Left)
-    k_right = int(QtCore.Qt.Key_Right)
-    k_up = int(QtCore.Qt.Key_Up)
-    k_down = int(QtCore.Qt.Key_Down)
-    k_pgup = int(QtCore.Qt.Key_PageUp)
-    k_pgdn = int(QtCore.Qt.Key_PageDown)
-
-    if key in (k_left, k_right, k_up, k_down, k_pgup, k_pgdn):
-        coarse = 10
-        if key in (k_left, k_down):
-            step_primary(-1)
-        elif key in (k_right, k_up):
-            step_primary(+1)
-        elif key == k_pgup:
-            step_primary(+coarse)
-        elif key == k_pgdn:
-            step_primary(-coarse)
-        return True
-
-    return False
-
-
 def camera_zoom(
     state: ControlStateContext,
     loop_state: ClientLoopState,
@@ -492,68 +438,6 @@ def multiscale_set_level(
         origin=origin,
     )
     return ok
-
-
-def hud_snapshot(
-    state: ControlStateContext,
-    ledger: ClientStateLedger,
-    *,
-    video_size: tuple[Optional[int], Optional[int]],
-    zoom_state: dict[str, object],
-) -> dict[str, object]:
-    spec = state.dims_spec
-    snap: dict[str, object] = {}
-    if spec is not None:
-        projection = project_dims(spec, ledger)
-        snap['volume'] = bool(not spec.plane_mode)
-        snap['vol_mode'] = bool(not spec.plane_mode and projection.ndisplay >= 3)
-        snap['ndisplay'] = projection.ndisplay
-    else:
-        projection = None
-        snap['volume'] = None
-        snap['vol_mode'] = False
-        snap['ndisplay'] = None
-
-    rendering = state.volume_state.get('rendering') if state.volume_state else None
-    clim = state.volume_state.get('contrast_limits') if state.volume_state else None
-    colormap = state.volume_state.get('colormap') if state.volume_state else None
-    opacity = state.volume_state.get('opacity') if state.volume_state else None
-
-    snap['rendering'] = rendering
-    if isinstance(clim, Sequence):
-        snap['clim_lo'] = clim[0] if len(clim) > 0 else None
-        snap['clim_hi'] = clim[1] if len(clim) > 1 else None
-    else:
-        snap['clim_lo'] = None
-        snap['clim_hi'] = None
-    snap['colormap'] = colormap
-    snap['opacity'] = opacity
-
-    snap['sample_step'] = state.volume_state.get('sample_step') if state.volume_state else None
-
-    if isinstance(state.multiscale_state, dict):
-        levels_obj = state.multiscale_state.get('levels')
-        snap['ms_policy'] = state.multiscale_state.get('policy')
-        level_value = state.multiscale_state.get('current_level')
-        snap['ms_level'] = level_value
-        if isinstance(levels_obj, Sequence):
-            snap['ms_levels'] = len(levels_obj)
-            if level_value is not None and 0 <= level_value < len(levels_obj):
-                entry = levels_obj[level_value]
-                snap['ms_path'] = entry.get('path') if isinstance(entry, dict) else None
-            else:
-                snap['ms_path'] = None
-        else:
-            snap['ms_levels'] = None
-            snap['ms_path'] = None
-
-    primary_axis = projection.primary_axis if projection is not None else state.primary_axis_index
-    snap['primary_axis'] = primary_axis
-    snap.update(zoom_state)
-    video_w, video_h = video_size
-    snap['video_w'] = video_w
-    snap['video_h'] = video_h
-    return snap
 
 
 def _clamp01(a: float) -> float:

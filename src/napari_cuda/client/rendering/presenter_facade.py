@@ -67,6 +67,8 @@ class PresenterFacade:
             'reordered': 0,
             'duplicated': 0,
         }
+        self._hud_level: Optional[int] = None
+        self._hud_level_total: Optional[int] = None
 
         # Misc state
         self._viewer_ref: Optional[weakref.ReferenceType[Any]] = None
@@ -174,6 +176,8 @@ class PresenterFacade:
             'reordered': 0,
             'duplicated': 0,
         }
+        self._hud_level = None
+        self._hud_level_total = None
         self._camera_summaries = {}
         self._hud_camera_snapshot = {}
 
@@ -197,6 +201,8 @@ class PresenterFacade:
         """Cache the latest dims spec and notify any registered dispatcher."""
 
         self._last_dims_spec = spec
+        self._hud_level = int(spec.current_level)
+        self._hud_level_total = len(spec.levels) if spec.levels else None
         dispatcher = self._intent_dispatcher
         if dispatcher is None:
             return
@@ -322,6 +328,7 @@ class PresenterFacade:
             'reordered': 0,
             'duplicated': 0,
         }
+        self._hud_level = None
         timer = QtCore.QTimer(self._scene_native)
         timer.setTimerType(QtCore.Qt.PreciseTimer)
         timer.setInterval(1000)
@@ -448,6 +455,11 @@ class PresenterFacade:
         txt += f"\nqueues: presenter[vt:{buf_vt} py:{buf_py}] pipeline[vt:{q_vt} py:{q_py}]"
         if vt_q_len is not None:
             txt += f" vt_count:{vt_q_len}"
+        if self._hud_level is not None:
+            if self._hud_level_total is not None:
+                txt += f" level:{self._hud_level}/{self._hud_level_total}"
+            else:
+                txt += f" level:{self._hud_level}"
         loop_bits: list[str] = []
         if isinstance(dec_py_ms, (int, float)):
             loop_bits.append(f"pyav_dec:{dec_py_ms:.2f}ms")

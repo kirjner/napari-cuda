@@ -440,28 +440,6 @@ def test_scene_level_then_dims_updates_slider_bounds() -> None:
 
 
 
-def test_hud_snapshot_carries_volume_state() -> None:
-    state, _, ledger, _dispatch = _make_state()
-    _set_state_spec(
-        state,
-        current_step=[0, 0, 0],
-        ndisplay=3,
-        level_shapes=[[4, 4, 4]],
-        mode='volume',
-    )
-
-    snap = control_actions.hud_snapshot(
-        state,
-        ledger,
-        video_size=(None, None),
-        zoom_state={},
-    )
-
-    assert snap['volume'] is True
-    assert snap['vol_mode'] is True
-
-
-
 def test_dims_notify_preserves_optional_metadata() -> None:
     state, loop_state, ledger, dispatch = _make_state()
 
