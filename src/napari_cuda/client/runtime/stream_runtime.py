@@ -17,7 +17,8 @@ from typing import (
 
 from qtpy import QtCore
 
-from napari_cuda.client.control import control_state, state_update_actions as control_actions
+from napari_cuda.client.control import control_state
+from napari_cuda.client.control.dims_projection import current_ndisplay
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 from napari_cuda.client.control.emitters import (
@@ -1251,7 +1252,7 @@ class ClientStreamLoop:
         return emitter.view_set_ndisplay(ndisplay, origin=origin)
 
     def current_ndisplay(self) -> Optional[int]:
-        return control_actions.current_ndisplay(self._control_state, self._state_ledger)
+        return current_ndisplay(self._control_state, self._state_ledger)
 
     def toggle_ndisplay(self, *, origin: str = 'ui') -> bool:
         emitter = self._dims_emitter
@@ -1282,7 +1283,7 @@ class ClientStreamLoop:
             logger.debug("pointer event skipped: camera emitter unavailable")
             return
         spec = self._control_state.dims_spec
-        ndisplay = control_actions.current_ndisplay(self._control_state, self._state_ledger)
+        ndisplay = current_ndisplay(self._control_state, self._state_ledger)
         in_vol3d = bool(spec is not None and ndisplay == 3 and not spec.plane_mode)
         camera.handle_pointer(
             emitter,
