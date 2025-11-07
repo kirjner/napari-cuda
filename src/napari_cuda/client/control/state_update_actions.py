@@ -35,29 +35,6 @@ from napari_cuda.client.control.client_state_ledger import (
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
 
 
-def _normalize_camera_delta_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(k): _normalize_camera_delta_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_normalize_camera_delta_value(v) for v in value]
-    if isinstance(value, (int, float)):
-        return float(value)
-    return value
-
-
-def _normalize_camera_state_value(value: Mapping[str, Any]) -> dict[str, Any]:
-    normalized: dict[str, Any] = {}
-    for key, raw in value.items():
-        name = str(key)
-        if name in {"center", "angles"}:
-            normalized[name] = [float(component) for component in raw]
-        elif name in {"zoom", "distance", "fov"}:
-            normalized[name] = float(raw)
-        else:
-            normalized[name] = raw
-    return normalized
-
-
 @dataclass
 class ControlStateContext:
     """Mutable control state hoisted out of the loop object."""
@@ -141,16 +118,16 @@ def handle_notify_camera(
 ) -> tuple[str, dict[str, Any]] | None:
     payload = frame.payload
     mode = str(payload.mode or "")
-    normalized_delta = _normalize_camera_delta_value(payload.delta)
+    delta_payload = payload.delta
     mode_key = mode or 'main'
-    state.camera_state[mode_key] = normalized_delta
+    state.camera_state[mode_key] = delta_payload
 
     timestamp = frame.envelope.timestamp
     state_ledger.record_confirmed(
         'camera',
         'main',
         mode_key,
-        normalized_delta,
+        delta_payload,
         timestamp=timestamp,
     )
 
@@ -160,10 +137,10 @@ def handle_notify_camera(
             mode,
             payload.origin,
             frame.envelope.intent_id,
-            normalized_delta,
+            delta_payload,
         )
 
-    return mode_key, normalized_delta
+    return mode_key, delta_payload
 
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
@@ -176,12 +153,6 @@ def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
 
 def _runtime_key(scope: str, target: str, key: str) -> str:
     return f"{scope}:{target}:{key}"
-
-def ensure_dims_spec(state: ControlStateContext) -> DimsSpec:
-    spec = state.dims_spec
-    assert spec is not None, "dims_spec must be available"
-    return spec
-
 
 def current_ndisplay(state: ControlStateContext, ledger: ClientStateLedger) -> Optional[int]:
     return dims_current_ndisplay(state, ledger)

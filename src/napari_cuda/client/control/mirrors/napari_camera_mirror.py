@@ -9,11 +9,7 @@ from typing import TYPE_CHECKING, Any
 from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
-from napari_cuda.client.control.state_update_actions import (
-    ControlStateContext,
-    _normalize_camera_delta_value,
-    _normalize_camera_state_value,
-)
+from napari_cuda.client.control.state_update_actions import ControlStateContext
 from napari_cuda.client.rendering.presenter_facade import PresenterFacade
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.protocol import NotifyCamera
@@ -71,7 +67,7 @@ class NapariCameraMirror:
         timestamp = frame.envelope.timestamp
 
         if payload.state is not None:
-            state_payload = _normalize_camera_state_value(payload.state)
+            state_payload = dict(payload.state) if isinstance(payload.state, Mapping) else payload.state
             self._ledger.record_confirmed(
                 "camera",
                 "main",
@@ -93,7 +89,7 @@ class NapariCameraMirror:
 
         if payload.delta is None:
             raise ValueError("notify.camera delta payload missing")
-        delta_payload = _normalize_camera_delta_value(payload.delta)
+        delta_payload = payload.delta
         self._ledger.record_confirmed(
             "camera",
             "main",

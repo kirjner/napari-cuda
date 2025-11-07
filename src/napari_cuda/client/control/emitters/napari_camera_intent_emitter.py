@@ -16,7 +16,6 @@ from napari_cuda.client.control.client_state_ledger import (
 from napari_cuda.client.control.state_update_actions import (
     ControlStateContext,
     _emit_state_update,
-    _normalize_camera_delta_value,
     _update_runtime_from_ack_outcome,
 )
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
@@ -174,9 +173,8 @@ class NapariCameraIntentEmitter:
         if outcome.status == "accepted":
             applied = outcome.applied_value or outcome.confirmed_value or outcome.pending_value
             if applied is not None:
-                normalized = _normalize_camera_delta_value(applied)
-                self._state.camera_state[key] = normalized
-                self._confirmed[key] = normalized
+                self._state.camera_state[key] = applied
+                self._confirmed[key] = applied
             if self._log_camera_info:
                 logger.info(
                     "camera intent accepted: key=%s pending=%d",
@@ -188,17 +186,15 @@ class NapariCameraIntentEmitter:
         revert_value = outcome.confirmed_value if outcome.confirmed_value is not None else outcome.pending_value
         if revert_value is None:
             return
-        normalized = _normalize_camera_delta_value(revert_value)
-        self._state.camera_state[key] = normalized
-        self._confirmed[key] = normalized
+        self._state.camera_state[key] = revert_value
+        self._confirmed[key] = revert_value
         if self._log_camera_info:
             logger.warning("camera intent reverted: key=%s", key)
 
     def record_confirmed(self, key: str, value: Mapping[str, Any]) -> None:
         self._assert_gui_thread()
-        normalized = _normalize_camera_delta_value(value)
-        self._state.camera_state[str(key)] = normalized
-        self._confirmed[str(key)] = normalized
+        self._state.camera_state[str(key)] = dict(value)
+        self._confirmed[str(key)] = dict(value)
 
     # ------------------------------------------------------------------ helpers
     def _emit_camera_delta(
@@ -225,15 +221,14 @@ class NapariCameraIntentEmitter:
         if not ok:
             return False
         projection_value = projection if projection is not None else dict(value)
-        normalized = _normalize_camera_delta_value(projection_value)
-        self._state.camera_state[str(key)] = normalized
-        self._confirmed[str(key)] = normalized
+        self._state.camera_state[str(key)] = projection_value
+        self._confirmed[str(key)] = projection_value
         if self._log_camera_info:
             logger.info(
                 "camera intent -> state.update key=%s origin=%s value=%s",
                 key,
                 origin,
-                normalized,
+                projection_value,
             )
         return True
 

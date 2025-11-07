@@ -33,9 +33,9 @@ async def _deliver_camera_update(
         "origin": str(origin),
     }
     if delta is not None:
-        payload["delta"] = _normalize_camera_value(delta)
+        payload["delta"] = delta
     if state is not None:
-        payload["state"] = _normalize_camera_value(state)
+        payload["state"] = state
     if "delta" not in payload and "state" not in payload:
         return
 
@@ -103,16 +103,6 @@ async def send_camera_update(
         timestamp=timestamp,
         targets=[ws],
     )
-
-
-def _normalize_camera_value(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {str(k): _normalize_camera_value(v) for k, v in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_normalize_camera_value(v) for v in value]
-    if isinstance(value, (int, float)):
-        return float(value)
-    return value
 
 
 __all__ = ["broadcast_camera_update", "send_camera_update"]

@@ -167,7 +167,8 @@ class NapariDimsMirror:
     def handle_ack(self, outcome: AckReconciliation) -> None:
         scope = outcome.scope
         if scope == 'dims':
-            spec = control_actions.ensure_dims_spec(self._state)
+            spec = self._state.dims_spec
+            assert spec is not None, "dims_spec must be available"
             axis_idx: Optional[int] = None
             if outcome.target is not None:
                 axis_idx = dims_spec_axis_index_for_target(spec, str(outcome.target))
@@ -232,7 +233,8 @@ class NapariDimsMirror:
             self._handle_ndisplay_update(update)
 
     def _handle_axis_update(self, update: MirrorEvent) -> None:
-        spec = control_actions.ensure_dims_spec(self._state)
+        spec = self._state.dims_spec
+        assert spec is not None, "dims_spec must be available"
         target = str(update.target)
         axis_idx = dims_spec_axis_index_for_target(spec, target)
         assert axis_idx is not None, f"unknown dims axis target={update.target!r}"
@@ -266,7 +268,8 @@ class NapariDimsMirror:
         spec: Optional[DimsSpec] = None,
     ) -> None:
         if spec is None:
-            spec = control_actions.ensure_dims_spec(self._state)
+            spec = self._state.dims_spec
+            assert spec is not None, "dims_spec must be available"
 
         projection = project_dims(spec, self._ledger)
         viewer_update_local = viewer_update_from_spec(spec, projection)
