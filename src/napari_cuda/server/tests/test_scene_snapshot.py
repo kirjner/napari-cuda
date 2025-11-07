@@ -4,11 +4,7 @@ from typing import Optional
 
 import numpy as np
 
-from napari_cuda.server.scene import (
-    snapshot_dims_metadata,
-    snapshot_render_state,
-    snapshot_scene,
-)
+from napari_cuda.server.scene import snapshot_render_state, snapshot_scene
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
@@ -124,9 +120,9 @@ def test_snapshot_scene_plane() -> None:
     assert camera_block["center"] == [5.0, 10.0, 0.0]
     assert camera_block["rect"] == [0.0, 0.0, 20.0, 30.0]
 
-    meta = snapshot_dims_metadata(scene)
-    assert meta["volume"] is False
-    assert meta["multiscale"]["levels"][0]["shape"] == [10, 20, 30]
+    layer_block = scene.layers[0].block
+    assert layer_block["volume"] is False
+    assert layer_block["multiscale"]["levels"][0]["shape"] == [10, 20, 30]
 
 
 def test_snapshot_scene_volume_camera() -> None:
@@ -169,8 +165,8 @@ def test_snapshot_scene_volume_camera() -> None:
     assert settings["volume_enabled"] is True
     assert settings["fps_target"] == 30.0
 
-    meta = snapshot_dims_metadata(scene)
-    assert meta["controls"]["visible"] is True
+    layer_block = scene.layers[0].block
+    assert layer_block["controls"]["visible"] is True
 
 
 def test_snapshot_scene_thumbnail_provider() -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from typing import (
     Any,
     Mapping,
@@ -14,7 +14,6 @@ from typing import (
 
 import numpy as np
 
-from napari_cuda.protocol.axis_labels import normalize_axis_labels
 from napari_cuda.protocol.snapshots import (
     LayerSnapshot,
     SceneSnapshot,
@@ -29,7 +28,11 @@ from napari_cuda.server.scene.models import (
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode
-from napari_cuda.shared.dims_spec import dims_spec_from_payload, validate_ledger_against_dims_spec
+from napari_cuda.shared.dims_spec import (
+    dims_block_from_spec,
+    dims_spec_from_payload,
+    validate_ledger_against_dims_spec,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +67,6 @@ __all__ = [
     "build_ledger_snapshot",
     "default_volume_state",
     "pull_render_snapshot",
-    "snapshot_dims_metadata",
     "snapshot_layer_controls",
     "snapshot_multiscale_state",
     "snapshot_render_state",
@@ -284,8 +286,7 @@ def snapshot_scene(
 ) -> SceneSnapshot:
     """Build a ``SceneSnapshot`` suitable for ``notify.scene`` baselines."""
 
-    ndisplay_value = int(ndisplay if ndisplay is not None else render_state.ndisplay or 2)
-    ndisplay_value = max(1, ndisplay_value)
+    requested_ndisplay = ndisplay if ndisplay is not None else render_state.ndisplay
 
     ledger_multiscale = snapshot_multiscale_state(ledger_snapshot)
     if multiscale_state is None or (not multiscale_state and ledger_multiscale):
@@ -301,27 +302,24 @@ def snapshot_scene(
     if volume_state is None or not volume_state:
         volume_state = _resolve_volume_state(render_state, ledger_snapshot)
 
-    geometry = _resolve_layer_geometry(render_state, multiscale_state, ndisplay_value)
+    spec = render_state.dims_spec
+    if spec is None:
+        spec_entry = ledger_snapshot.get(("dims", "main", "dims_spec"))
+        assert spec_entry is not None, "ledger missing dims_spec entry"
+        spec = dims_spec_from_payload(spec_entry.value)
+        assert spec is not None, "dims spec payload missing"
 
-    dims_block = _build_dims_block(geometry)
-    # Attach optional dims margins if present in ledger
-    ml_entry = ledger_snapshot.get(("dims", "main", "margin_left"))
-    mr_entry = ledger_snapshot.get(("dims", "main", "margin_right"))
-    if ml_entry is not None and ml_entry.value is not None:
-        vals = ml_entry.value
-        if isinstance(vals, (list, tuple)):
-            dims_block["margin_left"] = list(vals)
-    if mr_entry is not None and mr_entry.value is not None:
-        vals = mr_entry.value
-        if isinstance(vals, (list, tuple)):
-            dims_block["margin_right"] = list(vals)
+    ndisplay_value = int(requested_ndisplay if requested_ndisplay is not None else spec.ndisplay or 2)
+    ndisplay_value = max(1, ndisplay_value)
 
-    camera_block = _build_camera_block(render_state, geometry, ndisplay_value)
+    dims_block = dims_block_from_spec(spec)
+
+    camera_block = _build_camera_block(render_state, is_volume=ndisplay_value >= 3, ndisplay_value=ndisplay_value)
 
     viewer_settings = {
         "fps_target": float(fps_target),
         "canvas_size": [int(canvas_size[0]), int(canvas_size[1])],
-        "volume_enabled": bool(geometry.is_volume),
+        "volume_enabled": bool(ndisplay_value >= 3),
     }
 
     viewer = viewer_snapshot_from_blocks(
@@ -344,16 +342,27 @@ def snapshot_scene(
 
         controls_block = _resolve_layer_controls(layer_overrides)
 
+        current_level = int(spec.current_level)
+        level_shapes = list(spec.level_shapes)
+        if 0 <= current_level < len(level_shapes):
+            layer_shape = [int(dim) for dim in level_shapes[current_level]]
+        else:
+            ndim = int(spec.ndim or 0) or 1
+            layer_shape = [0 for _ in range(ndim)]
+
+        axis_labels = [axis.label for axis in spec.axes]
+        is_volume = bool(ndisplay_value >= 3)
+
         layer_block: dict[str, Any] = {
             "layer_id": layer_id_str,
             "layer_type": "image",
             "name": default_layer_name,
-            "ndim": len(geometry.shape),
-            "shape": geometry.shape,
-            "axis_labels": geometry.axis_labels,
-            "volume": geometry.is_volume,
+            "ndim": len(layer_shape),
+            "shape": layer_shape,
+            "axis_labels": axis_labels,
+            "volume": is_volume,
             "controls": controls_block,
-            "level_shapes": geometry.level_shapes,
+            "level_shapes": [list(shape) for shape in level_shapes],
         }
 
         layer_metadata: dict[str, Any] = {}
@@ -365,7 +374,7 @@ def snapshot_scene(
 
         layer_block["metadata"] = layer_metadata
 
-        multiscale_block = _build_multiscale_block(multiscale_state, base_shape=geometry.shape)
+        multiscale_block = _build_multiscale_block(multiscale_state, base_shape=layer_shape)
         if multiscale_block:
             layer_block["multiscale"] = multiscale_block
 
@@ -399,41 +408,6 @@ def snapshot_scene(
         policies={},
         metadata=metadata,
     )
-
-
-def snapshot_dims_metadata(scene_snapshot: SceneSnapshot) -> dict[str, Any]:
-    """Extract dims metadata used for HUD payloads."""
-
-    dims_block = dict(scene_snapshot.viewer.dims)
-    meta: dict[str, Any] = dict(dims_block)
-
-    if not scene_snapshot.layers:
-        return meta
-
-    layer_block = scene_snapshot.layers[0].block
-    meta["volume"] = bool(layer_block.get("volume"))
-
-    controls = layer_block.get("controls")
-    if isinstance(controls, Mapping):
-        meta["controls"] = {str(key): value for key, value in controls.items()}
-
-    multiscale_block = layer_block.get("multiscale")
-    if isinstance(multiscale_block, Mapping):
-        ms_dict = dict(multiscale_block)
-        metadata_block = ms_dict.pop("metadata", None)
-        if isinstance(metadata_block, Mapping):
-            for key, value in metadata_block.items():
-                ms_dict[str(key)] = _normalize_scalar(value)
-        meta["multiscale"] = ms_dict
-        levels = ms_dict.get("levels")
-        if isinstance(levels, Sequence) and levels:
-            index = int(ms_dict.get("current_level", 0))
-            if 0 <= index < len(levels):
-                level_shape = levels[index].get("shape")
-                if isinstance(level_shape, Sequence):
-                    meta["sizes"] = [int(x) for x in level_shape]
-
-    return meta
 
 
 def _resolve_layer_controls(overrides: LayerVisualState | Mapping[str, Any] | None) -> dict[str, Any]:
@@ -484,93 +458,6 @@ def _resolve_volume_state(
         "opacity": opacity,
         "sample_step": sample_step,
     }
-
-
-@dataclass
-class _LayerGeometry:
-    shape: list[int]
-    axis_labels: list[str]
-    order: list[int]
-    current_step: list[int]
-    displayed: list[int]
-    level_shapes: list[list[int]]
-    current_level: int
-    ndisplay: int
-    is_volume: bool
-
-
-def _resolve_layer_geometry(
-    render_state: RenderLedgerSnapshot,
-    multiscale_state: Optional[Mapping[str, Any]],
-    ndisplay_value: int,
-) -> _LayerGeometry:
-    level_shapes: list[list[int]] = []
-
-    if render_state.level_shapes:
-        level_shapes = [list(map(int, level)) for level in render_state.level_shapes]
-    elif multiscale_state:
-        levels = multiscale_state.get("levels")
-        if isinstance(levels, Sequence):
-            for entry in levels:
-                if isinstance(entry, Mapping):
-                    shape = entry.get("shape")
-                    if isinstance(shape, Sequence):
-                        level_shapes.append([int(x) for x in shape])
-
-    current_level = int(render_state.current_level or 0)
-    if multiscale_state and "current_level" in multiscale_state:
-        level_value = multiscale_state["current_level"]
-        if isinstance(level_value, (int, float)):
-            current_level = int(level_value)
-
-    if level_shapes:
-        current_level = max(0, min(current_level, len(level_shapes) - 1))
-        shape = level_shapes[current_level]
-    else:
-        axis_count = len(render_state.axis_labels or ())
-        shape = [0 for _ in range(axis_count or 2)]
-        level_shapes = [shape]
-        current_level = 0
-
-    axis_labels = list(render_state.axis_labels or ())
-    axis_labels = normalize_axis_labels(axis_labels, len(shape))
-
-    order = list(render_state.order or range(len(shape)))
-    order = [idx for idx in order if 0 <= idx < len(shape)]
-    seen = set(order)
-    for idx in range(len(shape)):
-        if idx not in seen:
-            order.append(idx)
-
-    current_step_src = list(render_state.current_step or [])
-    if len(current_step_src) < len(shape):
-        current_step_src.extend([0] * (len(shape) - len(current_step_src)))
-    current_step = [int(value) for value in current_step_src[: len(shape)]]
-
-    displayed_src = list(render_state.displayed or [])
-    if not displayed_src:
-        displayed_src = order[-ndisplay_value:]
-    displayed = [idx for idx in displayed_src if 0 <= idx < len(shape)]
-    if len(displayed) < ndisplay_value:
-        extras = [idx for idx in order if idx not in displayed]
-        displayed.extend(extras[: ndisplay_value - len(displayed)])
-    displayed = displayed[: max(1, ndisplay_value)]
-
-    ndisplay_clamped = max(1, min(ndisplay_value, len(shape))) if shape else ndisplay_value
-
-    is_volume = bool(render_state.dims_mode == "volume" or ndisplay_value >= 3)
-
-    return _LayerGeometry(
-        shape=list(shape),
-        axis_labels=list(axis_labels),
-        order=order,
-        current_step=current_step,
-        displayed=displayed,
-        level_shapes=[list(entry) for entry in level_shapes],
-        current_level=current_level,
-        ndisplay=ndisplay_clamped,
-        is_volume=is_volume,
-    )
 
 
 def _build_multiscale_block(
@@ -636,27 +523,15 @@ def _resolve_contrast_limits(volume_state: Mapping[str, Any]) -> Optional[list[f
     return None
 
 
-def _build_dims_block(geometry: _LayerGeometry) -> dict[str, Any]:
-    return {
-        "ndim": len(geometry.shape),
-        "axis_labels": list(geometry.axis_labels),
-        "order": list(geometry.order),
-        "level_shapes": [list(shape) for shape in geometry.level_shapes],
-        "current_level": int(geometry.current_level),
-        "current_step": list(geometry.current_step),
-        "displayed": list(geometry.displayed),
-        "ndisplay": int(geometry.ndisplay),
-    }
-
-
 def _build_camera_block(
     render_state: RenderLedgerSnapshot,
-    geometry: _LayerGeometry,
+    *,
+    is_volume: bool,
     ndisplay_value: int,
 ) -> dict[str, Any]:
     block: dict[str, Any] = {"ndisplay": int(ndisplay_value)}
 
-    if geometry.is_volume and render_state.volume_center is not None:
+    if is_volume and render_state.volume_center is not None:
         block["center"] = list(render_state.volume_center)
         if render_state.volume_angles is not None:
             block["angles"] = list(render_state.volume_angles)

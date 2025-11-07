@@ -830,8 +830,11 @@ def reduce_dims_update(
     timestamp: Optional[float] = None,
     origin: str = "control.dims",
 ) -> ServerLedgerUpdate:
-    if value is None and step_delta is None:
+    margin_update = prop in {"margin_left", "margin_right"}
+    if not margin_update and value is None and step_delta is None:
         raise ValueError("dims update requires value or step_delta")
+    if margin_update and value is None:
+        raise ValueError("dims margin update requires value")
 
     ts = _now(timestamp)
     current_spec = _get_dims_spec(ledger)
@@ -854,26 +857,56 @@ def reduce_dims_update(
     spec_labels = dims_spec_axis_labels(current_spec)
     control_target = spec_labels[idx] if idx < len(spec_labels) else str(idx)
 
-    target = int(step[idx])
-    if value is not None:
-        target = int(value)
-    if step_delta is not None:
-        target += int(step_delta)
-
     level_idx = int(current_spec.current_level)
-    level_shape = dims_spec_level_shape(current_spec, level_idx)
-    assert idx < len(level_shape), "axis index outside level_shapes entry"
-    size_val = int(level_shape[idx])
-    assert size_val > 0, "level_shapes entries must be positive"
-    target = max(0, min(size_val - 1, target))
 
-    step[idx] = int(target)
-    requested_step = tuple(int(v) for v in step)
+    if margin_update:
+        requested_step = tuple(int(v) for v in step)
+        margin_value = float(value)
+    else:
+        target = int(step[idx])
+        if value is not None:
+            target = int(value)
+        if step_delta is not None:
+            target += int(step_delta)
+
+        level_shape = dims_spec_level_shape(current_spec, level_idx)
+        assert idx < len(level_shape), "axis index outside level_shapes entry"
+        size_val = int(level_shape[idx])
+        assert size_val > 0, "level_shapes entries must be positive"
+        target = max(0, min(size_val - 1, target))
+
+        step[idx] = int(target)
+        requested_step = tuple(int(v) for v in step)
+        margin_value = None
+
     resolved_intent_id = intent_id or f"dims-{uuid.uuid4().hex}"
 
     axes_list = list(current_spec.axes)
     assert idx < len(axes_list), "dims spec missing target axis"
-    axes_list[idx] = replace(axes_list[idx], current_step=int(requested_step[idx]))
+    axis_entry = axes_list[idx]
+    if margin_update:
+        assert value is not None
+        per_level = axis_entry.per_level_world
+        step_size = 1.0
+        if 0 <= level_idx < len(per_level):
+            candidate = float(per_level[level_idx].step)
+            if candidate != 0:
+                step_size = candidate
+        if prop == "margin_left":
+            axis_entry = replace(
+                axis_entry,
+                margin_left_world=margin_value,
+                margin_left_steps=margin_value / step_size,
+            )
+        else:
+            axis_entry = replace(
+                axis_entry,
+                margin_right_world=margin_value,
+                margin_right_steps=margin_value / step_size,
+            )
+    else:
+        axis_entry = replace(axis_entry, current_step=int(requested_step[idx]))
+    axes_list[idx] = axis_entry
     new_spec = replace(
         current_spec,
         current_step=requested_step,
@@ -932,7 +965,7 @@ def reduce_dims_update(
         scope="dims",
         target=control_target,
         key=prop,
-        value=int(step[idx]),
+        value=float(margin_value) if margin_update and margin_value is not None else int(step[idx]),
         intent_id=resolved_intent_id,
         timestamp=ts,
         axis_index=idx,
@@ -941,83 +974,6 @@ def reduce_dims_update(
         version=version,
         dims_spec=new_spec,
     )
-
-def reduce_dims_margins_update(
-    ledger: ServerStateLedger,
-    *,
-    axis: object,
-    side: str,
-    value: float,
-    intent_id: Optional[str] = None,
-    timestamp: Optional[float] = None,
-    origin: str = "control.dims",
-) -> ServerLedgerUpdate:
-    ts = _now(timestamp)
-    spec = _get_dims_spec(ledger)
-    current_step = spec.current_step
-
-    idx = resolve_axis_index(
-        axis,
-        order=dims_spec_order(spec),
-        axis_labels=dims_spec_axis_labels(spec),
-        ndim=len(current_step),
-    )
-    if idx is None:
-        raise ValueError("unable to resolve axis index for dims margins update")
-
-    side_key = "margin_left" if side == "margin_left" else "margin_right"
-    # Start from existing ledger values if present, else zeros of length ndim
-    existing_entry = ledger.get("dims", "main", side_key)
-    if existing_entry is not None and isinstance(existing_entry.value, (tuple, list)):
-        arr = [float(v) for v in existing_entry.value]
-    else:
-        arr = [0.0 for _ in range(len(current_step))]
-    # Ensure length
-    if len(arr) < len(current_step):
-        arr.extend([0.0] * (len(current_step) - len(arr)))
-    arr[idx] = float(value)
-
-    axes_list = list(spec.axes)
-    axis_entry = axes_list[idx]
-    if side_key == "margin_left":
-        axes_list[idx] = replace(
-            axis_entry,
-            margin_left_steps=float(arr[idx]),
-            margin_left_world=float(arr[idx]),
-        )
-    else:
-        axes_list[idx] = replace(
-            axis_entry,
-            margin_right_steps=float(arr[idx]),
-            margin_right_world=float(arr[idx]),
-        )
-    new_spec = replace(spec, axes=tuple(axes_list))
-
-    stored_entries = apply_dims_step_transaction(
-        ledger=ledger,
-        step=current_step,
-        dims_spec_payload=_serialize_dims_spec(new_spec),
-        origin=origin,
-        timestamp=ts,
-        op_seq=_next_scene_op_seq(ledger),
-        op_kind="dims-update",
-    )
-    arr_tuple = tuple(float(v) for v in arr)
-
-    return ServerLedgerUpdate(
-        scope="dims",
-        target=str(axis),
-        key=side_key,
-        value=arr_tuple,
-        intent_id=intent_id,
-        timestamp=ts,
-        origin=origin,
-        version=int(stored_entries[("dims", "main", "dims_spec")].version)
-        if stored_entries[("dims", "main", "dims_spec")].version is not None
-        else 0,
-        dims_spec=new_spec,
-    )
-
 
 def reduce_view_update(
     ledger: ServerStateLedger,

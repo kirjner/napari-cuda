@@ -106,7 +106,7 @@ see `docs/server/architecture.md`.
   `render_loop.planning.staging.drain_scene_updates`,
   `render_loop.applying.plane.apply_dims_from_snapshot`,
   `render_loop.applying.plane.update_z_index_from_snapshot`,
-  `snapshot_dims_metadata`, `_set_dims_range_for_level`.
+  `_set_dims_range_for_level`.
 - **Shared state:** `_render_mailbox`, `_viewport_state`, `_viewport_runner`,
   `_applied_versions`,
   `_z_index`, `_data_wh`, `_ledger`, ledger access helpers (`runtime.render_loop.plan.ledger_access`).
@@ -162,7 +162,7 @@ see `docs/server/architecture.md`.
   `render_loop.ticks.camera.drain`.
 
 ### 7. Debugging, Metrics & Misc Utilities
-- **Entry points:** `_log_debug_policy_once`, `snapshot_dims_metadata`,
+- **Entry points:** `_log_debug_policy_once`,
   `_capture_blit_gpu_ns`, `force_idr`, `_request_encoder_idr`,
   `reset_encoder`.
 - **Shared state:** `_debug`, `_debug_config`, `_debug_policy_logged`,

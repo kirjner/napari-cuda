@@ -6,10 +6,7 @@ import logging
 from numbers import Integral
 from typing import Optional, TYPE_CHECKING
 
-from napari_cuda.server.control.state_reducers import (
-    reduce_dims_update,
-    reduce_dims_margins_update,
-)
+from napari_cuda.server.control.state_reducers import reduce_dims_update
 
 if TYPE_CHECKING:
     from napari_cuda.server.control.control_channel_server import StateUpdateContext
@@ -80,72 +77,42 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
         )
         return True
 
-    if key in {"margin_left", "margin_right"}:
-        assert margin_value is not None, "margin update requires value"
-        try:
-            result = reduce_dims_margins_update(
-                server._state_ledger,
-                axis=str(target),
-                side=key,
-                value=margin_value,
-                intent_id=ctx.intent_id,
-                timestamp=ctx.timestamp,
-                origin="client.state.dims",
-            )
-        except ValueError as exc:
-            logger.debug(
-                "state.update dims rejected (invalid margin) axis=%s key=%s error=%s",
-                target,
-                key,
-                exc,
-            )
-            await ctx.reject(
-                "state.invalid",
-                str(exc) or "dims margin update invalid",
-                details={"scope": ctx.scope, "key": key, "target": target},
-            )
-            return True
-        except Exception:
-            logger.exception("state.update dims failed axis=%s key=%s", target, key)
-            await ctx.reject(
-                "state.error",
-                "dims update failed",
-                details={"scope": ctx.scope, "key": key, "target": target},
-            )
-            return True
-    else:
-        try:
-            result = reduce_dims_update(
-                server._state_ledger,
-                axis=str(target),
-                prop=str(key),
-                value=index_value if key == "index" else None,
-                step_delta=step_delta,
-                intent_id=ctx.intent_id,
-                timestamp=ctx.timestamp,
-                origin="client.state.dims",
-            )
-        except ValueError as exc:
-            logger.debug(
-                "state.update dims rejected (invalid step/index) axis=%s key=%s error=%s",
-                target,
-                key,
-                exc,
-            )
-            await ctx.reject(
-                "state.invalid",
-                str(exc) or "dims update invalid",
-                details={"scope": ctx.scope, "key": key, "target": target},
-            )
-            return True
-        except Exception:
-            logger.exception("state.update dims failed axis=%s key=%s", target, key)
-            await ctx.reject(
-                "state.error",
-                "dims update failed",
-                details={"scope": ctx.scope, "key": key, "target": target},
-            )
-            return True
+    try:
+        result = reduce_dims_update(
+            server._state_ledger,
+            axis=str(target),
+            prop=str(key),
+            value=(
+                margin_value
+                if key in {"margin_left", "margin_right"}
+                else (index_value if key == "index" else None)
+            ),
+            step_delta=step_delta if key == "step" else None,
+            intent_id=ctx.intent_id,
+            timestamp=ctx.timestamp,
+            origin="client.state.dims",
+        )
+    except ValueError as exc:
+        logger.debug(
+            "state.update dims rejected (invalid input) axis=%s key=%s error=%s",
+            target,
+            key,
+            exc,
+        )
+        await ctx.reject(
+            "state.invalid",
+            str(exc) or "dims update invalid",
+            details={"scope": ctx.scope, "key": key, "target": target},
+        )
+        return True
+    except Exception:
+        logger.exception("state.update dims failed axis=%s key=%s", target, key)
+        await ctx.reject(
+            "state.error",
+            "dims update failed",
+            details={"scope": ctx.scope, "key": key, "target": target},
+        )
+        return True
 
     if logger.isEnabledFor(logging.INFO):
         logger.info(

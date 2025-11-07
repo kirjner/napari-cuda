@@ -382,34 +382,6 @@ class EGLRendererWorker:
     def _current_panzoom_rect(self) -> Optional[tuple[float, float, float, float]]:
         return viewer_camera_ops._current_panzoom_rect(self)
 
-    def snapshot_dims_metadata(self) -> dict[str, Any]:
-        meta: dict[str, Any] = {}
-        spec = ledger_dims_spec(ledger)
-        assert spec is not None, "ledger missing dims spec for snapshot"
-
-        meta["axis_labels"] = [axis.label for axis in spec.axes]
-        meta["axes"] = [axis.label for axis in spec.axes]
-        meta["order"] = list(spec.order)
-        meta["displayed"] = list(spec.displayed)
-        meta["ndisplay"] = int(spec.ndisplay)
-        meta["mode"] = "plane" if spec.plane_mode else "volume"
-        meta["current_step"] = list(spec.current_step)
-        meta["level_shapes"] = [list(shape) for shape in spec.level_shapes]
-        meta["ndim"] = int(spec.ndim)
-
-        level_idx = int(spec.current_level)
-        if 0 <= level_idx < len(spec.level_shapes):
-            current_shape = spec.level_shapes[level_idx]
-            meta["sizes"] = [int(size) for size in current_shape]
-        else:
-            meta["sizes"] = [1] * int(spec.ndim)
-
-        meta["range"] = [[0, max(0, size - 1)] for size in meta["sizes"]]
-        meta["margin_left"] = [float(axis.margin_left_steps) for axis in spec.axes]
-        meta["margin_right"] = [float(axis.margin_right_steps) for axis in spec.axes]
-
-        return meta
-
     def _log_debug_policy_once(self) -> None:
         if self._debug_policy_logged:
             return

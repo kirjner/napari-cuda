@@ -117,7 +117,6 @@ from napari_cuda.server.scene import (
     RenderMode,
     RenderUpdate,
     pull_render_snapshot,
-    snapshot_dims_metadata,
     snapshot_layer_controls,
     snapshot_multiscale_state,
     snapshot_render_state,
@@ -688,14 +687,6 @@ class EGLHeadlessServer:
         except Exception:
             # Fail silent; we don't want logging issues to break the server
             pass
-
-    # --- Helper to compute dims metadata for piggyback on dims_update ---------
-    def _dims_metadata(self) -> dict:
-        self._refresh_scene_snapshot()
-        snapshot = self._scene_snapshot
-        if snapshot is None:
-            return {}
-        return snapshot_dims_metadata(snapshot)
 
     def _refresh_scene_snapshot(self, render_state: Optional[RenderLedgerSnapshot] = None) -> None:
         worker = self._worker

@@ -15,8 +15,8 @@ snapshots. When a state websocket client connects:
    - per-layer updates → `notify.layers`
    - dims metadata → `notify.dims`
 
-`snapshot_dims_metadata()` still underpins the HUD, and the latest dims
-snapshot is pulled directly from the server ledger via `ServerDimsMirror`.
+Dims metadata now flows only through `notify.dims`, driven directly from the
+ledger `DimsSpec` via `ServerDimsMirror`.
 
 A typical `notify.scene` payload looks like:
 

@@ -339,6 +339,24 @@ def _as_shape_tuple(value: Any) -> tuple[tuple[int, ...], ...]:
     return tuple(shapes)
 
 
+def dims_block_from_spec(spec: DimsSpec) -> dict[str, Any]:
+    """Build a viewer-friendly dims block directly from a spec."""
+
+    axes = list(spec.axes)
+    return {
+        "ndim": int(spec.ndim),
+        "axis_labels": [axis.label for axis in axes],
+        "order": [int(idx) for idx in spec.order],
+        "displayed": [int(idx) for idx in spec.displayed],
+        "current_step": [int(value) for value in spec.current_step],
+        "current_level": int(spec.current_level),
+        "level_shapes": [[int(dim) for dim in shape] for shape in spec.level_shapes],
+        "ndisplay": int(spec.ndisplay),
+        "margin_left": [float(axis.margin_left_world) for axis in axes],
+        "margin_right": [float(axis.margin_right_world) for axis in axes],
+    }
+
+
 __all__ = [
     "DimsSpec",
     "DimsSpecAxis",
@@ -355,6 +373,7 @@ __all__ = [
     "dims_spec_primary_axis",
     "dims_spec_axis_index_for_target",
     "dims_spec_remap_step_for_level",
+    "dims_block_from_spec",
     # Shared
     "AxisExtent",
 ]
