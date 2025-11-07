@@ -54,20 +54,6 @@ imports stable during the refactor.
 """
 
 
-def on_state_connected(state: ControlStateContext) -> None:
-    state.dims_ready = False
-    state.dims_spec = None
-    state.primary_axis_index = None
-
-
-def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContext) -> None:
-    state.dims_ready = False
-    state.dims_spec = None
-    state.primary_axis_index = None
-    loop_state.pending_intents.clear()
-    loop_state.last_dims_spec = None
-    state.control_runtimes.clear()
-    state.camera_state.clear()
 def current_ndisplay(state: ControlStateContext, ledger: ClientStateLedger) -> Optional[int]:
     return dims_current_ndisplay(state, ledger)
 

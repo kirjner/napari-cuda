@@ -916,11 +916,11 @@ class ClientStreamLoop:
 
     # State channel lifecycle: gate dims state.update traffic safely across reconnects
     def _on_state_connected(self) -> None:
-        control_actions.on_state_connected(self._control_state)
+        control_state.on_state_connected(self._control_state)
         logger.info("StateChannel connected; gating dims intents until notify.dims metadata arrives")
 
     def _on_state_disconnect(self, exc: Exception | None) -> None:
-        control_actions.on_state_disconnected(self._loop_state, self._control_state)
+        control_state.on_state_disconnected(self._loop_state, self._control_state)
         self._state_ledger.clear_pending_on_reconnect()
         self._loop_state.state_session_metadata = None
         self._command_catalog = ()

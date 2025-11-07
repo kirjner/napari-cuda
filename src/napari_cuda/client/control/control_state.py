@@ -276,5 +276,22 @@ __all__ = [
     "_update_runtime_from_ack_outcome",
     "handle_generic_ack",
     "handle_notify_camera",
+    "on_state_connected",
+    "on_state_disconnected",
 ]
 
+
+def on_state_connected(state: ControlStateContext) -> None:
+    state.dims_ready = False
+    state.dims_spec = None
+    state.primary_axis_index = None
+
+
+def on_state_disconnected(loop_state, state: ControlStateContext) -> None:
+    state.dims_ready = False
+    state.dims_spec = None
+    state.primary_axis_index = None
+    loop_state.pending_intents.clear()
+    loop_state.last_dims_spec = None
+    state.control_runtimes.clear()
+    state.camera_state.clear()
