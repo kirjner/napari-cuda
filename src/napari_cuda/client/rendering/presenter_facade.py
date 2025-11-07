@@ -202,7 +202,8 @@ class PresenterFacade:
 
         self._last_dims_spec = spec
         self._hud_level = int(spec.current_level)
-        self._hud_level_total = len(spec.levels) if spec.levels else None
+        total_levels = len(spec.levels)
+        self._hud_level_total = total_levels - 1
         dispatcher = self._intent_dispatcher
         if dispatcher is None:
             return
