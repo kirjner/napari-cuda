@@ -34,9 +34,12 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
     index_value: Optional[int] = None
     margin_value: Optional[float] = None
 
+    value_repr: Optional[float | int] = None
+
     if key == "index":
         if isinstance(ctx.value, Integral):
             index_value = int(ctx.value)
+            value_repr = index_value
         else:
             logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
@@ -59,6 +62,7 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
     elif key in {"margin_left", "margin_right"}:
         try:
             margin_value = float(ctx.value)
+            value_repr = margin_value
         except Exception:
             logger.debug("state.update dims ignored (non-float margin) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
@@ -149,7 +153,7 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
             target,
             key,
             step_delta,
-            value_arg,
+            value_repr,
             result.current_step,
         )
 
