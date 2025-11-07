@@ -83,13 +83,6 @@ def snapshot_multiscale_state(
 ) -> dict[str, Any]:
     """Derive multiscale policy metadata from a ledger snapshot."""
 
-    def _normalize(value: Any) -> Any:
-        if isinstance(value, Mapping):
-            return {str(k): _normalize(v) for k, v in value.items()}
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-            return [_normalize(v) for v in value]
-        return value
-
     state: dict[str, Any] = {}
 
     policy_entry = snapshot.get(("multiscale", "main", "policy"))
@@ -108,48 +101,17 @@ def snapshot_multiscale_state(
         else:
             state["current_level"] = level_value
 
-    levels_entry = snapshot.get(("multiscale", "main", "levels"))
-    if levels_entry is not None and isinstance(levels_entry.value, Sequence):
-        levels_payload = []
-        for entry in levels_entry.value:
-            if isinstance(entry, Mapping):
-                normalized = _normalize(entry)
-                if "downsample" not in normalized:
-                    shape_value = normalized.get("shape")
-                    if isinstance(shape_value, Sequence) and shape_value:
-                        normalized["downsample"] = [1.0 for _ in shape_value]
-                levels_payload.append(normalized)
-        if levels_payload:
-            state["levels"] = levels_payload
-
-    level_shapes_entry = snapshot.get(("multiscale", "main", "level_shapes"))
-    if level_shapes_entry is not None and isinstance(level_shapes_entry.value, Sequence):
-        shapes_payload = []
-        for shape in level_shapes_entry.value:
-            if isinstance(shape, Sequence):
-                shapes_payload.append([int(dim) for dim in shape])
-        if shapes_payload:
-            state["level_shapes"] = shapes_payload
-
-    downgraded_entry = snapshot.get(("multiscale", "main", "downgraded"))
-    if downgraded_entry is not None and downgraded_entry.value is not None:
-        state["downgraded"] = bool(downgraded_entry.value)
-
-    if "current_level" not in state or "levels" not in state or "level_shapes" not in state or "downgraded" not in state:
-        spec_entry = snapshot.get(("dims", "main", "dims_spec"))
-        if spec_entry is not None and spec_entry.value is not None:
-            spec = dims_spec_from_payload(spec_entry.value)
-            if spec is not None:
-                if "current_level" not in state:
-                    state["current_level"] = int(spec.current_level)
-                if "levels" not in state and spec.levels:
-                    state["levels"] = [dict(level) for level in spec.levels]
-                if "level_shapes" not in state and spec.level_shapes:
-                    state["level_shapes"] = [
-                        [int(dim) for dim in shape] for shape in spec.level_shapes
-                    ]
-                if "downgraded" not in state and spec.downgraded is not None:
-                    state["downgraded"] = bool(spec.downgraded)
+    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
+    if spec_entry is not None and spec_entry.value is not None:
+        spec = dims_spec_from_payload(spec_entry.value)
+        if spec is not None:
+            state["current_level"] = int(spec.current_level)
+            state["levels"] = [dict(level) for level in spec.levels]
+            state["level_shapes"] = [
+                [int(dim) for dim in shape] for shape in spec.level_shapes
+            ]
+            if spec.downgraded is not None:
+                state["downgraded"] = bool(spec.downgraded)
 
     return state
 
@@ -903,26 +865,14 @@ def build_ledger_snapshot(
     assert dims_spec is not None, "dims spec ledger entry missing payload"
     validate_ledger_against_dims_spec(dims_spec, snapshot)
 
-    plane_center_tuple = _tuple_or_none(
-        _ledger_value(snapshot, "camera_plane", "main", "center"),
-        float,
-    )
-    plane_zoom_float = _float_or_none(_ledger_value(snapshot, "camera_plane", "main", "zoom"))
-    plane_rect_tuple = _tuple_or_none(
-        _ledger_value(snapshot, "camera_plane", "main", "rect"),
-        float,
-    )
+    plane_center_tuple = _ledger_value(snapshot, "camera_plane", "main", "center")
+    plane_zoom_float = _ledger_value(snapshot, "camera_plane", "main", "zoom")
+    plane_rect_tuple = _ledger_value(snapshot, "camera_plane", "main", "rect")
 
-    volume_center_tuple = _tuple_or_none(
-        _ledger_value(snapshot, "camera_volume", "main", "center"),
-        float,
-    )
-    volume_angles_tuple = _tuple_or_none(
-        _ledger_value(snapshot, "camera_volume", "main", "angles"),
-        float,
-    )
-    volume_distance_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "distance"))
-    volume_fov_float = _float_or_none(_ledger_value(snapshot, "camera_volume", "main", "fov"))
+    volume_center_tuple = _ledger_value(snapshot, "camera_volume", "main", "center")
+    volume_angles_tuple = _ledger_value(snapshot, "camera_volume", "main", "angles")
+    volume_distance_float = _ledger_value(snapshot, "camera_volume", "main", "distance")
+    volume_fov_float = _ledger_value(snapshot, "camera_volume", "main", "fov")
 
     current_step = tuple(int(v) for v in dims_spec.current_step)
     dims_version = _version_or_none(spec_entry.version)
@@ -937,25 +887,11 @@ def build_ledger_snapshot(
     current_level = int(dims_spec.current_level)
     multiscale_level_version = dims_version
 
-    defaults = default_volume_state()
-    volume_mode = _string_or_none(_ledger_value(snapshot, "volume", "main", "rendering"), fallback=defaults.get("mode"))
-    volume_colormap = _string_or_none(
-        _ledger_value(snapshot, "volume", "main", "colormap"),
-        fallback=defaults.get("colormap"),
-    )
-    volume_clim = _tuple_or_none(
-        _ledger_value(snapshot, "volume", "main", "contrast_limits"),
-        float,
-        fallback=defaults.get("clim"),
-    )
-    volume_opacity = _float_or_none(
-        _ledger_value(snapshot, "volume", "main", "opacity"),
-        fallback=defaults.get("opacity"),
-    )
-    volume_sample_step = _float_or_none(
-        _ledger_value(snapshot, "volume", "main", "sample_step"),
-        fallback=defaults.get("sample_step"),
-    )
+    volume_mode = _ledger_value(snapshot, "volume", "main", "rendering")
+    volume_colormap = _ledger_value(snapshot, "volume", "main", "colormap")
+    volume_clim = _ledger_value(snapshot, "volume", "main", "contrast_limits")
+    volume_opacity = _ledger_value(snapshot, "volume", "main", "opacity")
+    volume_sample_step = _ledger_value(snapshot, "volume", "main", "sample_step")
 
     layer_raw_values: dict[str, dict[str, Any]] = {}
     layer_versions_raw: dict[str, dict[str, int]] = {}
@@ -1081,37 +1017,6 @@ def _ledger_value(
     return None if entry is None else entry.value
 
 
-def _tuple_or_none(value: Any, mapper, *, fallback: Any = None) -> Optional[tuple]:
-    source = value if value is not None else fallback
-    if source is None:
-        return None
-    assert isinstance(source, Iterable), "expected iterable for tuple conversion"
-    assert not isinstance(source, (str, bytes)), "string-like values not supported for tuple conversion"
-    return tuple(mapper(v) for v in source)
-
-
-def _float_or_none(value: Any, *, fallback: Any = None) -> Optional[float]:
-    source = value if value is not None else fallback
-    if source is None:
-        return None
-    return float(source)
-
-
-def _string_or_none(value: Any, *, fallback: Any = None) -> Optional[str]:
-    source = value if value is not None else fallback
-    if source is None:
-        return None
-    text = str(source).strip()
-    return text if text else None
-
-
-def _int_or_none(value: Any, *, fallback: Any = None) -> Optional[int]:
-    source = value if value is not None else fallback
-    if source is None:
-        return None
-    return int(source)
-
-
 def _shape_sequence(value: Any) -> Optional[tuple[tuple[int, ...], ...]]:
     if value is None:
         return None
@@ -1120,9 +1025,9 @@ def _shape_sequence(value: Any) -> Optional[tuple[tuple[int, ...], ...]]:
     assert isinstance(value, Iterable), "shape sequence must be iterable"
     result: list[tuple[int, ...]] = []
     for entry in value:
-        shape_tuple = _tuple_or_none(entry, int)
-        assert shape_tuple is not None, "shape entries must be iterable"
-        result.append(shape_tuple)
+        assert isinstance(entry, Iterable), "shape entries must be iterable"
+        assert not isinstance(entry, (str, bytes)), "shape entries may not be strings"
+        result.append(tuple(int(dim) for dim in entry))
     return tuple(result)
 
 
