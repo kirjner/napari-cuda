@@ -72,10 +72,7 @@ def current_ndisplay(state, ledger: ClientStateLedger) -> int:
     return project_dims(spec, ledger).ndisplay
 
 
-def is_volume_mode(state, ledger: ClientStateLedger) -> bool:
-    spec = state.dims_spec
-    if spec is None:
-        return False
+def is_volume_mode(spec: DimsSpec, ledger: ClientStateLedger) -> bool:
     projection = project_dims(spec, ledger)
     return (not spec.plane_mode) and projection.ndisplay >= 3
 

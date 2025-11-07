@@ -83,6 +83,15 @@ class NapariDimsMirror:
         projection = project_dims(dims_spec)
         state.primary_axis_index = projection.primary_axis
 
+        axis_index_entries = [
+            ('dims', axis.label, 'index', int(axis.current_step))
+            for axis in dims_spec.axes
+        ]
+        self._ledger.batch_record_confirmed(
+            axis_index_entries,
+            timestamp=frame.envelope.timestamp,
+        )
+
         multiscale_snapshot = _build_multiscale_snapshot(payload)
         if multiscale_snapshot is not None:
             state.multiscale_state = {

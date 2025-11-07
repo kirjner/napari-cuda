@@ -314,8 +314,6 @@ def volume_set_rendering(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
-        return False
     if _rate_gate_settings(state, origin):
         return False
     mode_value = str(mode)
@@ -343,8 +341,6 @@ def volume_set_clim(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
-        return False
     if _rate_gate_settings(state, origin):
         return False
     lo_f, hi_f = _ensure_lo_hi(lo, hi)
@@ -371,8 +367,6 @@ def volume_set_colormap(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
-        return False
     if _rate_gate_settings(state, origin):
         return False
     ok, _ = _emit_state_update(
@@ -398,8 +392,6 @@ def volume_set_opacity(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
-        return False
     if _rate_gate_settings(state, origin):
         return False
     a = _clamp01(alpha)
@@ -426,8 +418,6 @@ def volume_set_sample_step(
     *,
     origin: str,
 ) -> bool:
-    if not state.dims_ready or not _is_volume_mode(state, state_ledger):
-        return False
     if _rate_gate_settings(state, origin):
         return False
     r = _clamp_sample_step(relative)
@@ -564,10 +554,6 @@ def hud_snapshot(
     snap['video_w'] = video_w
     snap['video_h'] = video_h
     return snap
-
-
-def _is_volume_mode(state: ControlStateContext, ledger: ClientStateLedger) -> bool:
-    return dims_is_volume_mode(state, ledger)
 
 
 def _clamp01(a: float) -> float:

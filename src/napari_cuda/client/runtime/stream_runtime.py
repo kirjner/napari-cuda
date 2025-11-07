@@ -1206,9 +1206,6 @@ class ClientStreamLoop:
 
     # --- Intents API --------------------------------------------------------------
     # --- Mode helpers -----------------------------------------------------------
-    def _is_volume_mode(self) -> bool:
-        return control_actions._is_volume_mode(self._control_state, self._state_ledger)  # type: ignore[attr-defined]
-
     # --- Small utilities (no behavior change) ----------------------------------
     # --- View HUD snapshot (for overlay) ----------------------------------------
     def view_hud_snapshot(self) -> dict:
