@@ -6,7 +6,7 @@ import logging
 from collections.abc import Iterable, MutableMapping
 from copy import deepcopy
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, Mapping, Optional
+from typing import TYPE_CHECKING, Any, Mapping, MutableMapping, Optional
 
 from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.render_loop.applying import (
@@ -25,6 +25,8 @@ from napari_cuda.server.scene import (
 from napari_cuda.server.utils.signatures import snapshot_versions
 
 from .interface import RenderPlanInterface
+
+AppliedVersions = MutableMapping[tuple[str, str, str], int]
 
 apply_render_snapshot = snapshot_apply.apply_render_snapshot
 apply_viewport_state_snapshot = snapshot_viewport.apply_viewport_state_snapshot
@@ -183,6 +185,7 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
 
 
 __all__ = [
+    "AppliedVersions",
     "apply_viewport_state_snapshot",
     "consume_render_snapshot",
     "drain_scene_updates",
