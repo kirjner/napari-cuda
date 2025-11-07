@@ -145,11 +145,9 @@ def handle_notify_camera(
 
 def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
     spec = state.dims_spec
-    if isinstance(spec, DimsSpec):
-        axes = spec.axes
-        if 0 <= axis_idx < len(axes):
-            return axes[axis_idx].label
-    return str(axis_idx)
+    assert isinstance(spec, DimsSpec), "dims spec required"
+    assert 0 <= axis_idx < len(spec.axes), "axis index out of range"
+    return spec.axes[axis_idx].label
 
 def _runtime_key(scope: str, target: str, key: str) -> str:
     return f"{scope}:{target}:{key}"

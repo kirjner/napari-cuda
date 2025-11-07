@@ -146,44 +146,64 @@ def snapshot_render_state(
     default_clim_value = volume_defaults.get("clim")
     default_clim = None
     if isinstance(default_clim_value, Sequence):
-        default_clim = tuple(float(v) for v in default_clim_value)
+        default_clim = tuple(default_clim_value)
     default_opacity = volume_defaults.get("opacity")
     default_sample_step = volume_defaults.get("sample_step")
 
-    overrides = {
-        "plane_center": _snapshot_coalesce_tuple(plane_center, base.plane_center, float),
-        "plane_zoom": _snapshot_coalesce_float(plane_zoom, base.plane_zoom),
-        "plane_rect": _snapshot_coalesce_tuple(plane_rect, base.plane_rect, float),
-        "volume_center": _snapshot_coalesce_tuple(volume_center, base.volume_center, float),
-        "volume_angles": _snapshot_coalesce_tuple(volume_angles, base.volume_angles, float),
-        "volume_distance": _snapshot_coalesce_float(volume_distance, base.volume_distance),
-        "volume_fov": _snapshot_coalesce_float(volume_fov, base.volume_fov),
-        "current_step": _snapshot_coalesce_tuple(current_step, base.current_step, int),
-        "volume_mode": _snapshot_coalesce_string(volume_mode, base.volume_mode, fallback=default_mode),
-        "volume_colormap": _snapshot_coalesce_string(
-            volume_colormap,
-            base.volume_colormap,
-            fallback=default_colormap,
-        ),
-        "volume_clim": _snapshot_coalesce_tuple(
-            volume_clim,
-            base.volume_clim,
-            float,
-            fallback=default_clim,
-        ),
-        "volume_opacity": _snapshot_coalesce_float(
-            volume_opacity,
-            base.volume_opacity,
-            fallback=default_opacity,
-        ),
-        "volume_sample_step": _snapshot_coalesce_float(
-            volume_sample_step,
-            base.volume_sample_step,
-            fallback=default_sample_step,
-        ),
-    }
+    resolved_plane_center = plane_center if plane_center is not None else base.plane_center
+    resolved_plane_zoom = plane_zoom if plane_zoom is not None else base.plane_zoom
+    resolved_plane_rect = plane_rect if plane_rect is not None else base.plane_rect
+    resolved_volume_center = volume_center if volume_center is not None else base.volume_center
+    resolved_volume_angles = volume_angles if volume_angles is not None else base.volume_angles
+    resolved_volume_distance = volume_distance if volume_distance is not None else base.volume_distance
+    resolved_volume_fov = volume_fov if volume_fov is not None else base.volume_fov
+    resolved_step = current_step if current_step is not None else base.current_step
 
-    return replace(base, **overrides)
+    resolved_volume_mode = volume_mode
+    if resolved_volume_mode is None:
+        resolved_volume_mode = base.volume_mode if base.volume_mode is not None else default_mode
+
+    resolved_volume_colormap = volume_colormap
+    if resolved_volume_colormap is None:
+        if base.volume_colormap is not None:
+            resolved_volume_colormap = base.volume_colormap
+        else:
+            resolved_volume_colormap = default_colormap
+
+    resolved_volume_clim = volume_clim
+    if resolved_volume_clim is None:
+        if base.volume_clim is not None:
+            resolved_volume_clim = base.volume_clim
+        else:
+            resolved_volume_clim = default_clim
+
+    resolved_volume_opacity = volume_opacity
+    if resolved_volume_opacity is None:
+        resolved_volume_opacity = base.volume_opacity if base.volume_opacity is not None else default_opacity
+
+    resolved_volume_sample_step = volume_sample_step
+    if resolved_volume_sample_step is None:
+        if base.volume_sample_step is not None:
+            resolved_volume_sample_step = base.volume_sample_step
+        else:
+            resolved_volume_sample_step = default_sample_step
+
+    return replace(
+        base,
+        plane_center=resolved_plane_center,
+        plane_zoom=resolved_plane_zoom,
+        plane_rect=resolved_plane_rect,
+        volume_center=resolved_volume_center,
+        volume_angles=resolved_volume_angles,
+        volume_distance=resolved_volume_distance,
+        volume_fov=resolved_volume_fov,
+        current_step=resolved_step,
+        volume_mode=resolved_volume_mode,
+        volume_colormap=resolved_volume_colormap,
+        volume_clim=resolved_volume_clim,
+        volume_opacity=resolved_volume_opacity,
+        volume_sample_step=resolved_volume_sample_step,
+    )
 
 
 def snapshot_layer_controls(
@@ -223,13 +243,6 @@ def snapshot_viewport_state(
 ) -> dict[str, Any]:
     """Extract viewport mode and plane/volume payloads from the ledger snapshot."""
 
-    def _clone(value: Any) -> Any:
-        if isinstance(value, Mapping):
-            return {str(k): _clone(v) for k, v in value.items()}
-        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-            return [_clone(v) for v in value]
-        return value
-
     payload: dict[str, Any] = {}
 
     spec_entry = snapshot.get(("dims", "main", "dims_spec"))
@@ -240,11 +253,11 @@ def snapshot_viewport_state(
 
     plane_entry = snapshot.get(("viewport", "plane", "state"))
     if plane_entry is not None and plane_entry.value is not None:
-        payload["plane"] = _clone(plane_entry.value)
+        payload["plane"] = plane_entry.value
 
     volume_entry = snapshot.get(("viewport", "volume", "state"))
     if volume_entry is not None and volume_entry.value is not None:
-        payload["volume"] = _clone(volume_entry.value)
+        payload["volume"] = volume_entry.value
 
     return payload
 
@@ -297,11 +310,11 @@ def snapshot_scene(
     if ml_entry is not None and ml_entry.value is not None:
         vals = ml_entry.value
         if isinstance(vals, (list, tuple)):
-            dims_block["margin_left"] = [float(v) for v in vals]
+            dims_block["margin_left"] = list(vals)
     if mr_entry is not None and mr_entry.value is not None:
         vals = mr_entry.value
         if isinstance(vals, (list, tuple)):
-            dims_block["margin_right"] = [float(v) for v in vals]
+            dims_block["margin_right"] = list(vals)
 
     camera_block = _build_camera_block(render_state, geometry, ndisplay_value)
 
@@ -423,44 +436,6 @@ def snapshot_dims_metadata(scene_snapshot: SceneSnapshot) -> dict[str, Any]:
     return meta
 
 
-# ---------------------------------------------------------------------------
-# Internal helpers
-
-
-def _snapshot_coalesce_tuple(
-    value: Any,
-    base: Optional[tuple],
-    mapper,
-    *,
-    fallback: Any = None,
-) -> Optional[tuple]:
-    source = value if value is not None else (base if base is not None else fallback)
-    if source is None:
-        return None
-    if isinstance(source, (str, bytes, bytearray)):
-        return base
-    if not isinstance(source, Iterable):
-        return base
-    return tuple(mapper(v) for v in source)
-
-
-def _snapshot_coalesce_float(value: Any, base: Optional[float], *, fallback: Any = None) -> Optional[float]:
-    source = value if value is not None else (base if base is not None else fallback)
-    if source is None:
-        return None
-    if isinstance(source, (int, float)):
-        return float(source)
-    return base
-
-
-def _snapshot_coalesce_string(value: Any, base: Optional[str], *, fallback: Any = None) -> Optional[str]:
-    source = value if value is not None else (base if base is not None else fallback)
-    if source is None:
-        return None
-    text = str(source).strip()
-    return text if text else base
-
-
 def _resolve_layer_controls(overrides: LayerVisualState | Mapping[str, Any] | None) -> dict[str, Any]:
     controls = dict(_DEFAULT_LAYER_CONTROLS)
     if not overrides:
@@ -502,20 +477,12 @@ def _resolve_volume_state(
         else ledger_state.get("sample_step", defaults["sample_step"])
     )
 
-    clim_list: list[float]
-    if isinstance(clim, Sequence):
-        clim_list = [float(v) for v in clim[:2]]
-        if len(clim_list) < 2:
-            clim_list.extend([float(defaults["clim"][0]), float(defaults["clim"][1])])
-    else:
-        clim_list = [float(defaults["clim"][0]), float(defaults["clim"][1])]
-
     return {
-        "mode": str(mode),
-        "colormap": str(colormap),
-        "clim": clim_list[:2],
-        "opacity": float(opacity),
-        "sample_step": float(sample_step),
+        "mode": mode,
+        "colormap": colormap,
+        "clim": clim,
+        "opacity": opacity,
+        "sample_step": sample_step,
     }
 
 
@@ -665,7 +632,7 @@ def _resolve_contrast_limits(volume_state: Mapping[str, Any]) -> Optional[list[f
         return None
     clim = volume_state.get("clim")
     if isinstance(clim, Sequence) and len(clim) >= 2:
-        return [float(clim[0]), float(clim[1])]
+        return list(clim[:2])
     return None
 
 
@@ -690,21 +657,21 @@ def _build_camera_block(
     block: dict[str, Any] = {"ndisplay": int(ndisplay_value)}
 
     if geometry.is_volume and render_state.volume_center is not None:
-        block["center"] = [float(v) for v in render_state.volume_center]
+        block["center"] = list(render_state.volume_center)
         if render_state.volume_angles is not None:
-            block["angles"] = [float(v) for v in render_state.volume_angles]
+            block["angles"] = list(render_state.volume_angles)
         if render_state.volume_distance is not None:
-            block["distance"] = float(render_state.volume_distance)
+            block["distance"] = render_state.volume_distance
         if render_state.volume_fov is not None:
-            block["fov"] = float(render_state.volume_fov)
+            block["fov"] = render_state.volume_fov
         return block
 
     if render_state.plane_center is not None:
-        block["center"] = [float(v) for v in render_state.plane_center]
+        block["center"] = list(render_state.plane_center)
     if render_state.plane_zoom is not None:
-        block["zoom"] = float(render_state.plane_zoom)
+        block["zoom"] = render_state.plane_zoom
     if render_state.plane_rect is not None:
-        block["rect"] = [float(v) for v in render_state.plane_rect]
+        block["rect"] = list(render_state.plane_rect)
 
     return block
 
@@ -809,43 +776,6 @@ def _normalize_thumbnail_array(data: Any) -> Optional[np.ndarray]:
     return arr
 
 
-def _coerce_bool(value: Any) -> Optional[bool]:
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, (int, float)):
-        return bool(value)
-    text = str(value).strip().lower()
-    if text in ("true", "1", "yes", "on"):
-        return True
-    if text in ("false", "0", "no", "off"):
-        return False
-    return None
-
-
-def _coerce_float(value: Any) -> Optional[float]:
-    if value is None:
-        return None
-    if isinstance(value, (int, float)):
-        return float(value)
-    return None
-
-
-def _coerce_contrast_limits(value: Any) -> Optional[tuple[float, float]]:
-    if isinstance(value, (list, tuple)) and len(value) >= 2:
-        lo_val = _coerce_float(value[0])
-        hi_val = _coerce_float(value[1])
-        if lo_val is None or hi_val is None:
-            return None
-        lo = float(lo_val)
-        hi = float(hi_val)
-        if hi < lo:
-            lo, hi = hi, lo
-        return (lo, hi)
-    return None
-
-
 # ---------------------------------------------------------------------------
 # Render ledger snapshots
 
@@ -913,32 +843,23 @@ def build_ledger_snapshot(
         versions_map_raw = layer_versions_raw.get(layer_id, {})
         versions_map = {str(k): int(v) for k, v in versions_map_raw.items()}
 
-        visible = _coerce_bool(raw_props.pop("visible", None))
-        opacity = _coerce_float(raw_props.pop("opacity", None))
+        visible = raw_props.pop("visible", None)
+        opacity = raw_props.pop("opacity", None)
         blending = raw_props.pop("blending", None)
-        blending = str(blending) if blending is not None else None
         interpolation = raw_props.pop("interpolation", None)
-        interpolation = str(interpolation) if interpolation is not None else None
-        colormap_value = raw_props.pop("colormap", None)
-        colormap = str(colormap_value) if colormap_value is not None else None
-        gamma = _coerce_float(raw_props.pop("gamma", None))
-        contrast_limits = _coerce_contrast_limits(raw_props.pop("contrast_limits", None))
+        colormap = raw_props.pop("colormap", None)
+        gamma = raw_props.pop("gamma", None)
+        contrast_limits = raw_props.pop("contrast_limits", None)
         depiction = raw_props.pop("depiction", None)
-        depiction = str(depiction) if depiction is not None else None
         rendering = raw_props.pop("rendering", None)
-        rendering = str(rendering) if rendering is not None else None
-        attenuation = _coerce_float(raw_props.pop("attenuation", None))
-        iso_threshold = _coerce_float(raw_props.pop("iso_threshold", None))
+        attenuation = raw_props.pop("attenuation", None)
+        iso_threshold = raw_props.pop("iso_threshold", None)
 
         metadata_value = raw_props.pop("metadata", None)
-        metadata: dict[str, Any] = {}
-        if isinstance(metadata_value, Mapping):
-            metadata = {str(k): v for k, v in metadata_value.items()}
+        metadata: Mapping[str, Any] = metadata_value if isinstance(metadata_value, Mapping) else {}
 
         thumbnail_value = raw_props.pop("thumbnail", None)
-        thumbnail_payload: Optional[dict[str, Any]] = None
-        if isinstance(thumbnail_value, Mapping):
-            thumbnail_payload = {str(k): v for k, v in thumbnail_value.items()}
+        thumbnail_payload: Mapping[str, Any] | None = thumbnail_value if isinstance(thumbnail_value, Mapping) else None
 
         extra = {str(k): v for k, v in raw_props.items()}
 
@@ -950,7 +871,7 @@ def build_ledger_snapshot(
             interpolation=interpolation,
             colormap=colormap,
             gamma=gamma,
-            contrast_limits=contrast_limits,
+            contrast_limits=tuple(contrast_limits) if isinstance(contrast_limits, Sequence) else contrast_limits,
             depiction=depiction,
             rendering=rendering,
             attenuation=attenuation,

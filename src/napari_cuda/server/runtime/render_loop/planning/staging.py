@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable, MutableMapping
-from copy import deepcopy
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Mapping, MutableMapping, Optional
 
@@ -118,17 +117,18 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
     record_snapshot_versions(applied_versions, state)
     layer_changes = extract_layer_changes(applied_versions, state)
 
+    state_for_apply = state
     if layer_changes:
         state_for_apply = replace(state, layer_values=layer_changes)
-    else:
+    elif state.layer_values is not None:
         state_for_apply = replace(state, layer_values=None)
 
     if updates.plane_state is not None:
-        tick_iface.viewport_state.plane = deepcopy(updates.plane_state)
+        tick_iface.viewport_state.plane = updates.plane_state
         if tick_iface.viewport_runner is not None:
             tick_iface.viewport_runner._plane = tick_iface.viewport_state.plane  # type: ignore[attr-defined]
     if updates.volume_state is not None:
-        tick_iface.viewport_state.volume = deepcopy(updates.volume_state)
+        tick_iface.viewport_state.volume = updates.volume_state
 
     previous_mode = tick_iface.viewport_state.mode
     mode_update = updates.mode
