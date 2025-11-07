@@ -73,21 +73,12 @@ async def handle_multiscale_level(ctx: "StateUpdateContext") -> bool:
     if runtime is not None and runtime.is_ready:
         log_fn = logger.info if server._log_state_traces else logger.debug
         try:
-            levels_meta = multiscale_state.get('levels') or []
-            path = None
-            if isinstance(levels_meta, list) and 0 <= int(level) < len(levels_meta):
-                entry = levels_meta[int(level)]
-                if isinstance(entry, Mapping):
-                    path = entry.get('path')
-            log_fn("state: multiscale level -> runtime.request start level=%s", level)
-            runtime.request_level(int(level), path)
-            log_fn("state: multiscale level -> runtime.request done")
             log_fn("state: multiscale level -> runtime.force_idr start")
             runtime.force_idr()
             log_fn("state: multiscale level -> runtime.force_idr done")
             server._pixel.bypass_until_key = True
         except Exception:
-            logger.exception("multiscale level switch request failed")
+            logger.exception("multiscale level switch IDR request failed")
 
     assert result.version is not None, "multiscale reducer must supply version"
     await ctx.ack(applied_value=result.value, version=int(result.version))

@@ -304,7 +304,6 @@ class CaptureWorker:
 
     def __init__(self) -> None:
         self.policy_calls: list[str] = []
-        self.level_requests: list[tuple[int, Any]] = []
         self.force_idr_calls = 0
         self.viewport_state = ViewportState(mode=RenderMode.PLANE)
         initial_level = 0
@@ -381,9 +380,6 @@ class CaptureWorker:
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
-
-    def request_multiscale_level(self, level: int, path: Any) -> None:
-        self.level_requests.append((int(level), path))
 
     def force_idr(self) -> None:
         self.force_idr_calls += 1

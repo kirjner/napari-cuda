@@ -86,15 +86,12 @@ class RuntimeHandle:
             return False
 
     def request_level(self, level: int, path: Optional[str]) -> bool:
-        worker = self._resolve_worker()
-        if worker is None:
-            return False
-        try:
-            worker.request_multiscale_level(int(level), path)  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            logger.exception("RuntimeHandle: request_multiscale_level failed")
-            return False
+        logger.debug(
+            "RuntimeHandle: request_level(level=%s, path=%s) ignored; manual switches are unsupported",
+            level,
+            path,
+        )
+        return False
 
     def force_idr(self) -> bool:
         worker = self._resolve_worker()
@@ -109,4 +106,3 @@ class RuntimeHandle:
 
 
 __all__ = ["RuntimeHandle", "ViewportSnapshot"]
-

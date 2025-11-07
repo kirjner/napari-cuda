@@ -17,6 +17,7 @@ from napari_cuda.server.data import (
     roi_chunk_signature,
 )
 from napari_cuda.server.data.roi import plane_wh_for_level
+from napari_cuda.server.runtime.lod.context import build_level_context
 from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
@@ -76,62 +77,6 @@ def aligned_roi_signature(
         )
     signature = roi_chunk_signature(aligned_roi, chunk_shape)
     return aligned_roi, chunk_shape, signature
-
-
-def _clamp_step_for_shape(step: Sequence[int], shape: Sequence[int]) -> tuple[int, ...]:
-    clamped: list[int] = []
-    for idx, dim in enumerate(shape):
-        bound = max(0, int(dim) - 1)
-        value = 0
-        if idx < len(step):
-            try:
-                value = int(step[idx])
-            except Exception:
-                value = 0
-        clamped.append(max(0, min(bound, value)))
-    return tuple(clamped)
-
-
-def _z_index_from_spec(spec: DimsSpec, step: Sequence[int]) -> Optional[int]:
-    if not step:
-        return None
-    labels = [axis.label.lower() for axis in spec.axes]
-    if "z" in labels:
-        idx = labels.index("z")
-        if idx < len(step):
-            return int(step[idx])
-    return int(step[0])
-
-
-def _build_level_context_from_spec(
-    source: Any,
-    dims_spec: DimsSpec,
-) -> lod.LevelContext:
-    level_idx = int(dims_spec.current_level)
-    descriptors = getattr(source, "level_descriptors", ())
-    if not descriptors or not (0 <= level_idx < len(descriptors)):
-        raise AssertionError(f"requested level {level_idx} missing from source descriptors")
-
-    descriptor = descriptors[level_idx]
-    shape = tuple(int(dim) for dim in descriptor.shape)
-    step_tuple = tuple(int(v) for v in dims_spec.current_step)
-    clamped_step = _clamp_step_for_shape(step_tuple, shape)
-
-    contrast = getattr(source, "ensure_contrast")(level=level_idx)
-    sy, sx = plane_scale_for_level(source, level_idx)
-    axes = "".join(str(axis) for axis in getattr(source, "axes", ()))
-    dtype = str(getattr(source, "dtype", "unknown"))
-
-    return lod.LevelContext(
-        level=level_idx,
-        step=clamped_step,
-        z_index=_z_index_from_spec(dims_spec, clamped_step),
-        shape=shape,
-        scale_yx=(float(sy), float(sx)),
-        contrast=(float(contrast[0]), float(contrast[1])),
-        axes=axes,
-        dtype=dtype,
-    )
 
 
 def apply_dims_from_snapshot(
@@ -238,7 +183,13 @@ def apply_slice_snapshot(
     assert dims_spec is not None, "render snapshot missing dims_spec"
 
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
-    applied_context = _build_level_context_from_spec(source, dims_spec)
+    level_idx = int(dims_spec.current_level)
+    step_tuple = tuple(int(v) for v in dims_spec.current_step)
+    applied_context = build_level_context(
+        source=source,
+        level=level_idx,
+        step=step_tuple,
+    )
 
     if was_volume:
         snapshot_iface.viewport_state.mode = RenderMode.PLANE

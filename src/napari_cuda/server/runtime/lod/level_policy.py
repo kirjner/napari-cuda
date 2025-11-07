@@ -14,9 +14,10 @@ from napari_cuda.server.data.level_budget import LevelBudgetError
 from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.data.zarr_source import ZarrSceneSource
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
-    step as ledger_step,
+    dims_spec as ledger_dims_spec,
 )
 from napari_cuda.server.scene.viewport import RenderMode
+from napari_cuda.shared.dims_spec import dims_spec_remap_step_for_level
 
 from .context import build_level_context
 from .roi import viewport_roi_for_level
@@ -175,42 +176,6 @@ def load_volume(
     return worker._load_volume(source, level)
 
 
-def build_worker_level_context(
-    worker: EGLRendererWorker,
-    source: ZarrSceneSource,
-    *,
-    level: int,
-    prev_level: int | None = None,
-) -> lod.LevelContext:
-    """Build the context used to apply slice/volume updates."""
-
-    runner_step = None
-    if worker._viewport_runner is not None:
-        runner_step = worker._viewport_runner.state.target_step
-
-    if runner_step is not None:
-        step_hint = tuple(int(v) for v in runner_step)
-    else:
-        recorded = ledger_step(worker._ledger)
-        step_hint = tuple(int(v) for v in recorded) if recorded is not None else None
-
-    decision = lod.LevelDecision(
-        desired_level=int(level),
-        selected_level=int(level),
-        reason="direct",
-        timestamp=time.perf_counter(),
-        oversampling={},
-        downgraded=False,
-    )
-
-    return build_level_context(
-        decision,
-        source=source,
-        prev_level=prev_level,
-        last_step=step_hint,
-    )
-
-
 def evaluate(worker: EGLRendererWorker) -> PolicyEvaluation | None:
     """Evaluate policy inputs and return the selected level context."""
 
@@ -270,11 +235,19 @@ def evaluate(worker: EGLRendererWorker) -> PolicyEvaluation | None:
         logger_ref=logger,
     )
 
-    context = build_level_context(
-        decision,
-        source=source,
+    spec = ledger_dims_spec(worker._ledger)
+    assert spec is not None, "dims spec missing during level evaluation"
+    base_step = tuple(int(v) for v in spec.current_step)
+    step_hint = dims_spec_remap_step_for_level(
+        spec,
+        step=base_step,
         prev_level=current,
-        last_step=ledger_step(worker._ledger),
+        next_level=int(decision.selected_level),
+    )
+    context = build_level_context(
+        source=source,
+        level=int(decision.selected_level),
+        step=step_hint,
     )
 
     return PolicyEvaluation(
@@ -288,7 +261,6 @@ def evaluate(worker: EGLRendererWorker) -> PolicyEvaluation | None:
 __all__ = [
     "BudgetGuardError",
     "PolicyEvaluation",
-    "build_worker_level_context",
     "evaluate",
     "load_volume",
     "resolve_volume_intent_level",

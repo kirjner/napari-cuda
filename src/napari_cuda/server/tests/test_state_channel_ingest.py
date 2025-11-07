@@ -449,7 +449,6 @@ async def _test_multiscale_level_switch_requests_worker_once() -> None:
 
         worker = harness.server._worker
         assert worker is not None
-        worker.level_requests.clear()
         worker.force_idr_calls = 0
 
         update = build_state_update(
@@ -471,7 +470,6 @@ async def _test_multiscale_level_switch_requests_worker_once() -> None:
         assert ack["payload"]["status"] == "accepted"
 
         await harness.drain_scheduled()
-        assert worker.level_requests == [(1, None)]
         assert worker.force_idr_calls == 1
         level_entry = harness.server._state_ledger.get("multiscale", "main", "level")
         assert level_entry is not None and int(level_entry.value) == 1

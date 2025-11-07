@@ -84,7 +84,6 @@ from napari_cuda.shared.dims_spec import (
 class _CaptureWorker:
     def __init__(self) -> None:
         self.policy_calls: list[str] = []
-        self.level_requests: list[tuple[int, Any]] = []
         self.force_idr_calls = 0
         self._is_ready = True
         self._data_wh = (640, 480)
@@ -107,9 +106,6 @@ class _CaptureWorker:
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
-
-    def request_multiscale_level(self, level: int, path: Any) -> None:
-        self.level_requests.append((int(level), path))
 
     def force_idr(self) -> None:
         self.force_idr_calls += 1

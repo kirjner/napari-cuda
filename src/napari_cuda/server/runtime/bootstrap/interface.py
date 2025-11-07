@@ -171,19 +171,17 @@ class ViewerBootstrapInterface:
 
     def build_level_context(
         self,
-        decision: Any,
         *,
         source: Any,
-        prev_level: Optional[int],
-        last_step: Optional[Sequence[int]],
+        level: int,
+        step: Sequence[int],
     ) -> Any:
         """Delegate level context construction to the runtime LOD helpers."""
 
         return lod_build_level_context(
-            decision,
             source=source,
-            prev_level=prev_level,
-            last_step=last_step,
+            level=int(level),
+            step=tuple(int(v) for v in step),
         )
 
     def resolve_volume_intent_level(

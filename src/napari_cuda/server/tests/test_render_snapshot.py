@@ -316,13 +316,13 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
     calls: dict[str, object] = {}
     call_order: list[str] = []
 
-    def _fake_build(decision, *, source, prev_level, last_step):
-        calls["build"] = (decision.selected_level, prev_level, last_step)
+    def _fake_build(*, source, level, step):
+        calls["build"] = (level, step)
         return SimpleNamespace(
-            level=decision.selected_level,
+            level=level,
             scale_yx=(1.0, 1.0),
             contrast=(0.0, 1.0),
-            step=last_step,
+            step=step,
         )
 
     def _fake_volume(_snapshot_iface, _source, context, *, downgraded: bool):
@@ -357,7 +357,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
-    assert calls["build"] == (2, 1, (5, 0, 0))
+    assert calls["build"] == (2, (1, 0, 0))
     assert calls["volume"] == 2
     assert call_order == ["volume", "configure"]
     assert worker.viewport_state.mode is RenderMode.VOLUME
@@ -447,13 +447,13 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
     )
     calls: dict[str, object] = {}
 
-    def _fake_build(decision, *, source, prev_level, last_step):
-        calls["build"] = (decision.selected_level, prev_level, last_step)
+    def _fake_build(*, source, level, step):
+        calls["build"] = (level, step)
         return SimpleNamespace(
-            level=decision.selected_level,
+            level=level,
             scale_yx=(1.0, 1.0),
             contrast=(0.0, 1.0),
-            step=last_step,
+            step=step,
         )
 
     def _fake_slice(_snapshot_iface, _source, context):
@@ -474,7 +474,7 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
 
     assert worker.viewport_state.mode is RenderMode.PLANE
     assert worker.configure_calls == 1
-    assert calls["build"] == (1, 1, (3, 0, 0))
+    assert calls["build"] == (1, (3, 0, 0))
     assert calls["slice"] == (1, (3, 0, 0))
     assert worker.viewport_state.mode is RenderMode.PLANE
 
@@ -507,13 +507,13 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
     )
     calls: dict[str, object] = {}
 
-    def _fake_build(decision, *, source, prev_level, last_step):
-        calls.setdefault("build", []).append((decision.selected_level, prev_level, last_step))
+    def _fake_build(*, source, level, step):
+        calls.setdefault("build", []).append((level, step))
         return SimpleNamespace(
-            level=decision.selected_level,
+            level=level,
             scale_yx=(1.0, 1.0),
             contrast=(0.0, 1.0),
-            step=last_step,
+            step=step,
         )
 
     def _fake_volume(_snapshot_iface, _source, context, *, downgraded: bool):
@@ -534,7 +534,7 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
-    assert calls["build"] == [(2, 1, (7, 0, 0))]
+    assert calls["build"] == [(2, (1, 0, 0))]
     assert calls["volume"] == [(2, True)]
 
 

@@ -119,13 +119,10 @@ def test_viewer_bootstrap_interface_lod_helpers(monkeypatch: pytest.MonkeyPatch)
     worker = DummyWorker()
     facade = ViewerBootstrapInterface(worker)
 
-    decision = object()
-
-    def fake_build(decision_arg, *, source, prev_level, last_step):
-        assert decision_arg is decision
+    def fake_build(*, source, level, step):
         assert source == "scene"
-        assert prev_level == 3
-        assert last_step == (1, 2, 3)
+        assert level == 3
+        assert step == (1, 2, 3)
         return "built-context"
 
     def fake_resolve(worker_arg, source, level):
@@ -154,10 +151,9 @@ def test_viewer_bootstrap_interface_lod_helpers(monkeypatch: pytest.MonkeyPatch)
     )
 
     context = facade.build_level_context(
-        decision,
         source="scene",
-        prev_level=3,
-        last_step=(1, 2, 3),
+        level=3,
+        step=(1, 2, 3),
     )
     resolved = facade.resolve_volume_intent_level("scene", 5)
     loaded = facade.load_volume("scene", 9)

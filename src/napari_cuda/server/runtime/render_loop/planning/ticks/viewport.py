@@ -71,12 +71,8 @@ def run(worker: EGLRendererWorker) -> None:
     if plan.level_change:
         target_level = int(runner.state.request.level)
         prev_level = tick_iface.current_level_index()
-        applied_context = level_policy.build_worker_level_context(
-            worker,
-            source,
-            level=target_level,
-            prev_level=prev_level,
-        )
+        applied_context = plan.level_context
+        assert applied_context is not None, "planner must supply level context for level_change"
 
         apply_iface.set_current_level_index(int(applied_context.level))
         if apply_iface.viewport_state.mode is RenderMode.VOLUME:

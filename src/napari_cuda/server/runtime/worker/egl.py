@@ -63,7 +63,6 @@ from napari_cuda.server.runtime.ipc.mailboxes import (
     RenderUpdate,
 )
 from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.lod.context import build_level_context
 from napari_cuda.server.runtime.render_loop.planning.staging import (
     consume_render_snapshot,
     drain_scene_updates,
@@ -90,9 +89,6 @@ from napari_cuda.server.scene.viewport import (
     ViewportState,
 )
 from napari_cuda.server.runtime.worker.resources import WorkerResources
-from napari_cuda.server.scene import (
-    RenderLedgerSnapshot,
-)
 from napari_cuda.server.state_ledger import ServerStateLedger
 
 logger = logging.getLogger(__name__)
@@ -235,86 +231,6 @@ class EGLRendererWorker:
 
     def _init_vispy_scene(self) -> None:
         core_init_vispy_scene(self)
-
-    # --- Multiscale: request switch (thread-safe) ---
-    def request_multiscale_level(self, level: int, path: Optional[str] = None) -> None:
-        """Emit a manual level intent back to the controller."""
-
-        if getattr(self, "_lock_level", None) is not None:
-            if self._log_layer_debug and logger.isEnabledFor(logging.INFO):
-                logger.info("request_multiscale_level ignored due to lock_level=%s", str(self._lock_level))
-            return
-
-        callback = self._level_intent_callback
-        if callback is None:
-            logger.debug("manual level switch ignored (no callback)")
-            return
-
-        source = self._ensure_scene_source()
-        target = int(level)
-        if path:
-            target = int(source.level_index_for_path(path))
-
-        descriptors = source.level_descriptors
-        if descriptors:
-            target = max(0, min(target, len(descriptors) - 1))
-
-        downgraded = False
-        if self._viewport_state.mode is RenderMode.VOLUME:
-            target, downgraded = level_policy.resolve_volume_intent_level(self, source, target)
-
-        self._viewport_state.volume.downgraded = bool(downgraded)
-
-        decision = lod.LevelDecision(
-            desired_level=int(target),
-            selected_level=int(target),
-            reason="manual",
-            timestamp=time.perf_counter(),
-            oversampling={},
-            downgraded=bool(downgraded),
-        )
-        ledger = self._ledger
-        step_hint = ledger_step(ledger)
-        context = build_level_context(
-            decision,
-            source=source,
-            prev_level=int(self._current_level_index()),
-            last_step=last_step,
-        )
-        apply_plane_metadata(self, source, context)
-
-        descriptor = source.level_descriptors[int(context.level)]
-        shape_tuple = tuple(int(dim) for dim in descriptor.shape)
-
-        intent = LevelSwitchIntent(
-            desired_level=int(target),
-            selected_level=int(context.level),
-            reason="manual",
-            previous_level=int(self._current_level_index()),
-            oversampling={},
-            timestamp=decision.timestamp,
-            downgraded=bool(downgraded),
-            zoom_ratio=None,
-            lock_level=self._lock_level,
-            mode=self.viewport_state.mode,
-            plane_state=deepcopy(self.viewport_state.plane),
-            volume_state=deepcopy(self.viewport_state.volume),
-            level_shape=shape_tuple,
-        )
-
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
-                int(self._current_level_index()),
-                int(context.level),
-                intent.reason,
-                intent.downgraded,
-            )
-
-        self._viewport_runner.ingest_snapshot(RenderLedgerSnapshot(current_level=int(context.level)))
-        self._last_interaction_ts = time.perf_counter()
-        callback(intent)
-        self._mark_render_tick_needed()
 
     def _mark_render_tick_needed(self) -> None:
         self._render_tick_required = True

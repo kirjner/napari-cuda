@@ -8,11 +8,9 @@ never observes a partially-updated dims state.
 from __future__ import annotations
 
 import logging
-import time
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Optional, Sequence
 
-import napari_cuda.server.data.lod as lod
 from napari_cuda.server.runtime.lod.context import build_level_context
 from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
@@ -36,6 +34,21 @@ logger = logging.getLogger(__name__)
 
 apply_slice_roi = _apply_slice_roi
 apply_plane_slice_roi = apply_slice_roi
+
+
+def _clamp_step_for_shape(step: Sequence[int], shape: Sequence[int]) -> tuple[int, ...]:
+    clamped: list[int] = []
+    for idx, bound in enumerate(shape):
+        limit = max(1, int(bound))
+        value = 0
+        if idx < len(step):
+            try:
+                value = int(step[idx])
+            except Exception:
+                value = 0
+        clamped.append(max(0, min(limit - 1, value)))
+    return tuple(clamped)
+
 
 @contextmanager
 def _suspend_fit_callbacks(viewer: Any):
@@ -122,30 +135,19 @@ def _resolve_snapshot_ops(
         )
         effective_level = int(selected_level)
         load_needed = (effective_level != prev_level) or (not was_volume)
-        if snapshot_step is not None:
-            step_hint = snapshot_step
-        else:
-            step_hint = (
-                tuple(int(v) for v in ledger_snapshot_step)
-                if ledger_snapshot_step is not None
-                else None
-            )
+        step_hint = snapshot_step
+        if step_hint is None and ledger_snapshot_step is not None:
+            step_hint = tuple(int(v) for v in ledger_snapshot_step)
 
         applied_context = None
         if load_needed:
-            decision = lod.LevelDecision(
-                desired_level=int(effective_level),
-                selected_level=int(effective_level),
-                reason="direct",
-                timestamp=time.perf_counter(),
-                oversampling={},
-                downgraded=False,
-            )
+            assert step_hint is not None, "volume load requires explicit step"
+            descriptor = source.level_descriptors[int(effective_level)]
+            clamped_step = _clamp_step_for_shape(step_hint, descriptor.shape)
             applied_context = build_level_context(
-                decision,
                 source=source,
-                prev_level=prev_level,
-                last_step=step_hint,
+                level=int(effective_level),
+                step=clamped_step,
             )
 
         ops["volume"] = {
@@ -159,31 +161,16 @@ def _resolve_snapshot_ops(
         }
         return ops
 
-    # Avoid remap by treating previous==target level; step comes from snapshot.
-    stage_prev_level = target_level
-
-    if snapshot_step is not None:
-        step_hint = snapshot_step
-    else:
-        step_hint = (
-            tuple(int(v) for v in ledger_snapshot_step)
-            if ledger_snapshot_step is not None
-            else None
-        )
-
-    decision = lod.LevelDecision(
-        desired_level=int(target_level),
-        selected_level=int(target_level),
-        reason="direct",
-        timestamp=time.perf_counter(),
-        oversampling={},
-        downgraded=False,
-    )
+    step_hint = snapshot_step
+    if step_hint is None and ledger_snapshot_step is not None:
+        step_hint = tuple(int(v) for v in ledger_snapshot_step)
+    assert step_hint is not None, "plane apply requires explicit step"
+    descriptor = source.level_descriptors[int(target_level)]
+    clamped_step = _clamp_step_for_shape(step_hint, descriptor.shape)
     applied_context = build_level_context(
-        decision,
         source=source,
-        prev_level=stage_prev_level,
-        last_step=step_hint,
+        level=int(target_level),
+        step=clamped_step,
     )
     step_tuple = tuple(int(v) for v in applied_context.step)
     level_int = int(applied_context.level)

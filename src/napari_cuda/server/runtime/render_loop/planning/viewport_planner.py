@@ -17,11 +17,13 @@ from napari_cuda.server.data import (
     chunk_shape_for_level,
     roi_chunk_signature,
 )
+import napari_cuda.server.data.lod as lod
 from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 
 from napari_cuda.server.scene.viewport import PlaneResult, PlaneState, PoseEvent
+from napari_cuda.server.runtime.lod.context import build_level_context
 
 
 @dataclass(frozen=True)
@@ -43,6 +45,7 @@ class ViewportOps:
     slice_task: Optional[SliceTask]
     pose_event: Optional[PoseEvent]
     zoom_hint: Optional[float] = None
+    level_context: Optional[lod.LevelContext] = None
 
 
 class ViewportPlanner:
@@ -203,6 +206,8 @@ class ViewportPlanner:
         level_change_ready = bool(self._level_reload_required and not intent_state.awaiting_level_confirm)
         slice_out: Optional[SliceTask] = self._pending_slice if self._slice_reload_required else None
 
+        level_context_out: Optional[lod.LevelContext] = None
+
         if intent_state.ndisplay >= 3:
             self._level_reload_required = False
             intent_state.awaiting_level_confirm = False
@@ -215,7 +220,7 @@ class ViewportPlanner:
             if pose_event is None and state.camera_dirty:
                 pose_event = PoseEvent.CAMERA_DELTA
                 state.camera_dirty = False
-            return ViewportOps(level_change_ready, None, pose_event, intent_zoom_hint)
+            return ViewportOps(level_change_ready, None, pose_event, intent_zoom_hint, level_context_out)
 
         if level_change_ready:
             self._slice_reload_required = False
@@ -227,7 +232,7 @@ class ViewportPlanner:
             if pose_event is None and state.camera_dirty:
                 pose_event = PoseEvent.CAMERA_DELTA
                 state.camera_dirty = False
-            return ViewportOps(False, None, pose_event, intent_zoom_hint)
+            return ViewportOps(False, None, pose_event, intent_zoom_hint, level_context_out)
 
         rect = state.pose.rect
         if rect is not None:
@@ -261,7 +266,15 @@ class ViewportPlanner:
             pose_event = PoseEvent.CAMERA_DELTA
             state.camera_dirty = False
 
-        return ViewportOps(level_change_ready, slice_out, pose_event, intent_zoom_hint)
+        if level_change_ready:
+            assert intent_state.step is not None, "level_change requires explicit step"
+            level_context_out = build_level_context(
+                source=source,
+                level=int(intent_state.level),
+                step=intent_state.step,
+            )
+
+        return ViewportOps(level_change_ready, slice_out, pose_event, intent_zoom_hint, level_context_out)
 
     def mark_level_applied(self, level: int) -> None:
         """Clear level reload state once the worker finishes applying it."""

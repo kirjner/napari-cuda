@@ -33,6 +33,7 @@ from napari_cuda.server.scene.viewport import (
     PlaneState,
     RenderMode,
 )
+from napari_cuda.shared.dims_spec import dims_spec_clamp_step
 
 if TYPE_CHECKING:
     from napari_cuda.server.data.zarr_source import ZarrSceneSource
@@ -169,20 +170,16 @@ def _bootstrap_camera_pose(
         prev_mode = worker._viewport_state.mode
         prev_level = worker._current_level_index()
         prev_step = ledger_step(worker._ledger)
+        spec = ledger_dims_spec(worker._ledger)
+        assert spec is not None, "volume bootstrap requires dims spec"
+        base_step = prev_step if prev_step is not None else spec.current_step
+        step_tuple = dims_spec_clamp_step(spec, int(coarse_level), base_step)
         worker._viewport_state.mode = RenderMode.VOLUME
         worker._set_current_level_index(int(coarse_level))
         applied_context = facade.build_level_context(
-            lod.LevelDecision(
-                desired_level=int(coarse_level),
-                selected_level=int(coarse_level),
-                reason="bootstrap-volume",
-                timestamp=time.perf_counter(),
-                oversampling={},
-                downgraded=False,
-            ),
             source=source,
-            prev_level=int(prev_level),
-            last_step=prev_step,
+            level=int(coarse_level),
+            step=step_tuple,
         )
         facade.apply_volume_metadata(source, applied_context)
         facade.apply_volume_level(
@@ -226,12 +223,17 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
         oversampling={},
         downgraded=bool(downgraded),
     )
+    spec = ledger_dims_spec(worker._ledger)
+    assert spec is not None, "dims spec required before entering volume"
+    base_step = spec.current_step
     last_step = ledger_step(worker._ledger)
+    if last_step is not None:
+        base_step = last_step
+    step_tuple = dims_spec_clamp_step(spec, int(selected_level), base_step)
     context = facade.build_level_context(
-        decision,
         source=source,
-        prev_level=int(worker._current_level_index()),
-        last_step=last_step,
+        level=int(selected_level),
+        step=step_tuple,
     )
     facade.apply_volume_metadata(source, context)
 
@@ -337,10 +339,9 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
         oversampling={},
     )
     context = facade.build_level_context(
-        decision,
         source=source,
-        prev_level=int(worker._current_level_index()),
-        last_step=step_tuple,
+        level=int(lvl_idx),
+        step=step_tuple,
     )
     facade.apply_plane_metadata(source, context)
     descriptor = source.level_descriptors[int(context.level)]

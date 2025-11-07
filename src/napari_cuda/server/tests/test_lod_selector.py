@@ -8,7 +8,6 @@ from napari_cuda.server.data.lod import (
     enforce_budgets,
     select_level,
 )
-from napari_cuda.server.runtime.lod.context import build_level_context
 
 _BASE_CONFIG = LevelPolicyConfig(
     threshold_in=1.05,
@@ -212,24 +211,3 @@ def test_enforce_budgets_downgrades_when_needed() -> None:
 
     assert downgraded.selected_level == 1
     assert downgraded.downgraded is True
-
-
-def test_build_level_context_uses_z_hint() -> None:
-    source = _StubSource(((8, 8, 8), (4, 4, 4)))
-    decision = LevelDecision(
-        desired_level=1,
-        selected_level=1,
-        reason="policy",
-        timestamp=0.0,
-        oversampling={1: 1.2},
-    )
-
-    ctx = build_level_context(
-        decision,
-        source=source,  # type: ignore[arg-type]
-        prev_level=0,
-        last_step=(3, 1, 2),
-    )
-
-    assert ctx.level == 1
-    assert ctx.step[0] == 1
