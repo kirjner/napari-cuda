@@ -32,56 +32,26 @@ from napari_cuda.client.control.client_state_ledger import (
     IntentRecord,
 )
 
+# Re-export shared control plumbing from the new control_state module.
+from .control_state import (
+    ControlRuntime,
+    ControlStateContext,
+    _emit_state_update,
+    _mirror_viewer_dims,
+    _rate_gate_settings,
+    _update_runtime_from_ack_outcome,
+    handle_generic_ack,
+    handle_notify_camera,
+)
+
 logger = logging.getLogger("napari_cuda.client.runtime.stream_runtime")
 
 
-@dataclass
-class ControlStateContext:
-    """Mutable control state hoisted out of the loop object."""
+"""Stateful helpers retained here until dims/camera/volume helpers migrate.
 
-    dims_ready: bool = False
-    dims_spec: DimsSpec | None = None
-    primary_axis_index: int | None = None
-    session_id: Optional[str] = None
-    ack_timeout_ms: Optional[int] = None
-    intent_counter: int = 0
-    dims_min_dt: float = 0.0
-    last_dims_send: float = 0.0
-    wheel_px_accum: float = 0.0
-    wheel_step: float = 1.0
-    settings_min_dt: float = 0.0
-    last_settings_send: float = 0.0
-    control_runtimes: dict[str, ControlRuntime] = field(default_factory=dict)
-    view_state: dict[str, Any] = field(default_factory=dict)
-    volume_state: dict[str, Any] = field(default_factory=dict)
-    multiscale_state: dict[str, Any] = field(default_factory=dict)
-    camera_state: dict[str, Any] = field(default_factory=dict)
-
-    @classmethod
-    def from_env(cls, env_cfg: Any) -> ControlStateContext:
-        state = cls()
-        dims_rate = getattr(env_cfg, 'dims_rate_hz', 1.0) or 1.0
-        state.dims_min_dt = 1.0 / max(1.0, float(dims_rate))
-        state.wheel_step = float(getattr(env_cfg, 'wheel_step', 1.0) or 1.0)
-        settings_rate = getattr(env_cfg, 'settings_rate_hz', 1.0) or 1.0
-        state.settings_min_dt = 1.0 / max(1.0, float(settings_rate))
-        return state
-
-    def next_intent_ids(self) -> tuple[str, str]:
-        self.intent_counter = (int(self.intent_counter) + 1) & 0xFFFFFFFF
-        base = f"{self.intent_counter:08x}"
-        intent_id = f"intent-{base}"
-        frame_id = f"state-{base}"
-        return intent_id, frame_id
-
-
-@dataclass
-class ControlRuntime:
-    active: bool = False
-    last_phase: Optional[str] = None
-    last_send_ts: float = 0.0
-    active_intent_id: Optional[str] = None
-    active_frame_id: Optional[str] = None
+We import and re-export shared plumbing from control_state to keep existing
+imports stable during the refactor.
+"""
 
 
 def on_state_connected(state: ControlStateContext) -> None:
@@ -98,184 +68,10 @@ def on_state_disconnected(loop_state: ClientLoopState, state: ControlStateContex
     loop_state.last_dims_spec = None
     state.control_runtimes.clear()
     state.camera_state.clear()
-def handle_notify_camera(
-    state: ControlStateContext,
-    state_ledger: ClientStateLedger,
-    frame: NotifyCamera,
-    *,
-    log_debug: bool = False,
-) -> tuple[str, dict[str, Any]] | None:
-    payload = frame.payload
-    mode = str(payload.mode or "")
-    delta_payload = payload.delta
-    mode_key = mode or 'main'
-    state.camera_state[mode_key] = delta_payload
-
-    timestamp = frame.envelope.timestamp
-    state_ledger.record_confirmed(
-        'camera',
-        'main',
-        mode_key,
-        delta_payload,
-        timestamp=timestamp,
-    )
-
-    if log_debug:
-        logger.debug(
-            "notify.camera mode=%s origin=%s intent=%s delta=%s",
-            mode,
-            payload.origin,
-            frame.envelope.intent_id,
-            delta_payload,
-        )
-
-    return mode_key, delta_payload
-
-
-def _runtime_key(scope: str, target: str, key: str) -> str:
-    return f"{scope}:{target}:{key}"
-
-
 def current_ndisplay(state: ControlStateContext, ledger: ClientStateLedger) -> Optional[int]:
     return dims_current_ndisplay(state, ledger)
 
 
-def _emit_state_update(
-    state: ControlStateContext,
-    loop_state: ClientLoopState,
-    state_ledger: ClientStateLedger,
-    dispatch_state_update: Callable[[IntentRecord, str], bool],
-    *,
-    scope: str,
-    target: str,
-    key: str,
-    value: Any,
-    origin: str,
-    metadata: Optional[Mapping[str, Any]] = None,
-) -> tuple[bool, Optional[Any]]:
-    runtime_key = _runtime_key(scope, target, key)
-    runtime = state.control_runtimes.setdefault(runtime_key, ControlRuntime())
-    phase = "start" if not runtime.active else "update"
-    intent_id, frame_id = state.next_intent_ids()
-    pending = state_ledger.apply_local(
-        scope,
-        target,
-        key,
-        value,
-        phase,
-        intent_id=intent_id,
-        frame_id=frame_id,
-        metadata=metadata,
-    )
-
-    if pending is None:
-        projection_value = state_ledger.confirmed_value(scope, target, key)
-        if projection_value is None:
-            projection_value = value
-        logger.debug(
-            "state.update suppressed (duplicate): scope=%s target=%s key=%s value=%s runtime.active=%s",
-            scope,
-            target,
-            key,
-            value,
-            runtime.active,
-        )
-        return False, projection_value
-
-    if not dispatch_state_update(pending, origin):
-        state_ledger.discard_pending(frame_id)
-        return False, None
-
-    runtime.active = True
-    runtime.last_phase = phase
-    runtime.last_send_ts = time.perf_counter()
-    runtime.active_intent_id = intent_id
-    runtime.active_frame_id = frame_id
-    return True, pending.projection_value
-
-
-def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: AckReconciliation) -> None:
-    if outcome.scope is None or outcome.target is None or outcome.key is None:
-        return
-    runtime_key = _runtime_key(outcome.scope, outcome.target, outcome.key)
-    runtime = state.control_runtimes.setdefault(runtime_key, ControlRuntime())
-    runtime.last_phase = outcome.update_phase or runtime.last_phase
-    runtime.last_send_ts = time.perf_counter()
-    matched = outcome.in_reply_to == runtime.active_frame_id
-    if matched:
-        runtime.active_frame_id = None
-        runtime.active_intent_id = None
-
-    if matched and outcome.pending_len == 0:
-        runtime.active = False
-        runtime.last_phase = None
-    else:
-        runtime.active = outcome.pending_len > 0
-        if not runtime.active:
-            runtime.last_phase = None
-
-
-def _mirror_viewer_dims(viewer_obj, ui_call, update: Mapping[str, Any]) -> None:
-    apply_remote = viewer_obj._apply_remote_dims_update  # type: ignore[attr-defined]
-
-    def _apply() -> None:
-        apply_remote(**update)
-
-    if ui_call is not None:
-        ui_call.call.emit(_apply)
-    else:
-        _apply()
-
-
-def handle_generic_ack(
-    state: ControlStateContext,
-    loop_state: ClientLoopState,
-    outcome: AckReconciliation,
-    *,
-    presenter: Optional[PresenterFacade] = None,
-) -> None:
-    if outcome.scope is None:
-        return
-
-    _update_runtime_from_ack_outcome(state, outcome)
-
-    if outcome.status != "accepted":
-        error = outcome.error or {}
-        logger.warning(
-            "ack.state rejected: scope=%s target=%s key=%s code=%s message=%s details=%s",
-            outcome.scope,
-            outcome.target,
-            outcome.key,
-            error.get("code"),
-            error.get("message"),
-            error.get("details"),
-        )
-
-        confirmed_value = outcome.confirmed_value
-        scope = outcome.scope
-        key = outcome.key or ""
-
-        return
-
-    logger.debug(
-        "ack.state accepted: scope=%s target=%s key=%s pending=%d",
-        outcome.scope,
-        outcome.target,
-        outcome.key,
-        outcome.pending_len,
-    )
-
-    confirmed_value = outcome.confirmed_value
-    scope = outcome.scope
-    key = outcome.key or ""
-
-    if scope == 'view':
-        if confirmed_value is not None:
-            state.view_state[key] = confirmed_value
-    elif scope == 'volume' and confirmed_value is not None:
-        state.volume_state[key] = confirmed_value
-    elif scope == 'multiscale' and confirmed_value is not None:
-        state.multiscale_state[key] = confirmed_value
 
 
 def handle_key_event(
@@ -768,15 +564,6 @@ def hud_snapshot(
     snap['video_w'] = video_w
     snap['video_h'] = video_h
     return snap
-
-
-def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
-    now = time.perf_counter()
-    if (now - float(state.last_settings_send or 0.0)) < state.settings_min_dt:
-        logger.debug("settings intent gated by rate limiter (%s)", origin)
-        return True
-    state.last_settings_send = now
-    return False
 
 
 def _is_volume_mode(state: ControlStateContext, ledger: ClientStateLedger) -> bool:

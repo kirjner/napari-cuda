@@ -15,11 +15,7 @@ from napari_cuda.client.control.client_state_ledger import (
     AckReconciliation,
     ClientStateLedger,
 )
-from napari_cuda.client.control.state_update_actions import (
-    ControlStateContext,
-    _emit_state_update,
-    _update_runtime_from_ack_outcome,
-)
+from napari_cuda.client.control.control_state import ControlStateContext, _emit_state_update, _update_runtime_from_ack_outcome
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 

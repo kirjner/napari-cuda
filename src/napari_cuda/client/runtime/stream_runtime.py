@@ -17,7 +17,7 @@ from typing import (
 
 from qtpy import QtCore
 
-from napari_cuda.client.control import state_update_actions as control_actions
+from napari_cuda.client.control import control_state, state_update_actions as control_actions
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.control_channel_client import HeartbeatAckError
 from napari_cuda.client.control.emitters import (
@@ -225,7 +225,7 @@ class ClientStreamLoop:
         # Scene specification cache for client-side mirroring work
         self._scene_lock = threading.Lock()
         self._latest_scene_frame: Optional[NotifySceneFrame] = None
-        self._control_state = control_actions.ControlStateContext.from_env(self._env_cfg)
+        self._control_state = control_state.ControlStateContext.from_env(self._env_cfg)
         self._loop_state.control_state = self._control_state
         self._state_ledger = ClientStateLedger(clock=time.time)
         self._layer_registry = RemoteLayerRegistry()
@@ -727,7 +727,7 @@ class ClientStreamLoop:
         )
 
         def _apply() -> None:
-            control_actions._update_runtime_from_ack_outcome(self._control_state, outcome)
+            control_state._update_runtime_from_ack_outcome(self._control_state, outcome)
             scope = outcome.scope
             if scope == "layer":
                 if self._layer_emitter is not None:
@@ -743,7 +743,7 @@ class ClientStreamLoop:
                 if self._dims_mirror is not None:
                     self._dims_mirror.handle_ack(outcome)
                 return
-            control_actions.handle_generic_ack(self._control_state, self._loop_state, outcome)
+            control_state.handle_generic_ack(self._control_state, self._loop_state, outcome)
 
         self._run_on_ui(_apply)
 
