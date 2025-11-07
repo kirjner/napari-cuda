@@ -10,7 +10,7 @@ from napari_cuda.client.control.client_state_ledger import (
     IntentRecord,
 )
 from napari_cuda.client.control.emitters import NapariCameraIntentEmitter
-from napari_cuda.client.control.state_update_actions import ControlStateContext
+from napari_cuda.client.control.control_state import ControlStateContext
 from napari_cuda.client.runtime.client_loop import camera
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis

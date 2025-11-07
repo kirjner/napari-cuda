@@ -23,6 +23,7 @@ from napari_cuda.protocol import (
     build_session_heartbeat,
     build_session_reject,
     build_session_welcome,
+    build_notify_dims,
 )
 from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
@@ -30,7 +31,104 @@ from napari_cuda.protocol.messages import (
     NotifySceneFrame,
     NotifyStreamFrame,
 )
-from napari_cuda.client.control._tests.test_state_update_actions import _make_notify_dims_frame
+from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis, dims_spec_to_payload
+from typing import Any, Sequence
+
+
+def _make_notify_dims_frame(
+    *,
+    current_step: Sequence[int],
+    ndisplay: int,
+    level_shapes: Sequence[Sequence[int]],
+    mode: str = 'plane',
+    session_id: str = 'session-test',
+    frame_id: str = 'dims-test',
+    timestamp: float = 1.5,
+    levels: Sequence[dict[str, Any]] | None = None,
+    current_level: int = 0,
+    downgraded: bool | None = None,
+    axis_labels: Sequence[str] | None = None,
+    order: Sequence[int] | None = None,
+    displayed: Sequence[int] | None = None,
+) -> NotifyDimsFrame:
+    step_values = [int(value) for value in current_step]
+
+    if levels is None:
+        level_entries = [
+            {
+                'index': idx,
+                'shape': list(shape),
+            }
+            for idx, shape in enumerate(level_shapes)
+        ]
+    else:
+        level_entries = [dict(entry) for entry in levels]
+
+    payload: dict[str, Any] = {
+        'step': step_values,
+        'levels': level_entries,
+        'level_shapes': [list(shape) for shape in level_shapes],
+        'current_level': int(current_level),
+        'mode': mode,
+        'ndisplay': int(ndisplay),
+    }
+
+    if downgraded is not None:
+        payload['downgraded'] = bool(downgraded)
+
+    ndim = len(level_shapes[0]) if level_shapes else len(step_values)
+    resolved_labels = list(axis_labels) if axis_labels is not None else [f"axis-{i}" for i in range(ndim)]
+    resolved_order = list(order) if order is not None else list(range(ndim))
+    if displayed is not None:
+        resolved_displayed = [int(idx) for idx in displayed]
+    else:
+        resolved_displayed = list(resolved_order[-ndisplay:])
+    displayed_lookup = set(resolved_displayed)
+    axes: list[DimsSpecAxis] = []
+    for axis_idx in range(ndim):
+        per_level_steps = [int(shape[axis_idx]) for shape in level_shapes]
+        axes.append(
+            DimsSpecAxis(
+                index=axis_idx,
+                label=str(resolved_labels[axis_idx]),
+                role=str(resolved_labels[axis_idx]).lower(),
+                displayed=axis_idx in displayed_lookup,
+                order_position=resolved_order.index(axis_idx),
+                current_step=step_values[axis_idx] if axis_idx < len(step_values) else 0,
+                margin_left_steps=0.0,
+                margin_right_steps=0.0,
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+                per_level_steps=tuple(per_level_steps),
+                per_level_world=tuple(
+                    AxisExtent(0.0, float(max(count - 1, 0)), 1.0) for count in per_level_steps
+                ),
+            )
+        )
+
+    dims_spec = DimsSpec(
+        version=1,
+        ndim=ndim,
+        ndisplay=int(ndisplay),
+        order=tuple(int(idx) for idx in resolved_order),
+        displayed=tuple(resolved_displayed),
+        current_level=int(current_level),
+        current_step=tuple(step_values[:ndim]),
+        level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in level_shapes),
+        plane_mode=(mode != 'volume'),
+        axes=tuple(axes),
+        levels=tuple(level_entries),
+        downgraded=downgraded,
+        labels=None,
+    )
+    payload['dims_spec'] = dims_spec_to_payload(dims_spec)
+
+    return build_notify_dims(
+        session_id=session_id,
+        payload=payload,
+        timestamp=timestamp,
+        frame_id=frame_id,
+    )
 
 
 @pytest.fixture

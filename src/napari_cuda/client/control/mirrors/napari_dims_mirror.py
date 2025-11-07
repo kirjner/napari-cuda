@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from qtpy import QtCore
 
-from napari_cuda.client.control import state_update_actions as control_actions
+from napari_cuda.client.control.control_state import ControlStateContext, _mirror_viewer_dims
 from napari_cuda.client.control.dims_projection import project_dims, viewer_update_from_spec
 from napari_cuda.client.control.client_state_ledger import (
     AckReconciliation,
@@ -21,9 +21,6 @@ from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_axis_index_for_targ
 if TYPE_CHECKING:  # pragma: no cover
     from napari_cuda.client.control.emitters.napari_dims_intent_emitter import (
         NapariDimsIntentEmitter,
-    )
-    from napari_cuda.client.control.state_update_actions import (
-        ControlStateContext,
     )
     from napari_cuda.client.rendering.presenter_facade import PresenterFacade
     from napari_cuda.client.runtime.client_loop.loop_state import (
@@ -303,7 +300,7 @@ class NapariDimsMirror:
 
         viewer = self._viewer_ref() if callable(self._viewer_ref) else self._viewer_ref  # type: ignore[misc]
         assert viewer is not None, "viewer reference must be alive"
-        control_actions._mirror_viewer_dims(viewer, self._ui_call, viewer_update_local)
+        _mirror_viewer_dims(viewer, self._ui_call, viewer_update_local)
 
     def _apply_multiscale_to_presenter(self, multiscale: Mapping[str, Any] | None) -> None:
         presenter = self._presenter

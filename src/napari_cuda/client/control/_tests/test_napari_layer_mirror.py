@@ -7,7 +7,7 @@ from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.mirrors import NapariLayerMirror
-from napari_cuda.client.control.state_update_actions import ControlStateContext
+from napari_cuda.client.control.control_state import ControlStateContext
 from napari_cuda.client.data.registry import RemoteLayerRegistry
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState

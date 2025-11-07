@@ -24,7 +24,7 @@ from napari_cuda.client.control.control_channel_client import (
     ResumeCursor,
     SessionMetadata,
 )
-from napari_cuda.client.control.state_update_actions import ControlStateContext
+from napari_cuda.client.control.control_state import ControlStateContext
 from napari_cuda.client.data.registry import RemoteLayerRegistry
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.client.runtime.stream_runtime import (

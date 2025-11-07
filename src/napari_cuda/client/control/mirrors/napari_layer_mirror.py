@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any, Optional
 from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
-from napari_cuda.client.control.state_update_actions import ControlStateContext
+from napari_cuda.client.control.control_state import ControlStateContext
 from napari_cuda.client.data.registry import (
     RegistrySnapshot,
     RemoteLayerRegistry,

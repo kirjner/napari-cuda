@@ -7,7 +7,7 @@ from qtpy import QtCore
 
 from napari_cuda.client.control.client_state_ledger import ClientStateLedger
 from napari_cuda.client.control.mirrors import NapariCameraMirror
-from napari_cuda.client.control.state_update_actions import ControlStateContext
+from napari_cuda.client.control.control_state import ControlStateContext
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.protocol.envelopes import build_notify_camera
 
