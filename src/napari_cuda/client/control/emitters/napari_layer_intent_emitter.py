@@ -15,7 +15,12 @@ from napari_cuda.client.control.client_state_ledger import (
     AckReconciliation,
     ClientStateLedger,
 )
-from napari_cuda.client.control.control_state import ControlStateContext, _emit_state_update, _update_runtime_from_ack_outcome
+from napari_cuda.client.control.control_state import (
+    ControlStateContext,
+    _emit_state_update,
+    _rate_gate_settings,
+    _update_runtime_from_ack_outcome,
+)
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 
@@ -683,6 +688,107 @@ class NapariLayerIntentEmitter:
             self._ledger.record_confirmed("layer", layer_id, key, encoded)
             self._apply_projection(binding, config, encoded)
 
+    # ------------------------------------------------------------------ volume intents
+    def volume_set_rendering(self, mode: str, *, origin: str) -> bool:
+        self._assert_gui_thread()
+        if _rate_gate_settings(self._state, origin):
+            return False
+        mode_value = str(mode)
+        ok, _ = _emit_state_update(
+            self._state,
+            self._loop_state,
+            self._ledger,
+            self._dispatch_state_update,
+            scope="volume",
+            target="main",
+            key="rendering",
+            value=mode_value,
+            origin=origin,
+        )
+        if ok:
+            self._state.volume_state['rendering'] = mode_value
+        return ok
+
+    def volume_set_clim(self, lo: float, hi: float, *, origin: str) -> bool:
+        self._assert_gui_thread()
+        if _rate_gate_settings(self._state, origin):
+            return False
+        lo_f, hi_f = _ensure_lo_hi(lo, hi)
+        ok, _ = _emit_state_update(
+            self._state,
+            self._loop_state,
+            self._ledger,
+            self._dispatch_state_update,
+            scope="volume",
+            target="main",
+            key="contrast_limits",
+            value=(float(lo_f), float(hi_f)),
+            origin=origin,
+        )
+        if ok:
+            self._state.volume_state['contrast_limits'] = (float(lo_f), float(hi_f))
+        return ok
+
+    def volume_set_colormap(self, name: str, *, origin: str) -> bool:
+        self._assert_gui_thread()
+        if _rate_gate_settings(self._state, origin):
+            return False
+        cmap = str(name)
+        ok, _ = _emit_state_update(
+            self._state,
+            self._loop_state,
+            self._ledger,
+            self._dispatch_state_update,
+            scope="volume",
+            target="main",
+            key="colormap",
+            value=cmap,
+            origin=origin,
+        )
+        if ok:
+            self._state.volume_state['colormap'] = cmap
+        return ok
+
+    def volume_set_opacity(self, alpha: float, *, origin: str) -> bool:
+        self._assert_gui_thread()
+        if _rate_gate_settings(self._state, origin):
+            return False
+        a = _clamp01(alpha)
+        ok, _ = _emit_state_update(
+            self._state,
+            self._loop_state,
+            self._ledger,
+            self._dispatch_state_update,
+            scope="volume",
+            target="main",
+            key="opacity",
+            value=float(a),
+            origin=origin,
+        )
+        if ok:
+            self._state.volume_state['opacity'] = float(a)
+        return ok
+
+    def volume_set_sample_step(self, relative: float, *, origin: str) -> bool:
+        self._assert_gui_thread()
+        if _rate_gate_settings(self._state, origin):
+            return False
+        sample = _clamp_sample_step(relative)
+        ok, _ = _emit_state_update(
+            self._state,
+            self._loop_state,
+            self._ledger,
+            self._dispatch_state_update,
+            scope="volume",
+            target="main",
+            key="sample_step",
+            value=float(sample),
+            origin=origin,
+        )
+        if ok:
+            self._state.volume_state['sample_step'] = float(sample)
+        return ok
+
     # ------------------------------------------------------------------ internals
     def _make_property_handler(
         self,
@@ -787,6 +893,32 @@ class NapariLayerIntentEmitter:
         assert (
             current is self._ui_thread
         ), "NapariLayerIntentEmitter methods must run on the Qt GUI thread"
+
+
+def _clamp01(value: float) -> float:
+    value = float(value)
+    if value < 0.0:
+        return 0.0
+    if value > 1.0:
+        return 1.0
+    return value
+
+
+def _clamp_sample_step(value: float) -> float:
+    value = float(value)
+    if value < 0.1:
+        return 0.1
+    if value > 4.0:
+        return 4.0
+    return value
+
+
+def _ensure_lo_hi(lo: float, hi: float) -> tuple[float, float]:
+    lo_f = float(lo)
+    hi_f = float(hi)
+    if hi_f <= lo_f:
+        lo_f, hi_f = hi_f, lo_f
+    return lo_f, hi_f
 
 
 __all__ = ["NapariLayerIntentEmitter"]

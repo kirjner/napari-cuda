@@ -1224,75 +1224,24 @@ class ClientStreamLoop:
 
     # --- Volume/multiscale intent senders --------------------------------------
     def volume_set_rendering(self, mode: str, *, origin: str = 'ui') -> bool:
-        return control_actions.volume_set_rendering(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            mode,
-            origin=origin,
-        )
+        assert self._layer_emitter is not None, "layer emitter required"
+        return self._layer_emitter.volume_set_rendering(mode, origin=origin)
 
     def volume_set_clim(self, lo: float, hi: float, *, origin: str = 'ui') -> bool:
-        return control_actions.volume_set_clim(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            lo,
-            hi,
-            origin=origin,
-        )
+        assert self._layer_emitter is not None, "layer emitter required"
+        return self._layer_emitter.volume_set_clim(lo, hi, origin=origin)
 
     def volume_set_colormap(self, name: str, *, origin: str = 'ui') -> bool:
-        return control_actions.volume_set_colormap(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            name,
-            origin=origin,
-        )
+        assert self._layer_emitter is not None, "layer emitter required"
+        return self._layer_emitter.volume_set_colormap(name, origin=origin)
 
     def volume_set_opacity(self, alpha: float, *, origin: str = 'ui') -> bool:
-        return control_actions.volume_set_opacity(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            alpha,
-            origin=origin,
-        )
+        assert self._layer_emitter is not None, "layer emitter required"
+        return self._layer_emitter.volume_set_opacity(alpha, origin=origin)
 
     def volume_set_sample_step(self, relative: float, *, origin: str = 'ui') -> bool:
-        return control_actions.volume_set_sample_step(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            relative,
-            origin=origin,
-        )
-
-    def multiscale_set_policy(self, policy: str, *, origin: str = 'ui') -> bool:
-        return control_actions.multiscale_set_policy(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            policy,
-            origin=origin,
-        )
-
-    def multiscale_set_level(self, level: int, *, origin: str = 'ui') -> bool:
-        return control_actions.multiscale_set_level(
-            self._control_state,
-            self._loop_state,
-            self._state_ledger,
-            self._dispatch_state_update,
-            level,
-            origin=origin,
-        )
+        assert self._layer_emitter is not None, "layer emitter required"
+        return self._layer_emitter.volume_set_sample_step(relative, origin=origin)
 
     def view_set_ndisplay(self, ndisplay: int, *, origin: str = 'ui') -> bool:
         emitter = self._dims_emitter

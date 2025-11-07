@@ -16,12 +16,12 @@ from napari_cuda.client.control.client_state_ledger import (
     ClientStateLedger,
     IntentRecord,
 )
-from napari_cuda.client.control.state_update_actions import (
+from napari_cuda.client.control.control_state import (
     ControlStateContext,
     _emit_state_update,
     _rate_gate_settings,
-    current_ndisplay,
 )
+from napari_cuda.client.control.dims_projection import current_ndisplay
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
 from napari_cuda.shared.dims_spec import dims_spec_axis_index_for_target
 
