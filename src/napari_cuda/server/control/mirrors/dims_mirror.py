@@ -8,13 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
-from napari_cuda.shared.dims_spec import (
-    DimsSpec,
-    dims_spec_axis_labels,
-    dims_spec_displayed,
-    dims_spec_from_payload,
-    dims_spec_order,
-)
+from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_from_payload
 from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 
@@ -64,9 +58,9 @@ class ServerDimsMirror:
         for key in self._WATCH_KEYS:
             self._ledger.subscribe(key.scope, key.target, key.key, self._on_ledger_event)
         snapshot = self._ledger.snapshot()
-        state = self._extract_state(snapshot)
-        signature = self._compute_state_signature(state)
-        payload = self._build_payload_from_state(state)
+        spec = self._extract_spec(snapshot)
+        signature = self._compute_state_signature(spec)
+        payload = self._build_payload_from_spec(spec)
         with self._lock:
             self._latest_payload = payload
             self._last_signature = signature
@@ -81,13 +75,13 @@ class ServerDimsMirror:
             if text != "applied":
                 return
 
-        state = self._extract_state(snapshot)
-        token = self._compute_state_signature(state)
+        spec = self._extract_spec(snapshot)
+        token = self._compute_state_signature(spec)
         with self._lock:
             if not token.changed(self._last_signature):
                 return
             self._last_signature = token
-            payload = self._build_payload_from_state(state)
+            payload = self._build_payload_from_spec(spec)
             self._latest_payload = payload
 
         if self._on_payload is not None:
@@ -100,9 +94,9 @@ class ServerDimsMirror:
             if self._latest_payload is not None:
                 return self._latest_payload
         snapshot = self._ledger.snapshot()
-        state = self._extract_state(snapshot)
-        token = self._compute_state_signature(state)
-        payload = self._build_payload_from_state(state)
+        spec = self._extract_spec(snapshot)
+        token = self._compute_state_signature(spec)
+        payload = self._build_payload_from_spec(spec)
         with self._lock:
             self._latest_payload = payload
             self._last_signature = token
@@ -114,9 +108,9 @@ class ServerDimsMirror:
             self._latest_payload = None
 
     # ------------------------------------------------------------------
-    def _extract_state(
+    def _extract_spec(
         self, snapshot: dict[tuple[str, str, str], LedgerEntry]
-    ) -> dict[str, Any]:
+    ) -> DimsSpec:
         entry = snapshot.get(("dims", "main", "dims_spec"))
         if entry is None:
             raise ValueError("ledger missing dims_spec entry")
@@ -125,62 +119,35 @@ class ServerDimsMirror:
         spec_payload = spec_entry.value
         dims_spec = dims_spec_from_payload(spec_payload)
         assert isinstance(dims_spec, DimsSpec), "ledger dims_spec entry malformed"
+        return dims_spec
 
-        current_step = tuple(int(v) for v in dims_spec.current_step)
-        current_level = int(dims_spec.current_level)
-        level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
-        ndisplay = int(dims_spec.ndisplay)
-        mode = "volume" if ndisplay >= 3 else "plane"
-
-        displayed = dims_spec_displayed(dims_spec)
-        order = dims_spec_order(dims_spec)
-        axis_labels = dims_spec_axis_labels(dims_spec)
-        labels = tuple(str(lbl) for lbl in dims_spec.labels) if dims_spec.labels is not None else None
-        downgraded = dims_spec.downgraded
-        levels = tuple(dict(level) for level in dims_spec.levels)
-
-        return {
-            "current_step": current_step,
-            "current_level": current_level,
-            "levels": levels,
-            "level_shapes": level_shapes,
-            "ndisplay": ndisplay,
-            "mode": mode,
-            "displayed": displayed,
-            "order": order,
-            "axis_labels": axis_labels,
-            "labels": labels,
-            "downgraded": downgraded,
-            "dims_spec": dims_spec,
-        }
-
-    def _build_payload_from_state(self, state: dict[str, Any]) -> NotifyDimsPayload:
+    def _build_payload_from_spec(self, spec: DimsSpec) -> NotifyDimsPayload:
         return NotifyDimsPayload(
-            current_step=state["current_step"],
-            level_shapes=state["level_shapes"],
-            levels=state["levels"],
-            current_level=state["current_level"],
-            downgraded=state["downgraded"],
-            mode=state["mode"],
-            ndisplay=state["ndisplay"],
-            labels=state["labels"],
-            dims_spec=state["dims_spec"],
+            current_step=spec.current_step,
+            level_shapes=spec.level_shapes,
+            levels=spec.levels,
+            current_level=spec.current_level,
+            downgraded=spec.downgraded,
+            mode="volume" if int(spec.ndisplay) >= 3 else "plane",
+            ndisplay=spec.ndisplay,
+            labels=spec.labels,
+            dims_spec=spec,
         )
 
     # ------------------------------------------------------------------
-    def _compute_state_signature(self, state: dict[str, Any]) -> SignatureToken:
+    def _compute_state_signature(self, spec: DimsSpec) -> SignatureToken:
         return dims_content_signature(
-            current_step=state["current_step"],
-            current_level=state["current_level"],
-            ndisplay=state["ndisplay"],
-            mode=state["mode"],
-            displayed=state["displayed"],
-            axis_labels=state["axis_labels"],
-            order=state["order"],
-            labels=state["labels"],
-            levels=state["levels"],
-            level_shapes=state["level_shapes"],
-            downgraded=state["downgraded"],
+            current_step=spec.current_step,
+            current_level=spec.current_level,
+            ndisplay=spec.ndisplay,
+            mode="volume" if int(spec.ndisplay) >= 3 else "plane",
+            displayed=spec.displayed,
+            axis_labels=tuple(axis.label for axis in spec.axes),
+            order=spec.order,
+            labels=spec.labels,
+            levels=spec.levels,
+            level_shapes=spec.level_shapes,
+            downgraded=spec.downgraded,
         )
 
 

@@ -17,8 +17,6 @@ from napari.layers.image._image_constants import (
 from napari.utils.colormaps import AVAILABLE_COLORMAPS
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
-# ruff: noqa: TID252 - absolute imports enforced project-wide
-from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.transactions import (
     apply_bootstrap_transaction,
@@ -200,6 +198,14 @@ def _store_volume_state(
             origin=origin,
             timestamp=timestamp,
         )
+
+
+def _get_dims_spec(ledger: ServerStateLedger) -> DimsSpec:
+    entry = ledger.get("dims", "main", "dims_spec")
+    assert entry is not None, "ledger missing dims_spec entry"
+    spec = dims_spec_from_payload(entry.value)
+    assert spec is not None, "dims spec payload missing"
+    return spec
 
 
 def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
@@ -652,111 +658,6 @@ def reduce_volume_sample_step(
     )
 
 
-def _normalize_view_order(
-    *,
-    baseline_order: Optional[Sequence[int]],
-    requested_order: Optional[Sequence[int]],
-    ndim: int,
-) -> tuple[int, ...]:
-    current: tuple[int, ...] = ()
-    if requested_order is not None:
-        current = tuple(int(idx) for idx in requested_order)
-    elif baseline_order is not None:
-        current = tuple(int(idx) for idx in baseline_order)
-
-    normalized: list[int] = []
-    seen: set[int] = set()
-    for axis in current:
-        axis_idx = int(axis)
-        if 0 <= axis_idx < max(ndim, 1) and axis_idx not in seen:
-            normalized.append(axis_idx)
-            seen.add(axis_idx)
-
-    for axis_idx in range(max(ndim, 1)):
-        if axis_idx not in seen:
-            normalized.append(axis_idx)
-            seen.add(axis_idx)
-
-    if not normalized:
-        normalized = list(range(max(ndim, 1)))
-
-    return tuple(normalized)
-
-
-def _normalize_view_displayed(
-    *,
-    requested_displayed: Optional[Sequence[int]],
-    order_value: tuple[int, ...],
-    target_ndisplay: int,
-) -> tuple[int, ...]:
-    if requested_displayed is not None:
-        return tuple(int(idx) for idx in requested_displayed)
-
-    count = min(len(order_value), max(1, int(target_ndisplay)))
-    if count <= 0:
-        return tuple()
-    return tuple(order_value[-count:])
-
-
-def _dims_entries_from_payload(
-    payload: NotifyDimsPayload,
-    *,
-    axis_index: int,
-    axis_target: str,
-) -> list[tuple[Any, ...]]:
-    entries: list[tuple[Any, ...]] = []
-
-    current_step = tuple(int(v) for v in payload.current_step)
-    entries.append(
-        (
-            "dims",
-            "main",
-            "current_step",
-            current_step,
-        )
-    )
-
-    return entries
-
-
-def _ledger_dims_payload(ledger: ServerStateLedger) -> NotifyDimsPayload:
-    snapshot = ledger.snapshot()
-
-    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
-    if spec_entry is None:
-        raise AssertionError("ledger missing dims_spec entry")
-    assert isinstance(spec_entry, LedgerEntry), "ledger dims_spec entry malformed"
-    dims_spec = dims_spec_from_payload(spec_entry.value)
-    assert dims_spec is not None, "dims spec ledger entry missing payload"
-    validate_ledger_against_dims_spec(dims_spec, snapshot)
-
-    current_step = tuple(int(v) for v in dims_spec.current_step)
-    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
-    levels = tuple(dict(level) for level in dims_spec.levels)
-    current_level = int(dims_spec.current_level)
-    downgraded = None if dims_spec.downgraded is None else bool(dims_spec.downgraded)
-    ndisplay = int(dims_spec.ndisplay)
-    mode = "plane" if dims_spec.plane_mode else "volume"
-
-    labels = (
-        tuple(str(label) for label in dims_spec.labels)
-        if dims_spec.labels is not None
-        else None
-    )
-
-    return NotifyDimsPayload(
-        current_step=current_step,
-        level_shapes=level_shapes,
-        levels=levels,
-        current_level=current_level,
-        downgraded=downgraded,
-        mode=mode,
-        ndisplay=ndisplay,
-        labels=labels,
-        dims_spec=dims_spec,
-    )
-
-
 def reduce_bootstrap_state(
     ledger: ServerStateLedger,
     *,
@@ -851,23 +752,9 @@ def reduce_bootstrap_state(
         labels=None,
     )
 
-    dims_payload = NotifyDimsPayload(
-        current_step=resolved_step,
-        level_shapes=resolved_level_shapes,
-        levels=resolved_levels,
-        current_level=resolved_current_level,
-        downgraded=False,
-        mode=mode_value,
-        ndisplay=resolved_ndisplay,
-        dims_spec=dims_spec,
-    )
-
-    entries = _dims_entries_from_payload(
-        dims_payload,
-        axis_index=axis_index,
-        axis_target=axis_target,
-    )
-
+    entries: list[tuple[Any, ...]] = [
+        ("dims", "main", "current_step", resolved_step),
+    ]
     entries.append(("dims", "main", "dims_spec", _serialize_dims_spec(dims_spec)))
 
     axis_index_value = int(resolved_step[axis_index]) if resolved_step else 0
@@ -947,17 +834,13 @@ def reduce_dims_update(
         raise ValueError("dims update requires value or step_delta")
 
     ts = _now(timestamp)
-    payload = _ledger_dims_payload(ledger)
+    current_spec = _get_dims_spec(ledger)
 
-    step = [int(v) for v in payload.current_step]
-    ndim = len(step)
-    assert ndim > 0, "ledger dims metadata missing dimensions"
-
-    if len(step) < ndim:
-        step.extend([0] * (ndim - len(step)))
-
-    current_spec = payload.dims_spec
-    assert isinstance(current_spec, DimsSpec), "dims spec missing from ledger payload"
+    step = [int(v) for v in current_spec.current_step]
+    axis_count = len(current_spec.axes)
+    if len(step) < axis_count:
+        step.extend([0] * (axis_count - len(step)))
+    ndim = max(len(step), axis_count)
 
     idx = resolve_axis_index(
         axis,
@@ -977,7 +860,7 @@ def reduce_dims_update(
     if step_delta is not None:
         target += int(step_delta)
 
-    level_idx = int(payload.current_level)
+    level_idx = int(current_spec.current_level)
     level_shape = dims_spec_level_shape(current_spec, level_idx)
     assert idx < len(level_shape), "axis index outside level_shapes entry"
     size_val = int(level_shape[idx])
@@ -1025,7 +908,7 @@ def reduce_dims_update(
 
     if _current_ndisplay(ledger) < 3:
         plane_state = _load_plane_state(ledger)
-        level_idx = int(payload.current_level)
+        level_idx = int(current_spec.current_level)
         step_tuple = tuple(int(v) for v in requested_step)
         plane_state.target_ndisplay = 2
         plane_state.target_level = level_idx
@@ -1070,16 +953,14 @@ def reduce_dims_margins_update(
     origin: str = "control.dims",
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
-    payload = _ledger_dims_payload(ledger)
-
-    axes_spec = payload.dims_spec
-    assert isinstance(axes_spec, DimsSpec), "dims spec missing from ledger payload"
+    spec = _get_dims_spec(ledger)
+    current_step = spec.current_step
 
     idx = resolve_axis_index(
         axis,
-        order=dims_spec_order(axes_spec),
-        axis_labels=dims_spec_axis_labels(axes_spec),
-        ndim=len(payload.current_step),
+        order=dims_spec_order(spec),
+        axis_labels=dims_spec_axis_labels(spec),
+        ndim=len(current_step),
     )
     if idx is None:
         raise ValueError("unable to resolve axis index for dims margins update")
@@ -1090,13 +971,13 @@ def reduce_dims_margins_update(
     if existing_entry is not None and isinstance(existing_entry.value, (tuple, list)):
         arr = [float(v) for v in existing_entry.value]
     else:
-        arr = [0.0 for _ in range(len(payload.current_step))]
+        arr = [0.0 for _ in range(len(current_step))]
     # Ensure length
-    if len(arr) < len(payload.current_step):
-        arr.extend([0.0] * (len(payload.current_step) - len(arr)))
+    if len(arr) < len(current_step):
+        arr.extend([0.0] * (len(current_step) - len(arr)))
     arr[idx] = float(value)
 
-    axes_list = list(axes_spec.axes)
+    axes_list = list(spec.axes)
     axis_entry = axes_list[idx]
     if side_key == "margin_left":
         axes_list[idx] = replace(
@@ -1110,11 +991,11 @@ def reduce_dims_margins_update(
             margin_right_steps=float(arr[idx]),
             margin_right_world=float(arr[idx]),
         )
-    new_spec = replace(axes_spec, axes=tuple(axes_list))
+    new_spec = replace(spec, axes=tuple(axes_list))
 
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
-        step=tuple(int(v) for v in payload.current_step),
+        step=current_step,
         dims_spec_payload=_serialize_dims_spec(new_spec),
         origin=origin,
         timestamp=ts,
@@ -1151,24 +1032,21 @@ def reduce_view_update(
     origin: str = "control.view",
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
-    dims_payload = _ledger_dims_payload(ledger)
-    spec = dims_payload.dims_spec
-    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
+    spec = _get_dims_spec(ledger)
 
     if ndisplay is not None:
         target_ndisplay = 3 if int(ndisplay) >= 3 else 2
     else:
-        target_ndisplay = 3 if int(dims_payload.dims_spec.ndisplay) >= 3 else 2
+        target_ndisplay = 3 if int(spec.ndisplay) >= 3 else 2
 
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
     metadata = _metadata_from_intent(resolved_intent_id)
 
-    baseline_step = tuple(int(v) for v in dims_payload.current_step) if dims_payload.current_step else None
-    baseline_order = dims_spec_order(spec)
+    baseline_step = tuple(int(v) for v in spec.current_step) if spec.current_step else None
 
     if target_ndisplay >= 3:
         plane_state = _load_plane_state(ledger)
-        level_idx = int(dims_payload.current_level)
+        level_idx = int(spec.current_level)
         if baseline_step is not None:
             step_tuple = tuple(int(v) for v in baseline_step)
             plane_state.target_step = step_tuple
@@ -1194,22 +1072,18 @@ def reduce_view_update(
             metadata=metadata,
         )
 
-    ndim = 0
-    if baseline_step is not None:
-        ndim = len(baseline_step)
-    if ndim <= 0:
-        ndim = max(int(target_ndisplay), 1)
+    if order is not None:
+        order_value = tuple(int(idx) for idx in order)
+    else:
+        order_value = tuple(int(idx) for idx in spec.order)
+    if not order_value:
+        order_value = tuple(int(axis.index) for axis in spec.axes)
 
-    order_value = _normalize_view_order(
-        baseline_order=baseline_order,
-        requested_order=order,
-        ndim=ndim,
-    )
-    displayed_value = _normalize_view_displayed(
-        requested_displayed=displayed,
-        order_value=order_value,
-        target_ndisplay=target_ndisplay,
-    )
+    if displayed is not None:
+        displayed_value = tuple(int(idx) for idx in displayed)
+    else:
+        count = min(len(order_value), max(1, int(target_ndisplay)))
+        displayed_value = tuple(order_value[-count:]) if count > 0 else tuple()
 
     axes_list: list[DimsSpecAxis] = []
     order_lookup = {int(axis_idx): pos for pos, axis_idx in enumerate(order_value)}
@@ -1337,9 +1211,7 @@ def reduce_plane_restore(
         metadata=metadata,
     )
 
-    dims_payload = _ledger_dims_payload(ledger)
-    spec = dims_payload.dims_spec
-    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
+    spec = _get_dims_spec(ledger)
 
     if level_idx >= len(spec.level_shapes):
         level_shapes_list = [tuple(int(dim) for dim in shape) for shape in spec.level_shapes]
@@ -1501,14 +1373,14 @@ def reduce_level_update(
     if shape_source is not None:
         shape_tuple = tuple(int(v) for v in shape_source)
 
-    dims_payload = _ledger_dims_payload(ledger)
-    current_step = tuple(int(v) for v in dims_payload.current_step)
+    spec = _get_dims_spec(ledger)
+    current_step = spec.current_step
     if step_tuple is None:
         step_tuple = current_step
 
     level_shapes_payload: list[tuple[int, ...]] = []
-    if dims_payload.level_shapes:
-        level_shapes_payload = [tuple(int(v) for v in shape) for shape in dims_payload.level_shapes]
+    if spec.level_shapes:
+        level_shapes_payload = [tuple(int(v) for v in shape) for shape in spec.level_shapes]
     if shape_tuple is not None:
         while len(level_shapes_payload) <= level:
             level_shapes_payload.append(shape_tuple)
@@ -1521,9 +1393,6 @@ def reduce_level_update(
         mode_value = mode.name if isinstance(mode, RenderMode) else str(mode)
 
     next_op_seq = _next_scene_op_seq(ledger)
-
-    spec = dims_payload.dims_spec
-    assert isinstance(spec, DimsSpec), "dims spec missing from ledger payload"
 
     level_shapes_final: tuple[tuple[int, ...], ...]
     if updated_level_shapes:
@@ -1676,14 +1545,12 @@ def reduce_camera_update(
 
     if not use_volume_path:
         plane_state = _load_plane_state(ledger)
-        dims_payload = _ledger_dims_payload(ledger)
+        spec = _get_dims_spec(ledger)
         plane_state.target_ndisplay = 2
-        plane_state.target_level = int(dims_payload.current_level)
-        plane_state.applied_level = int(dims_payload.current_level)
-        if dims_payload.current_step:
-            step_tuple = tuple(int(v) for v in dims_payload.current_step)
-            plane_state.target_step = step_tuple
-            plane_state.applied_step = step_tuple
+        plane_state.target_level = int(spec.current_level)
+        plane_state.applied_level = int(spec.current_level)
+        plane_state.target_step = spec.current_step
+        plane_state.applied_step = spec.current_step
         if center is not None:
             if len(center) < 2:
                 raise ValueError("plane camera center requires at least two components")
