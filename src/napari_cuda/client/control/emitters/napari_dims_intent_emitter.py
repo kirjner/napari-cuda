@@ -12,7 +12,6 @@ from typing import Any, Optional
 
 from qtpy import QtCore
 
-from napari_cuda.client.control import state_update_actions as control_actions
 from napari_cuda.client.control.client_state_ledger import (
     ClientStateLedger,
     IntentRecord,
@@ -24,6 +23,7 @@ from napari_cuda.client.control.state_update_actions import (
     current_ndisplay,
 )
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
+from napari_cuda.shared.dims_spec import dims_spec_axis_index_for_target
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +32,6 @@ logger = logging.getLogger(__name__)
 class _PendingCoalesce:
     axis: int
     value: int
-
 
 class NapariDimsIntentEmitter:
     """Translate viewer dims interactions into coordinator intents."""
@@ -147,14 +146,13 @@ class NapariDimsIntentEmitter:
     # ------------------------------------------------------------------- public API
     def dims_step(self, axis: int | str, delta: int, *, origin: str = "ui") -> bool:
         assert self._state.dims_ready, "dims intents require initial notify"
-        idx = control_actions._axis_to_index(self._state, axis)
+        idx = self._resolve_axis_index(axis)
         if idx is None:
             return False
-        viewer_obj = self._viewer_ref() if self._viewer_ref is not None else None
-        if control_actions._is_axis_playing(viewer_obj, idx) and origin != "play":
+        if self._axis_locked(idx, origin):
             return False
         now = time.perf_counter()
-        target_label = control_actions._axis_target_label(self._state, idx)
+        target_label = self._axis_label(idx)
         if logger.isEnabledFor(logging.DEBUG):
             confirmed = self._ledger.confirmed_value('dims', target_label, 'index')
             logger.debug(
@@ -189,14 +187,13 @@ class NapariDimsIntentEmitter:
 
     def dims_set_index(self, axis: int | str, value: int, *, origin: str = "ui") -> bool:
         assert self._state.dims_ready, "dims intents require initial notify"
-        idx = control_actions._axis_to_index(self._state, axis)
+        idx = self._resolve_axis_index(axis)
         if idx is None:
             return False
-        viewer_obj = self._viewer_ref() if self._viewer_ref is not None else None
-        if control_actions._is_axis_playing(viewer_obj, idx) and origin != "play":
+        if self._axis_locked(idx, origin):
             return False
         now = time.perf_counter()
-        target_label = control_actions._axis_target_label(self._state, idx)
+        target_label = self._axis_label(idx)
         if logger.isEnabledFor(logging.DEBUG):
             confirmed = self._ledger.confirmed_value('dims', target_label, 'index')
             logger.debug(
@@ -253,7 +250,7 @@ class NapariDimsIntentEmitter:
 
     def _emit_margin_update(self, axis_idx: int, key: str, value: float) -> None:
         assert self._state.dims_ready, "dims intents require initial notify"
-        target_label = control_actions._axis_target_label(self._state, axis_idx)
+        target_label = self._axis_label(axis_idx)
         ok, _ = _emit_state_update(
             self._state,
             self._loop_state,
@@ -303,7 +300,7 @@ class NapariDimsIntentEmitter:
             return False
         nd_value = int(ndisplay)
         nd_target = 3 if nd_value >= 3 else 2
-        cur = control_actions.current_ndisplay(self._state, self._ledger)
+        cur = current_ndisplay(self._state, self._ledger)
         if cur is not None and int(cur) == nd_target:
             return True
         ok, _ = _emit_state_update(
@@ -474,5 +471,36 @@ class NapariDimsIntentEmitter:
             self._play_axis = None
         elif self._play_axis is None and changed_axis is not None:
             self._play_axis = int(changed_axis)
+
+    def _axis_label(self, axis_idx: int) -> str:
+        spec = self._state.dims_spec
+        assert spec is not None, "dims spec required"
+        assert 0 <= axis_idx < len(spec.axes), "axis index out of range"
+        return spec.axes[axis_idx].label
+
+    def _resolve_axis_index(self, axis: int | str) -> int | None:
+        spec = self._state.dims_spec
+        if spec is None:
+            return None
+        if axis == "primary":
+            if self._state.primary_axis_index is not None:
+                return int(self._state.primary_axis_index)
+            if spec.order:
+                return int(spec.order[0])
+            return 0
+        if isinstance(axis, (int, float)):
+            idx = int(axis)
+            if 0 <= idx < len(spec.axes):
+                return idx
+            return None
+        return dims_spec_axis_index_for_target(spec, str(axis))
+
+    def _axis_locked(self, axis_idx: int, origin: str) -> bool:
+        viewer = self._viewer_ref() if self._viewer_ref is not None else None
+        if origin == "play" or viewer is None:
+            return False
+        is_playing = bool(getattr(viewer, "_is_playing", False))
+        play_axis = getattr(viewer, "_play_axis", None)
+        return bool(is_playing) and play_axis is not None and int(play_axis) == int(axis_idx)
 
 __all__ = ["NapariDimsIntentEmitter"]

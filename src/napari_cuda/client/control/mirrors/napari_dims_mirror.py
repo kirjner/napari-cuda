@@ -99,16 +99,10 @@ class NapariDimsMirror:
         viewer_update = viewer_update_from_spec(dims_spec, projection)
         self._loop_state.last_dims_spec = dims_spec
 
-        axis_labels = viewer_update['axis_labels']
-        current_step = viewer_update['current_step']
-        entries: list[tuple[Any, ...]] = []
-        for axis_idx, raw_value in enumerate(current_step):
-            label = axis_labels[axis_idx] if axis_idx < len(axis_labels) else str(axis_idx)
-            entries.append(('dims', str(label), 'index', int(raw_value)))
-        entries.append(("dims", "main", "dims_spec", dims_spec_to_payload(dims_spec)))
-
-        ndisplay = viewer_update['ndisplay']
-        entries.append(('view', 'main', 'ndisplay', int(ndisplay)))
+        entries: list[tuple[Any, ...]] = [
+            ("dims", "main", "dims_spec", dims_spec_to_payload(dims_spec)),
+            ('view', 'main', 'ndisplay', int(viewer_update['ndisplay'])),
+        ]
 
         order = viewer_update['order']
         if order:
@@ -126,8 +120,7 @@ class NapariDimsMirror:
                 entries.append(('multiscale', 'main', 'policy', level_snapshot['policy']))
             if 'downgraded' in level_snapshot:
                 entries.append(('multiscale', 'main', 'downgraded', bool(level_snapshot['downgraded'])))
-        if entries:
-            self._ledger.batch_record_confirmed(entries)
+        self._ledger.batch_record_confirmed(entries)
 
         if not state.dims_ready:
             state.dims_ready = True

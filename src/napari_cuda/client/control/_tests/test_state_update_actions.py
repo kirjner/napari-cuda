@@ -171,10 +171,7 @@ def _make_state() -> tuple[
         dims_rate_hz=60.0,
         wheel_step=1,
         settings_rate_hz=30.0,
-        dims_z=None,
-        dims_z_min=None,
-        dims_z_max=None,
-    )
+                            )
     state = control_actions.ControlStateContext.from_env(env)
     loop_state = ClientLoopState()
     loop_state.control_state = state

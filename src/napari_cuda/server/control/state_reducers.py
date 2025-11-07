@@ -1002,15 +1002,13 @@ def reduce_dims_margins_update(
         op_seq=_next_scene_op_seq(ledger),
         op_kind="dims-update",
     )
-    # Additionally store margins arrays atomically
-    entries: list[tuple] = [("dims", "main", side_key, tuple(float(v) for v in arr))]
-    ledger.batch_record_confirmed(entries, origin=origin, timestamp=ts)
+    arr_tuple = tuple(float(v) for v in arr)
 
     return ServerLedgerUpdate(
         scope="dims",
         target=str(axis),
         key=side_key,
-        value=tuple(float(v) for v in arr),
+        value=arr_tuple,
         intent_id=intent_id,
         timestamp=ts,
         origin=origin,

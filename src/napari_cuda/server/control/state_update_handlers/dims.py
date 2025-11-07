@@ -31,11 +31,12 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
         return True
 
     step_delta: Optional[int] = None
-    value_arg: Optional[float] = None
+    index_value: Optional[int] = None
+    margin_value: Optional[float] = None
 
     if key == "index":
         if isinstance(ctx.value, Integral):
-            value_arg = float(int(ctx.value))
+            index_value = int(ctx.value)
         else:
             logger.debug("state.update dims ignored (non-integer index) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
@@ -47,7 +48,6 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
     elif key == "step":
         if isinstance(ctx.value, Integral):
             step_delta = int(ctx.value)
-            value_arg = float(step_delta)
         else:
             logger.debug("state.update dims ignored (non-integer step) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
@@ -58,7 +58,7 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
             return True
     elif key in {"margin_left", "margin_right"}:
         try:
-            value_arg = float(ctx.value)
+            margin_value = float(ctx.value)
         except Exception:
             logger.debug("state.update dims ignored (non-float margin) axis=%s value=%r", target, ctx.value)
             await ctx.reject(
@@ -76,16 +76,14 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
         )
         return True
 
-    assert value_arg is not None or step_delta is not None, "dims update missing value"
-
     if key in {"margin_left", "margin_right"}:
-        assert value_arg is not None, "margin update requires value"
+        assert margin_value is not None, "margin update requires value"
         try:
             result = reduce_dims_margins_update(
                 server._state_ledger,
                 axis=str(target),
                 side=key,
-                value=float(value_arg),
+                value=margin_value,
                 intent_id=ctx.intent_id,
                 timestamp=ctx.timestamp,
                 origin="client.state.dims",
@@ -117,7 +115,7 @@ async def handle_dims_update(ctx: "StateUpdateContext") -> bool:
                 server._state_ledger,
                 axis=str(target),
                 prop=str(key),
-                value=int(value_arg) if key == "index" else None,
+                value=index_value if key == "index" else None,
                 step_delta=step_delta,
                 intent_id=ctx.intent_id,
                 timestamp=ctx.timestamp,

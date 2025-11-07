@@ -96,10 +96,7 @@ def _make_loop() -> ClientStreamLoop:
         dims_rate_hz=60.0,
         wheel_step=1,
         settings_rate_hz=30.0,
-        dims_z=None,
-        dims_z_min=None,
-        dims_z_max=None,
-    )
+                            )
     loop._control_state = ControlStateContext.from_env(env)
     loop._control_state.session_id = "session-test"
     loop._loop_state.control_state = loop._control_state

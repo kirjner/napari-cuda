@@ -51,9 +51,6 @@ class ControlStateContext:
     wheel_step: float = 1.0
     settings_min_dt: float = 0.0
     last_settings_send: float = 0.0
-    dims_z: float | None = None
-    dims_z_min: float | None = None
-    dims_z_max: float | None = None
     control_runtimes: dict[str, ControlRuntime] = field(default_factory=dict)
     view_state: dict[str, Any] = field(default_factory=dict)
     volume_state: dict[str, Any] = field(default_factory=dict)
@@ -68,14 +65,6 @@ class ControlStateContext:
         state.wheel_step = float(getattr(env_cfg, 'wheel_step', 1.0) or 1.0)
         settings_rate = getattr(env_cfg, 'settings_rate_hz', 1.0) or 1.0
         state.settings_min_dt = 1.0 / max(1.0, float(settings_rate))
-        state.dims_z = getattr(env_cfg, 'dims_z', None)
-        state.dims_z_min = getattr(env_cfg, 'dims_z_min', None)
-        state.dims_z_max = getattr(env_cfg, 'dims_z_max', None)
-        if state.dims_z is not None:
-            if state.dims_z_min is not None and state.dims_z < state.dims_z_min:
-                state.dims_z = state.dims_z_min
-            if state.dims_z_max is not None and state.dims_z > state.dims_z_max:
-                state.dims_z = state.dims_z_max
         return state
 
     def next_intent_ids(self) -> tuple[str, str]:
@@ -143,14 +132,9 @@ def handle_notify_camera(
     return mode_key, delta_payload
 
 
-def _axis_target_label(state: ControlStateContext, axis_idx: int) -> str:
-    spec = state.dims_spec
-    assert isinstance(spec, DimsSpec), "dims spec required"
-    assert 0 <= axis_idx < len(spec.axes), "axis index out of range"
-    return spec.axes[axis_idx].label
-
 def _runtime_key(scope: str, target: str, key: str) -> str:
     return f"{scope}:{target}:{key}"
+
 
 def current_ndisplay(state: ControlStateContext, ledger: ClientStateLedger) -> Optional[int]:
     return dims_current_ndisplay(state, ledger)
@@ -208,6 +192,7 @@ def _emit_state_update(
     runtime.active_intent_id = intent_id
     runtime.active_frame_id = frame_id
     return True, pending.projection_value
+
 
 def _update_runtime_from_ack_outcome(state: ControlStateContext, outcome: AckReconciliation) -> None:
     if outcome.scope is None or outcome.target is None or outcome.key is None:
@@ -785,17 +770,6 @@ def hud_snapshot(
     return snap
 
 
-def _axis_to_index(state: ControlStateContext, axis: int | str) -> Optional[int]:
-    if axis == 'primary':
-        return int(state.primary_axis_index) if state.primary_axis_index is not None else 0
-    if isinstance(axis, (int, float)) or (isinstance(axis, str) and str(axis).isdigit()):
-        return int(axis)
-    spec = state.dims_spec
-    if isinstance(spec, DimsSpec):
-        return dims_spec_axis_index_for_target(spec, str(axis))
-    return None
-
-
 def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
     now = time.perf_counter()
     if (now - float(state.last_settings_send or 0.0)) < state.settings_min_dt:
@@ -807,14 +781,6 @@ def _rate_gate_settings(state: ControlStateContext, origin: str) -> bool:
 
 def _is_volume_mode(state: ControlStateContext, ledger: ClientStateLedger) -> bool:
     return dims_is_volume_mode(state, ledger)
-
-
-def _is_axis_playing(viewer_obj, axis_index: int) -> bool:
-    if viewer_obj is None:
-        return False
-    is_playing = bool(getattr(viewer_obj, '_is_playing', False))
-    play_axis = getattr(viewer_obj, '_play_axis', None)
-    return bool(is_playing) and play_axis is not None and int(play_axis) == int(axis_index)
 
 
 def _clamp01(a: float) -> float:

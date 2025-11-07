@@ -45,9 +45,6 @@ class ClientLoopConfig:
     watchdog_ms: int
     evloop_stall_ms: int
     evloop_sample_ms: int
-    dims_z: Optional[int]
-    dims_z_min: Optional[int]
-    dims_z_max: Optional[int]
     wheel_step: int
     dims_rate_hz: float
     camera_rate_hz: float
@@ -83,10 +80,6 @@ def load_client_loop_config() -> ClientLoopConfig:
     evloop_stall_ms = max(0, int(env_float("NAPARI_CUDA_CLIENT_EVENTLOOP_STALL_MS", 0.0)))
     evloop_sample_ms = max(50, int(env_float("NAPARI_CUDA_CLIENT_EVENTLOOP_SAMPLE_MS", 100.0)))
 
-    dims_z = _optional_int("NAPARI_CUDA_ZARR_Z")
-    dims_z_min = _optional_int("NAPARI_CUDA_ZARR_Z_MIN")
-    dims_z_max = _optional_int("NAPARI_CUDA_ZARR_Z_MAX")
-
     wheel_step_raw = _optional_int("NAPARI_CUDA_WHEEL_Z_STEP")
     wheel_step = wheel_step_raw if wheel_step_raw and wheel_step_raw > 0 else 1
 
@@ -120,9 +113,6 @@ def load_client_loop_config() -> ClientLoopConfig:
         watchdog_ms=watchdog_ms,
         evloop_stall_ms=evloop_stall_ms,
         evloop_sample_ms=evloop_sample_ms,
-        dims_z=dims_z,
-        dims_z_min=dims_z_min,
-        dims_z_max=dims_z_max,
         wheel_step=wheel_step,
         dims_rate_hz=dims_rate_hz,
         camera_rate_hz=camera_rate_hz,
