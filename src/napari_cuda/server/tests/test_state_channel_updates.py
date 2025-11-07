@@ -925,6 +925,7 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     assert spec_payload is not None
     assert int(spec_payload.ndisplay) == 3
     assert int(spec_payload.current_level) == 1
+    assert tuple(int(v) for v in spec_payload.displayed) == (0, 1, 2)
 
 
 
