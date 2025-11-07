@@ -68,7 +68,6 @@ def emitter_setup() -> tuple[NapariDimsIntentEmitter, ControlStateContext, Clien
         settings_rate_hz=30.0,
                             )
     state = ControlStateContext.from_env(env)
-    state.dims_ready = True
     _seed_default_spec(state)
     loop_state = ClientLoopState()
     loop_state.control_state = state

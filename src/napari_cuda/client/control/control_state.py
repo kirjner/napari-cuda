@@ -47,7 +47,6 @@ class ControlStateContext:
     """Mutable control state hoisted out of the loop object."""
 
     # Dims/session
-    dims_ready: bool = False
     dims_spec: Any | None = None
     primary_axis_index: int | None = None
     session_id: Optional[str] = None
@@ -282,13 +281,11 @@ __all__ = [
 
 
 def on_state_connected(state: ControlStateContext) -> None:
-    state.dims_ready = False
     state.dims_spec = None
     state.primary_axis_index = None
 
 
 def on_state_disconnected(loop_state, state: ControlStateContext) -> None:
-    state.dims_ready = False
     state.dims_spec = None
     state.primary_axis_index = None
     loop_state.pending_intents.clear()

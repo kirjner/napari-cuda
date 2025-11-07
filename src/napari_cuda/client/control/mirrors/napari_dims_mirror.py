@@ -76,6 +76,7 @@ class NapariDimsMirror:
         dims_spec = payload.dims_spec
         assert isinstance(dims_spec, DimsSpec), 'notify.dims requires dims_spec'
 
+        first_ready = state.dims_spec is None
         state.dims_spec = dims_spec
         projection = project_dims(dims_spec)
         state.primary_axis_index = projection.primary_axis
@@ -128,8 +129,7 @@ class NapariDimsMirror:
                 entries.append(('multiscale', 'main', 'downgraded', bool(level_snapshot['downgraded'])))
         self._ledger.batch_record_confirmed(entries)
 
-        if not state.dims_ready:
-            state.dims_ready = True
+        if first_ready:
             logger.info('notify.dims: metadata received; client intents enabled')
             if self._notify_first_ready is not None:
                 self._notify_first_ready()

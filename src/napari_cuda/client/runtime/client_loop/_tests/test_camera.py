@@ -160,7 +160,6 @@ def test_handle_pointer_pan_posts_delta(qtbot) -> None:
 def test_handle_pointer_orbit_posts_delta(qtbot) -> None:
     control_state, cam_state, emitter, dispatched = _make_state(qtbot)
     _seed_volume_spec(control_state)
-    control_state.dims_ready = True
 
     camera.handle_pointer(
         emitter,

@@ -145,7 +145,7 @@ class NapariDimsIntentEmitter:
 
     # ------------------------------------------------------------------- public API
     def dims_step(self, axis: int | str, delta: int, *, origin: str = "ui") -> bool:
-        assert self._state.dims_ready, "dims intents require initial notify"
+        assert self._state.dims_spec is not None, "dims intents require initial notify"
         idx = self._resolve_axis_index(axis)
         if idx is None:
             return False
@@ -186,7 +186,7 @@ class NapariDimsIntentEmitter:
         return True
 
     def dims_set_index(self, axis: int | str, value: int, *, origin: str = "ui") -> bool:
-        assert self._state.dims_ready, "dims intents require initial notify"
+        assert self._state.dims_spec is not None, "dims intents require initial notify"
         idx = self._resolve_axis_index(axis)
         if idx is None:
             return False
@@ -249,7 +249,7 @@ class NapariDimsIntentEmitter:
         self._last_margin_right = right
 
     def _emit_margin_update(self, axis_idx: int, key: str, value: float) -> None:
-        assert self._state.dims_ready, "dims intents require initial notify"
+        assert self._state.dims_spec is not None, "dims intents require initial notify"
         target_label = self._axis_label(axis_idx)
         ok, _ = _emit_state_update(
             self._state,
@@ -295,7 +295,7 @@ class NapariDimsIntentEmitter:
         return sent
 
     def view_set_ndisplay(self, ndisplay: int, *, origin: str = "ui") -> bool:
-        assert self._state.dims_ready, "ndisplay intents require dims ready"
+        assert self._state.dims_spec is not None, "ndisplay intents require dims ready"
         if _rate_gate_settings(self._state, origin):
             return False
         nd_value = int(ndisplay)
@@ -317,7 +317,7 @@ class NapariDimsIntentEmitter:
         return ok
 
     def toggle_ndisplay(self, *, origin: str = "ui") -> bool:
-        assert self._state.dims_ready, "ndisplay intents require dims ready"
+        assert self._state.dims_spec is not None, "ndisplay intents require dims ready"
         current = current_ndisplay(self._state, self._ledger)
         target = 2 if current == 3 else 3
         return self.view_set_ndisplay(target, origin=origin)

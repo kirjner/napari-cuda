@@ -1276,15 +1276,15 @@ class ClientStreamLoop:
         )
 
     def _on_pointer(self, data: dict) -> None:
-        if not self._control_state.dims_ready:
+        spec = self._control_state.dims_spec
+        if spec is None:
             return
         emitter = self._camera_emitter
         if emitter is None:
             logger.debug("pointer event skipped: camera emitter unavailable")
             return
-        spec = self._control_state.dims_spec
         ndisplay = current_ndisplay(self._control_state, self._state_ledger)
-        in_vol3d = bool(spec is not None and ndisplay == 3 and not spec.plane_mode)
+        in_vol3d = bool(ndisplay == 3 and not spec.plane_mode)
         camera.handle_pointer(
             emitter,
             self._camera_state,
