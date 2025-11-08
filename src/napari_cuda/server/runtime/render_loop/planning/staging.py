@@ -165,9 +165,8 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
         if rect is not None:
             runner.update_camera_rect(rect)
         if tick_iface.current_level_index() == int(runner.state.target_level):
+            # Mark plane level applied only in PLANE mode.
             runner.mark_level_applied(tick_iface.current_level_index())
-    elif runner is not None and tick_iface.current_level_index() == int(runner.state.target_level):
-        runner.mark_level_applied(tick_iface.current_level_index())
 
     if (
         drain_res.render_marked

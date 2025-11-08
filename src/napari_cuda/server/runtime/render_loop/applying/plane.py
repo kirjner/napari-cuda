@@ -129,7 +129,9 @@ def apply_dims_from_snapshot(
     if dims.ndim != ndim:
         dims.ndim = ndim
 
-    snapshot_iface.set_current_level_index(int(dims_spec.current_level))
+    # Do not mutate worker level caches here. Dims apply should only update
+    # the napari viewer's dims model. Level switching is handled by the
+    # planner/apply stage to ensure consistency with cached state.
 
     if len(step_tuple) < ndim:
         step_tuple = step_tuple + tuple(0 for _ in range(ndim - len(step_tuple)))

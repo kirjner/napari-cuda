@@ -40,6 +40,12 @@ class RenderApplyInterface:
     def set_current_level_index(self, level: int) -> None:
         self.worker._set_current_level_index(int(level))  # type: ignore[attr-defined]
 
+    def set_plane_level_index(self, level: int) -> None:
+        self.worker._set_plane_level_index(int(level))  # type: ignore[attr-defined]
+
+    def set_volume_level_index(self, level: int) -> None:
+        self.worker._set_volume_level_index(int(level))  # type: ignore[attr-defined]
+
     def configure_camera_for_mode(self) -> None:
         self.worker._configure_camera_for_mode()  # type: ignore[attr-defined]
 

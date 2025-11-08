@@ -8,8 +8,8 @@ the control/runtime/engine dependency contract this plan works toward.
 ## 1. Current State Inventory (truth table)
 
 ### 1.1 Snapshot ingest → apply
-- `render_loop.applying.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/apply.py:50`) resolves snapshot ops before touching napari state, relies on the render mailbox to filter duplicate scene snapshots, and only suppresses fit callbacks while applying dims if the dims signature token changed.
-- `_resolve_snapshot_ops` computes the per-mode metadata (level intent, ROI alignment, slice signature) and `_apply_snapshot_ops` performs the actual mutations, invoking `apply_volume_level` or `apply_slice_level` as needed.
+- `render_loop.applying.apply.apply_render_snapshot` (`src/napari_cuda/server/runtime/render_loop/apply/apply.py:50`) now hands every snapshot to the `ViewportPlanner`, captures the resulting `ViewportOps`, and applies them via `apply_viewport_plan` so snapshot and steady-state ticks share the same path.
+- The planner is the sole authority for level intent, ROI alignment, and slice signatures; `apply_viewport_plan` simply performs the requested mode/metadata/ROI work and feeds the applied level back into the ledger.
 - Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 
 ### 1.2 Worker fields mutated during apply
@@ -22,8 +22,7 @@ the control/runtime/engine dependency contract this plan works toward.
 - The runner maintains plane targets (`target_level`, `target_step`, `pose`, `pending_roi`, reload flags, pose reason) and short-circuits volume handling by clearing reload flags when `target_ndisplay >= 3` (`src/napari_cuda/server/runtime/viewport/runner.py`).
 - ROI intent resolution depends on `roi_resolver` to call `viewport_roi_for_level` and stores signatures in `pending_roi_signature` (`viewport/runner.py:214`).
 
-### 1.4 Worker loop interactions
-- `render_loop.ticks.viewport.run` asks the `ViewportPlanner` for a `ViewportPlan`. If the plan contains a slice task and we are still in plane mode, it routes through `render_loop.applying.plane.apply_slice_roi` (`src/napari_cuda/server/runtime/render_loop/ticks/viewport.py`).
+- `render_loop.ticks.viewport.run` asks the `ViewportPlanner` for a `ViewportOps` and immediately hands it to `apply_viewport_plan`, so steady ticks no longer duplicate plane/volume metadata logic (`src/napari_cuda/server/runtime/render_loop/ticks/viewport.py`).
 - Snapshot drain (`egl_worker.py:1488`) rebuilds `SceneStateApplyContext`, updates `_z_index`, `_data_wh`, and mirrors runner state by calling `mark_level_applied` when the staged level matches the target.
 - `ensure_scene_source` and `reset_worker_camera` (server/runtime/worker_runtime.py) mutate `worker._active_ms_level`, `_zarr_*`, `_data_wh`, and depend on `worker.use_volume` to branch camera resets (`worker_runtime.py:16`–`worker_runtime.py:105`).
 
@@ -46,11 +45,11 @@ the control/runtime/engine dependency contract this plan works toward.
 - `VolumeState` owns: current level, cached pose (`center`, `angles`, `distance`, `fov`), downgrade flag, and any cached extents/scale.
 - `ViewportState.mode` (enum) replaces `worker.use_volume`.
 
--### 2.2 Snapshot helpers
-- Plane path resolved by `_resolve_snapshot_ops` (plane branch) and applied via `_apply_snapshot_ops` plus `slice_snapshot.apply_slice_level`:
+### 2.2 Snapshot helpers
+- Plane path resolved by the `ViewportPlanner` (plane branch) and applied via `apply_viewport_plan` plus `slice_snapshot.apply_slice_level`:
   - Computes aligned ROI, resolves chunk shape, loads slab through `slice_snapshot` helpers, and writes `PlaneState.applied_*`.
   - Emits pose once per intent and updates ledger metadata with `viewer_stage.apply_plane_metadata`.
-- Volume path uses the same `_resolve_snapshot_ops` / `_apply_snapshot_ops` pairing:
+- Volume path uses the same planner output / `apply_viewport_plan` pairing:
   - Selects level (with downgrades), stages metadata, loads volume, applies camera pose, and updates `VolumeState`.
 - Viewer metadata adjustments live in `viewer_stage.apply_plane_metadata` / `viewer_stage.apply_volume_metadata`, responsible for napari dims updates, camera range, and layer logging.
 

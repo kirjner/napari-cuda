@@ -939,18 +939,14 @@ def reduce_dims_update(
     )
 
     if _current_ndisplay(ledger) < 3:
+        # Plane dims intent: update only target intent, never mutate applied cache.
         plane_state = _load_plane_state(ledger)
         level_idx = int(current_spec.current_level)
         step_tuple = tuple(int(v) for v in requested_step)
         plane_state.target_ndisplay = 2
         plane_state.target_level = level_idx
         plane_state.target_step = step_tuple
-        plane_state.applied_level = level_idx
-        plane_state.applied_step = step_tuple
         plane_state.awaiting_level_confirm = False
-        plane_state.camera_pose_dirty = False
-        plane_state.applied_roi = None
-        plane_state.applied_roi_signature = None
         metadata = _metadata_from_intent(resolved_intent_id)
         _store_plane_state(
             ledger,
@@ -997,7 +993,15 @@ def reduce_view_update(
 
     baseline_step = tuple(int(v) for v in spec.current_step) if spec.current_step else None
 
+    current_level_value = int(spec.current_level)
+    current_step_value: Optional[tuple[int, ...]] = spec.current_step
+
     if target_ndisplay >= 3:
+        coarsest_level = (
+            len(spec.level_shapes) - 1
+            if spec.level_shapes
+            else current_level_value
+        )
         plane_state = _load_plane_state(ledger)
         level_idx = int(spec.current_level)
         if baseline_step is not None:
@@ -1017,6 +1021,7 @@ def reduce_view_update(
         )
 
         volume_state = _load_volume_state(ledger)
+        volume_state.level = int(coarsest_level)
         _store_volume_state(
             ledger,
             volume_state,
@@ -1024,6 +1029,15 @@ def reduce_view_update(
             timestamp=ts,
             metadata=metadata,
         )
+
+        current_level_value = int(coarsest_level)
+        if baseline_step is not None:
+            current_step_value = dims_spec_remap_step_for_level(
+                spec,
+                step=tuple(int(v) for v in baseline_step),
+                prev_level=int(spec.current_level),
+                next_level=int(coarsest_level),
+            )
 
     if order is not None:
         order_value = tuple(int(idx) for idx in order)
@@ -1058,6 +1072,8 @@ def reduce_view_update(
         displayed=tuple(int(v) for v in displayed_value),
         plane_mode=int(target_ndisplay) < 3,
         axes=tuple(axes_list),
+        current_level=current_level_value,
+        current_step=tuple(int(v) for v in current_step_value) if current_step_value is not None else spec.current_step,
     )
 
     op_entry = ledger.get("scene", "main", "op_seq")
@@ -1127,18 +1143,13 @@ def reduce_plane_restore(
         payload_value = dict(plane_entry.value)
         base_plane = PlaneState(**payload_value)
 
-    base_plane.target_level = level_idx
+    # Pose-only restore; planner/apply will replay cached level/step/ROI.
     base_plane.target_ndisplay = 2
-    base_plane.target_step = step_tuple
-    base_plane.applied_level = level_idx
-    base_plane.applied_step = step_tuple
     base_plane.update_pose(
         rect=rect_tuple,
         center=(center_tuple[0], center_tuple[1]),
         zoom=zoom_value,
     )
-    base_plane.applied_roi = None
-    base_plane.applied_roi_signature = None
     base_plane.camera_pose_dirty = False
 
     next_op_seq = _next_scene_op_seq(ledger)
@@ -1164,44 +1175,7 @@ def reduce_plane_restore(
         metadata=metadata,
     )
 
-    spec = _get_dims_spec(ledger)
-
-    if level_idx >= len(spec.level_shapes):
-        level_shapes_list = [tuple(int(dim) for dim in shape) for shape in spec.level_shapes]
-        if level_shapes_list:
-            template_shape = level_shapes_list[-1]
-        else:
-            template_shape = tuple(1 for _ in step_tuple)
-        while len(level_shapes_list) <= level_idx:
-            level_shapes_list.append(tuple(int(dim) for dim in template_shape))
-        spec = replace(spec, level_shapes=tuple(level_shapes_list))
-
-    step_tuple = dims_spec_clamp_step(spec, int(level_idx), step_tuple)
-
-    axes_list = []
-    for axis_idx, axis in enumerate(spec.axes):
-        current_step_val = step_tuple[axis_idx] if axis_idx < len(step_tuple) else axis.current_step
-        axes_list.append(replace(axis, current_step=int(current_step_val)))
-
-    new_spec = replace(
-        spec,
-        current_level=int(level_idx),
-        current_step=step_tuple,
-        ndisplay=2,
-        plane_mode=True,
-        axes=tuple(axes_list),
-    )
-
-    apply_dims_step_transaction(
-        ledger=ledger,
-        step=step_tuple,
-        dims_spec_payload=_serialize_dims_spec(new_spec),
-        origin=origin,
-        timestamp=ts,
-        op_seq=_next_scene_op_seq(ledger),
-        op_kind="plane-restore",
-    )
-
+    # Do not write dims/multiscale here; planner/apply will drive level/step.
     return stored
 
 
@@ -1357,12 +1331,17 @@ def reduce_level_update(
     if level_shapes_final:
         previous_level = int(spec.current_level)
         if previous_level != int(level):
-            step_tuple = dims_spec_remap_step_for_level(
-                spec,
-                step=base_step,
-                prev_level=previous_level,
-                next_level=int(level),
-            )
+            # When invoked from runtime.apply, the provided step already refers to the
+            # target level. Do not remap from previous level; simply clamp to target.
+            if str(origin).startswith("runtime.apply"):
+                step_tuple = dims_spec_clamp_step(spec, int(level), base_step)
+            else:
+                step_tuple = dims_spec_remap_step_for_level(
+                    spec,
+                    step=base_step,
+                    prev_level=previous_level,
+                    next_level=int(level),
+                )
         else:
             step_tuple = dims_spec_clamp_step(spec, int(level), base_step)
     else:
@@ -1407,6 +1386,12 @@ def reduce_level_update(
     plane_payload = _plain_plane_state(plane_state)
     if plane_payload is not None:
         plane_model = PlaneState(**plane_payload)
+        # When recording an applied level from the worker, normalize request to applied
+        # so stale request.step/level from prior snapshots do not linger in the store.
+        if str(origin).startswith("runtime.apply"):
+            plane_model.request.level = int(plane_model.applied.level)
+            plane_model.request.step = plane_model.applied.step
+            plane_model.request.awaiting_level_confirm = False
         _store_plane_state(
             ledger,
             plane_model,
@@ -1495,13 +1480,9 @@ def reduce_camera_update(
         use_volume_path = True
 
     if not use_volume_path:
+        # Update only plane camera pose; do not mutate applied level/step/ROI.
         plane_state = _load_plane_state(ledger)
-        spec = _get_dims_spec(ledger)
         plane_state.target_ndisplay = 2
-        plane_state.target_level = int(spec.current_level)
-        plane_state.applied_level = int(spec.current_level)
-        plane_state.target_step = spec.current_step
-        plane_state.applied_step = spec.current_step
         if center is not None:
             if len(center) < 2:
                 raise ValueError("plane camera center requires at least two components")
@@ -1527,8 +1508,6 @@ def reduce_camera_update(
             ack["rect"] = [rect_tuple[0], rect_tuple[1], rect_tuple[2], rect_tuple[3]]
             _append_entry("camera_plane", "rect", rect_tuple)
         plane_state.camera_pose_dirty = False
-        plane_state.applied_roi = None
-        plane_state.applied_roi_signature = None
         _store_plane_state(
             ledger,
             plane_state,

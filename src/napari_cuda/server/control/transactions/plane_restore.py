@@ -88,10 +88,10 @@ def apply_plane_restore_transaction(
         if op_kind is not None:
             batch_entries.append(("scene", "main", "op_kind", str(op_kind)))
 
+    # Pose-only restore: do not mutate multiscale level or dims current_step here.
+    # Level/step are applied deterministically by the worker on replay.
     batch_entries.extend(
         [
-            ("multiscale", "main", "level", level_idx),
-            ("dims", "main", "current_step", step_tuple),
             ("camera_plane", "main", "center", plane_center_tuple),
             ("camera_plane", "main", "zoom", zoom_value),
             ("camera_plane", "main", "rect", rect_tuple),

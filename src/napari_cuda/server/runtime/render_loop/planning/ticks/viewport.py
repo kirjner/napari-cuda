@@ -6,17 +6,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.render_loop.applying.plane import (
-    apply_slice_level,
-    apply_slice_roi,
-)
-from napari_cuda.server.runtime.render_loop.applying.viewer_metadata import (
-    apply_plane_metadata,
-    apply_volume_metadata,
-)
-from napari_cuda.server.runtime.render_loop.applying.volume import (
-    apply_volume_level,
-)
+from napari_cuda.server.runtime.render_loop.applying.apply import apply_viewport_plan
 from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
@@ -51,7 +41,12 @@ def run(worker: EGLRendererWorker) -> None:
     def _resolve(level: int, _rect):
         return apply_iface.viewport_roi_for_level(source, int(level), quiet=True)
 
-    plan = runner.plan_tick(source=source, roi_resolver=_resolve)
+    level_resolver = lambda src, level: apply_iface.resolve_volume_intent_level(src, int(level))
+    plan = runner.plan_tick(
+        source=source,
+        roi_resolver=_resolve,
+        volume_level_resolver=level_resolver,
+    )
     if logger.isEnabledFor(logging.DEBUG):
         logger.debug(
             "viewport.tick plan level_change=%s slice=%s pose_event=%s target_level=%d applied_level=%d awaiting=%s",
@@ -66,52 +61,8 @@ def run(worker: EGLRendererWorker) -> None:
     if plan.zoom_hint is not None:
         tick_iface.render_mailbox_record_zoom_hint(float(plan.zoom_hint))
 
-    level_applied = False
-
-    if plan.level_change:
-        target_level = int(runner.state.request.level)
-        prev_level = tick_iface.current_level_index()
-        applied_context = plan.level_context
-        assert applied_context is not None, "planner must supply level context for level_change"
-
-        apply_iface.set_current_level_index(int(applied_context.level))
-        if apply_iface.viewport_state.mode is RenderMode.VOLUME:
-            apply_volume_metadata(apply_iface, source, applied_context)
-            apply_volume_level(
-                apply_iface,
-                source,
-                applied_context,
-            )
-        else:
-            apply_plane_metadata(apply_iface, source, applied_context)
-            apply_slice_level(apply_iface, source, applied_context)
-        level_applied = True
-        runner.mark_level_applied(int(applied_context.level))
-
-    if (
-        plan.slice_task is not None
-        and apply_iface.viewport_state.mode is not RenderMode.VOLUME
-        and not level_applied
-    ):
-        slice_task = plan.slice_task
-        level_int = int(slice_task.level)
-        step_tuple = tuple(int(v) for v in slice_task.step) if slice_task.step is not None else None
-        signature_token = (level_int, step_tuple, slice_task.signature)
-        if apply_iface.last_slice_signature() == signature_token:
-            runner.mark_slice_applied(slice_task)
-        else:
-            apply_slice_roi(
-                apply_iface,
-                source,
-                level_int,
-                slice_task.roi,
-                update_contrast=False,
-                step=step_tuple,
-            )
-            runner.mark_slice_applied(slice_task)
+    apply_viewport_plan(apply_iface, None, plan, source=source)
 
     rect = apply_iface.current_panzoom_rect()
     if rect is not None:
         runner.update_camera_rect(rect)
-    if plan.pose_event is not None:
-        apply_iface.emit_current_camera_pose(plan.pose_event.value)

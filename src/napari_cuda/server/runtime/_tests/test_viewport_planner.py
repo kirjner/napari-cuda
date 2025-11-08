@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Optional
 
 from napari_cuda.server.data import SliceROI
@@ -19,9 +20,21 @@ from napari_cuda.server.scene import (
 class _StubSource:
     chunks: tuple[int, ...] = (1, 8, 8)
     axes: tuple[str, ...] = ("z", "y", "x")
+    dtype: str = "float32"
+
+    def __post_init__(self) -> None:
+        self.level_descriptors = [SimpleNamespace(shape=(16, 16, 16)) for _ in range(3)]
 
     def get_level(self, level: int):
         return type("_Level", (), {"chunks": self.chunks})()
+
+    def level_scale(self, level: int) -> tuple[float, float, float]:
+        _ = level
+        return (1.0, 1.0, 1.0)
+
+    def ensure_contrast(self, *, level: int):
+        _ = level
+        return (0.0, 1.0)
 
 
 def _make_snapshot(
@@ -48,6 +61,14 @@ def _roi_resolver(level: int, rect: tuple[float, float, float, float]) -> SliceR
     return SliceROI(int(y0 // 4) * 4, int(y1 // 4) * 4, int(x0 // 4) * 4, int(x1 // 4) * 4)
 
 
+def _volume_level(level: int) -> int:
+    return int(level)
+
+
+def _volume_resolver(_source: object, level: int) -> int:
+    return _volume_level(level)
+
+
 def _apply_ops(runner: ViewportPlanner, ops: ViewportOps) -> None:
     if ops.level_change:
         target_level = (
@@ -63,12 +84,12 @@ def test_level_switch_sets_level_change_flag() -> None:
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(level=2))
 
-    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
 
     assert isinstance(ops, ViewportOps)
     assert ops.level_change is True
     _apply_ops(runner, ops)
-    follow_up = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    follow_up = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     assert follow_up.level_change is False
 
 
@@ -76,11 +97,11 @@ def test_repeated_roi_within_chunk_skips_reload() -> None:
     runner = ViewportPlanner()
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(rect=(0.0, 0.0, 64.0, 64.0)))
-    first = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    first = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     _apply_ops(runner, first)
 
     runner.ingest_snapshot(_make_snapshot(rect=(2.0, 2.0, 62.0, 62.0)))
-    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
 
     assert ops.slice_task is None
 
@@ -89,11 +110,11 @@ def test_roi_reload_triggers_on_chunk_change() -> None:
     runner = ViewportPlanner()
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(rect=(0.0, 0.0, 32.0, 32.0)))
-    first = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    first = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     _apply_ops(runner, first)
 
     runner.ingest_snapshot(_make_snapshot(rect=(64.0, 0.0, 96.0, 32.0)))
-    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
 
     assert ops.slice_task is not None
 
@@ -102,7 +123,7 @@ def test_volume_mode_disables_roi_reload() -> None:
     runner = ViewportPlanner()
     runner.ingest_snapshot(_make_snapshot(level=1, ndisplay=3))
 
-    ops = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
 
     assert ops.slice_task is None
 
@@ -115,10 +136,21 @@ def test_volume_level_request_does_not_wait_for_confirm() -> None:
     requested = runner.request_level(2)
     assert requested is True
 
-    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     assert ops.level_change is True
     _apply_ops(runner, ops)
     assert runner.state.applied.level == 2
+
+
+def test_volume_entry_builds_level_context() -> None:
+    runner = ViewportPlanner()
+    source = _StubSource()
+    runner.ingest_snapshot(_make_snapshot(level=2, ndisplay=3))
+
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
+
+    assert ops.level_change is True
+    assert ops.level_context is not None
 
 
 def test_volume_pose_emits_only_on_dirty_events() -> None:
@@ -126,16 +158,16 @@ def test_volume_pose_emits_only_on_dirty_events() -> None:
     source = _StubSource()
     runner.ingest_snapshot(_make_snapshot(level=1, ndisplay=3))
     runner.request_level(2)
-    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     _apply_ops(runner, ops)
     assert ops.pose_event is PoseEvent.LEVEL_RELOAD
 
-    second = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    second = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     assert second.pose_event is None
 
     zoom_cmd = type("Cmd", (), {"kind": "zoom", "factor": 1.1})()
     runner.ingest_camera_deltas([zoom_cmd])
-    third = runner.plan_tick(source=source, roi_resolver=_roi_resolver)
+    third = runner.plan_tick(source=source, roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     assert third.pose_event is PoseEvent.CAMERA_DELTA
 
 
@@ -148,6 +180,21 @@ def test_zoom_hint_consumed_once() -> None:
     runner.ingest_camera_deltas(commands)
     assert runner.state.zoom_hint == 0.85
 
-    ops = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver)
+    ops = runner.plan_tick(source=_StubSource(), roi_resolver=_roi_resolver, volume_level_resolver=_volume_resolver)
     assert ops.zoom_hint == 0.85
     assert runner.state.zoom_hint is None
+
+
+def test_reset_for_volume_preserves_plane_store() -> None:
+    runner = ViewportPlanner()
+    state = runner.state
+    roi = SliceROI(0, 4, 0, 4)
+    state.applied_step = (1, 2, 3)
+    state.applied_roi = roi
+    state.applied_roi_signature = (5, 6, 7, 8)
+
+    runner.reset_for_volume()
+
+    assert state.applied_step == (1, 2, 3)
+    assert state.applied_roi is roi
+    assert state.applied_roi_signature == (5, 6, 7, 8)

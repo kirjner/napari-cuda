@@ -187,9 +187,22 @@ class EGLRendererWorker:
         return int(self._viewport_state.plane.applied_level)
 
     def _set_current_level_index(self, value: int) -> None:
+        # Legacy: ambiguous setter writes both. Prefer explicit setters below.
+        level = int(value)
+        if self._viewport_state.mode is RenderMode.VOLUME:
+            self._viewport_state.volume.level = level
+        else:
+            self._viewport_state.plane.applied_level = level
+
+    def _set_plane_level_index(self, value: int) -> None:
         level = int(value)
         self._viewport_state.plane.applied_level = level
+        logger.info("set_plane_level_index: level=%d", level)
+
+    def _set_volume_level_index(self, value: int) -> None:
+        level = int(value)
         self._viewport_state.volume.level = level
+        logger.info("set_volume_level_index: level=%d", level)
 
     @property
     def _volume_scale(self) -> tuple[float, float, float]:

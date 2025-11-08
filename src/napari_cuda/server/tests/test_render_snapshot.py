@@ -12,6 +12,7 @@ from napari_cuda.server.runtime.render_loop.applying import (
 from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
+from napari_cuda.server.runtime.render_loop.planning.viewport_planner import SliceTask
 from napari_cuda.server.state_ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
@@ -204,6 +205,18 @@ class _StubWorker:
                 return None
 
         self._viewer = _Viewer()
+        class _Layer:
+            def __init__(self) -> None:
+                self.depiction = "plane"
+                self.rendering = "mip"
+                self.scale = (1.0, 1.0)
+                self.visible = True
+
+            def _set_view_slice(self) -> None:
+                return None
+
+        self._napari_layer = _Layer()
+        self.pose_events: list[str] = []
         self._apply_dims_calls = 0
         self._roi_align_chunks = False
         self._roi_ensure_contains_viewport = False
@@ -272,6 +285,15 @@ class _StubWorker:
         self.viewport_state.plane.target_level = level
         self.viewport_state.volume.level = level
 
+    def _set_plane_level_index(self, value: int) -> None:
+        level = int(value)
+        self.viewport_state.plane.applied_level = level
+        self.viewport_state.plane.target_level = level
+
+    def _set_volume_level_index(self, value: int) -> None:
+        level = int(value)
+        self.viewport_state.volume.level = level
+
     @property
     def _volume_scale(self) -> tuple[float, float, float]:
         scale = self.viewport_state.volume.scale
@@ -285,300 +307,379 @@ class _StubWorker:
     def _current_panzoom_rect(self):
         return self.viewport_state.plane.pose.rect
 
+    def _emit_current_camera_pose(self, reason: str) -> None:
+        self.pose_events.append(reason)
 
-def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
-    worker = _StubWorker(use_volume=False, level=1)
-    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
-    current_step = (4, 0, 0)
-    order = (0, 1, 2)
-    axis_labels = ("z", "y", "x")
-    spec = _make_axes_spec(
-        ndisplay=3,
-        current_level=0,
-        current_step=current_step,
-        level_shapes=level_shapes,
-        order=order,
-        axis_labels=axis_labels,
+
+def _level_context(level: int, step: tuple[int, ...]) -> SimpleNamespace:
+    return SimpleNamespace(
+        level=int(level),
+        step=tuple(int(v) for v in step),
+        scale_yx=(1.0, 1.0),
+        contrast=(0.0, 1.0),
     )
-    _seed_ledger(worker, spec)
-    snapshot = RenderLedgerSnapshot(
-        ndisplay=3,
-        current_level=0,
-        current_step=current_step,
-        order=order,
-        displayed=order[-3:],
-        axis_labels=axis_labels,
-        level_shapes=level_shapes,
-        dims_spec=spec,
-    )
-    calls: dict[str, object] = {}
-    call_order: list[str] = []
 
-    def _fake_build(*, source, level, step):
-        calls["build"] = (level, step)
-        return SimpleNamespace(
-            level=level,
-            scale_yx=(1.0, 1.0),
-            contrast=(0.0, 1.0),
-            step=step,
-        )
 
-    def _fake_volume(_snapshot_iface, _source, context):
-        calls["volume"] = context.level
-        call_order.append("volume")
+def test_apply_viewport_plan_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = _StubWorker(use_volume=False, level=0)
+    snapshot_iface = RenderApplyInterface(worker)
+    snapshot = RenderLedgerSnapshot(ndisplay=3)
+    calls: list[str] = []
 
-    monkeypatch.setattr(snapshot_mod, "build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
+    monkeypatch.setattr(snapshot_mod, "reduce_level_update", lambda *_, **__: None)
+    captured_plan: list[snapshot_mod.ViewportOps] = []
+    captured_plan: list[snapshot_mod.ViewportOps] = []
     monkeypatch.setattr(
         snapshot_mod,
-        "apply_slice_level",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")),
-    )  # type: ignore[arg-type]
+        "apply_volume_metadata",
+        lambda *_args, **_kwargs: calls.append("metadata"),
+    )
     monkeypatch.setattr(
-        RenderApplyInterface,
-        "viewport_roi_for_level",
-        lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
+        snapshot_mod,
+        "apply_volume_level",
+        lambda *_args, **_kwargs: calls.append("level"),
     )
 
-    original_configure = worker._configure_camera_for_mode
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.VOLUME,
+        level_change=True,
+        slice_task=None,
+        slice_signature=None,
+        level_context=_level_context(2, (0, 0, 0)),
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=True,
+    )
 
-    def _wrapped_configure() -> None:
-        call_order.append("configure")
-        original_configure()
-
-    worker._configure_camera_for_mode = _wrapped_configure  # type: ignore[assignment]
-
-    snapshot_iface = RenderApplyInterface(worker)
-    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
-    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
+    snapshot_mod.apply_viewport_plan(snapshot_iface, snapshot, plan, source=worker._scene_source)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
+    assert calls == ["metadata", "level"]
     assert worker.configure_calls == 1
-    assert calls["build"] == (2, (0, 0, 0))
-    assert calls["volume"] == 2
-    assert call_order == ["volume", "configure"]
-    assert worker.viewport_state.mode is RenderMode.VOLUME
 
 
-def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_viewport_plan_skips_volume_reload(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=True, level=2)
-    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
-    current_step = (9, 0, 0)
-    order = (0, 1, 2)
-    axis_labels = ("z", "y", "x")
-    spec = _make_axes_spec(
-        ndisplay=3,
-        current_level=2,
-        current_step=current_step,
-        level_shapes=level_shapes,
-        order=order,
-        axis_labels=axis_labels,
-    )
-    _seed_ledger(worker, spec)
-    snapshot = RenderLedgerSnapshot(
-        ndisplay=3,
-        current_level=2,
-        current_step=current_step,
-        order=order,
-        displayed=order[-3:],
-        axis_labels=axis_labels,
-        level_shapes=level_shapes,
-        dims_spec=spec,
-    )
-    prepare_called = False
-    volume_called = False
-
-    def _fake_build(decision, *, source, prev_level, last_step):
-        nonlocal prepare_called
-        prepare_called = True
-        return SimpleNamespace(
-            level=decision.selected_level,
-            scale_yx=(1.0, 1.0),
-            contrast=(0.0, 1.0),
-            step=last_step,
-        )
-
-    def _fake_volume(_worker, _source, context):
-        nonlocal volume_called
-        volume_called = True
-
-    monkeypatch.setattr(snapshot_mod, "build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
-    monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
-
     snapshot_iface = RenderApplyInterface(worker)
-    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
-    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
+    snapshot = RenderLedgerSnapshot(ndisplay=3)
+    monkeypatch.setattr(snapshot_mod, "reduce_level_update", lambda *_, **__: None)
+    monkeypatch.setattr(
+        snapshot_mod,
+        "apply_volume_metadata",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("metadata should not run")),
+    )
+    monkeypatch.setattr(
+        snapshot_mod,
+        "apply_volume_level",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("level should not run")),
+    )
+
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.VOLUME,
+        level_change=False,
+        slice_task=None,
+        slice_signature=None,
+        level_context=None,
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=False,
+    )
+
+    snapshot_mod.apply_viewport_plan(snapshot_iface, snapshot, plan, source=worker._scene_source)
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 0
-    assert prepare_called is False  # no load performed
-    assert volume_called is False
-    assert worker.viewport_state.mode is RenderMode.VOLUME
 
 
-def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_viewport_plan_switches_to_plane(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=True, level=2)
-    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
-    current_step = (3, 0, 0)
-    order = (0, 1, 2)
-    axis_labels = ("z", "y", "x")
-    spec = _make_axes_spec(
-        ndisplay=2,
-        current_level=1,
-        current_step=current_step,
-        level_shapes=level_shapes,
-        order=order,
-        axis_labels=axis_labels,
-    )
-    _seed_ledger(worker, spec)
-    snapshot = RenderLedgerSnapshot(
-        ndisplay=2,
-        current_level=1,
-        current_step=current_step,
-        order=order,
-        displayed=order[-2:],
-        axis_labels=axis_labels,
-        level_shapes=level_shapes,
-        dims_spec=spec,
-    )
-    calls: dict[str, object] = {}
-
-    def _fake_build(*, source, level, step):
-        calls["build"] = (level, step)
-        return SimpleNamespace(
-            level=level,
-            scale_yx=(1.0, 1.0),
-            contrast=(0.0, 1.0),
-            step=step,
-        )
-
-    def _fake_slice(_snapshot_iface, _source, context):
-        calls["slice"] = (context.level, context.step)
-
-    monkeypatch.setattr(snapshot_mod, "build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "apply_slice_level", _fake_slice)
-    monkeypatch.setattr(snapshot_mod, "apply_volume_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("volume apply should not run")))  # type: ignore[arg-type]
-    monkeypatch.setattr(
-        RenderApplyInterface,
-        "viewport_roi_for_level",
-        lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
-    )
-
     snapshot_iface = RenderApplyInterface(worker)
-    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
-    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
+    snapshot = RenderLedgerSnapshot(ndisplay=2)
+    calls: list[str] = []
+
+    monkeypatch.setattr(snapshot_mod, "reduce_level_update", lambda *_, **__: None)
+    monkeypatch.setattr(
+        snapshot_mod,
+        "apply_plane_metadata",
+        lambda *_args, **_kwargs: calls.append("plane-metadata"),
+    )
+    monkeypatch.setattr(
+        snapshot_mod,
+        "apply_slice_level",
+        lambda *_args, **_kwargs: calls.append("slice-level"),
+    )
+
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.PLANE,
+        level_change=True,
+        slice_task=None,
+        slice_signature=None,
+        level_context=_level_context(1, (0, 0, 0)),
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=True,
+    )
+
+    snapshot_mod.apply_viewport_plan(snapshot_iface, snapshot, plan, source=worker._scene_source)
 
     assert worker.viewport_state.mode is RenderMode.PLANE
     assert worker.configure_calls == 1
-    assert calls["build"] == (1, (3, 0, 0))
-    assert calls["slice"] == (1, (3, 0, 0))
-    assert worker.viewport_state.mode is RenderMode.PLANE
+    assert calls == ["plane-metadata", "slice-level"]
 
 
-def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_viewport_plan_plane_slice_task(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
-    worker._volume_max_voxels = 20  # force fallback from level 0
-    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
-    current_step = (7, 0, 0)
-    order = (0, 1, 2)
-    axis_labels = ("z", "y", "x")
-    spec = _make_axes_spec(
-        ndisplay=3,
-        current_level=0,
-        current_step=current_step,
-        level_shapes=level_shapes,
-        order=order,
-        axis_labels=axis_labels,
+    snapshot_iface = RenderApplyInterface(worker)
+    snapshot = RenderLedgerSnapshot(ndisplay=2)
+    recorded: list[tuple[int, SliceROI]] = []
+
+    monkeypatch.setattr(snapshot_mod, "reduce_level_update", lambda *_, **__: None)
+    def _fake_slice_roi(snapshot_iface_obj, source, level, roi, *, update_contrast, step):
+        recorded.append((level, roi))
+
+    monkeypatch.setattr(snapshot_mod, "apply_slice_roi", _fake_slice_roi)
+
+    slice_task = SliceTask(
+        level=1,
+        step=(0, 0, 0),
+        roi=SliceROI(0, 4, 0, 4),
+        chunk_shape=(4, 4),
+        signature=(0, 0, 0, 0),
     )
-    _seed_ledger(worker, spec)
-    snapshot = RenderLedgerSnapshot(
-        ndisplay=3,
-        current_level=0,
-        current_step=current_step,
-        order=order,
-        displayed=order[-3:],
-        axis_labels=axis_labels,
-        level_shapes=level_shapes,
-        dims_spec=spec,
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.PLANE,
+        level_change=False,
+        slice_task=slice_task,
+        slice_signature=None,
+        level_context=None,
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=False,
     )
-    calls: dict[str, object] = {}
 
-    def _fake_build(*, source, level, step):
-        calls.setdefault("build", []).append((level, step))
-        return SimpleNamespace(
-            level=level,
-            scale_yx=(1.0, 1.0),
-            contrast=(0.0, 1.0),
-            step=step,
-        )
+    snapshot_mod.apply_viewport_plan(snapshot_iface, snapshot, plan, source=worker._scene_source)
 
-    def _fake_volume(_snapshot_iface, _source, context):
-        calls.setdefault("volume", []).append(context.level)
+    assert recorded == [(1, SliceROI(0, 4, 0, 4))]
 
-    monkeypatch.setattr(snapshot_mod, "build_level_context", _fake_build)
-    monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
-    monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
+
+def test_apply_viewport_plan_updates_ledger(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = _StubWorker(use_volume=False, level=1)
+    snapshot_iface = RenderApplyInterface(worker)
+    snapshot = RenderLedgerSnapshot(ndisplay=2)
+    recorded: list[tuple[int, RenderMode]] = []
+
+    monkeypatch.setattr(
+        snapshot_mod,
+        "reduce_level_update",
+        lambda ledger, *, level, mode, **_kwargs: recorded.append((level, mode)),
+    )
+    monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(
         RenderApplyInterface,
         "viewport_roi_for_level",
-        lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
+        lambda self, *_args, **_kwargs: SliceROI(0, 4, 0, 4),
     )
 
-    snapshot_iface = RenderApplyInterface(worker)
-    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
-    snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.PLANE,
+        level_change=True,
+        slice_task=None,
+        slice_signature=None,
+        level_context=_level_context(2, (1, 0, 0)),
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=True,
+    )
 
-    assert worker.viewport_state.mode is RenderMode.VOLUME
-    assert worker.configure_calls == 1
-    assert calls["build"] == [(2, (1, 0, 0))]
-    assert calls["volume"] == [2]
+    snapshot_mod.apply_viewport_plan(snapshot_iface, snapshot, plan, source=worker._scene_source)
+
+    assert recorded == [(2, RenderMode.PLANE)]
 
 
-def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_render_snapshot_uses_planner_plan(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
-    level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
-    current_step = (4, 0, 0)
-    order = (0, 1, 2)
-    axis_labels = ("z", "y", "x")
     spec = _make_axes_spec(
         ndisplay=2,
         current_level=1,
-        current_step=current_step,
-        level_shapes=level_shapes,
-        order=order,
-        axis_labels=axis_labels,
+        current_step=(0, 0, 0),
+        level_shapes=((10, 10, 10), (5, 5, 5), (2, 2, 2)),
+        order=(0, 1, 2),
+        axis_labels=("z", "y", "x"),
     )
     _seed_ledger(worker, spec)
-    snapshot = RenderLedgerSnapshot(
+    snapshot = RenderLedgerSnapshot(ndisplay=2, dims_spec=spec)
+    apply_calls: list[str] = []
+
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.PLANE,
+        level_change=False,
+        slice_task=None,
+        slice_signature=None,
+        level_context=None,
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=False,
+    )
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.requests: list[RenderLedgerSnapshot] = []
+
+        def plan_from_snapshot(self, snapshot_obj, **_kwargs):
+            self.requests.append(snapshot_obj)
+            return plan
+
+    worker._viewport_runner = _Runner()  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(snapshot_mod, "reduce_level_update", lambda *_, **__: None)
+
+    def _fake_apply(snapshot_iface_obj, snapshot_obj, plan_obj, *, source):
+        apply_calls.append("apply")
+        assert snapshot_obj is snapshot
+        assert plan_obj is plan
+
+    monkeypatch.setattr(snapshot_mod, "apply_viewport_plan", _fake_apply)
+
+    snapshot_mod.apply_render_snapshot(RenderApplyInterface(worker), snapshot)
+
+    assert apply_calls == ["apply"]
+    assert worker._viewport_runner.requests == [snapshot]  # type: ignore[attr-defined]
+
+
+def test_apply_render_snapshot_replays_plane_mode_on_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = _StubWorker(use_volume=True, level=2)
+    worker.viewport_state.mode = RenderMode.VOLUME
+    plane_state = worker.viewport_state.plane
+    plane_state.applied_level = 2
+    plane_state.applied_step = (0, 0, 0)
+    plane_state.applied_roi = SliceROI(0, 4, 0, 4)
+    plane_state.applied_roi_signature = (0, 0, 0, 0)
+
+    spec = _make_axes_spec(
         ndisplay=2,
+        current_level=2,
+        current_step=(0, 0, 0),
+        level_shapes=((10, 10, 10), (5, 5, 5), (2, 2, 2)),
+    )
+    _seed_ledger(worker, spec)
+    snapshot = RenderLedgerSnapshot(ndisplay=2, dims_spec=spec)
+
+    calls: list[str] = []
+
+    monkeypatch.setattr(snapshot_mod, "reduce_level_update", lambda *_, **__: None)
+
+    captured_plan: list[snapshot_mod.ViewportOps] = []
+
+    def _fake_apply_viewport_plan(snapshot_iface, snapshot_obj, plan_obj, *, source):
+        captured_plan.append(plan_obj)
+
+    monkeypatch.setattr(snapshot_mod, "apply_viewport_plan", _fake_apply_viewport_plan)
+
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.PLANE,
+        level_change=False,
+        slice_task=None,
+        slice_signature=None,
+        level_context=None,
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=False,
+    )
+
+    class _Runner:
+        def __init__(self):
+            self.plans: list[RenderLedgerSnapshot] = []
+            self.metadata_marks = 0
+
+        def plan_from_snapshot(self, snapshot_obj, **_kwargs):
+            self.plans.append(snapshot_obj)
+            return plan
+
+        def mark_plane_metadata_applied(self):
+            self.metadata_marks += 1
+
+        def mark_slice_applied(self, *_args, **_kwargs):
+            return None
+
+        def mark_level_applied(self, *_args, **_kwargs):
+            return None
+
+        def reset_for_volume(self):
+            return None
+
+    worker._viewport_runner = _Runner()  # type: ignore[attr-defined]
+
+    snapshot_mod.apply_render_snapshot(RenderApplyInterface(worker), snapshot)
+
+    assert isinstance(captured_plan[0], snapshot_mod.ViewportOps)
+    assert captured_plan[0].mode is RenderMode.PLANE
+    assert captured_plan[0].level_context is not None
+    assert captured_plan[0].metadata_replay is True
+    assert captured_plan[0].level_change is True
+    # Mode switch and metadata marks occur during apply_viewport_plan; we stubbed it above.
+
+
+def test_apply_render_snapshot_replays_volume_mode_on_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    worker = _StubWorker(use_volume=False, level=1)
+    worker.viewport_state.mode = RenderMode.PLANE
+    worker.viewport_state.volume.level = 1
+    worker.viewport_state.plane.applied_step = (0, 0, 0)
+
+    spec = _make_axes_spec(
+        ndisplay=3,
         current_level=1,
-        current_step=current_step,
-        order=order,
-        displayed=order[-2:],
-        axis_labels=axis_labels,
-        level_shapes=level_shapes,
-        dims_spec=spec,
+        current_step=(0, 0, 0),
+        level_shapes=((10, 10, 10), (5, 5, 5), (2, 2, 2)),
+    )
+    _seed_ledger(worker, spec)
+    snapshot = RenderLedgerSnapshot(ndisplay=3, dims_spec=spec)
+
+    monkeypatch.setattr(snapshot_mod, "reduce_level_update", lambda *_, **__: None)
+    captured_plan: list[snapshot_mod.ViewportOps] = []
+
+    def _fake_apply_viewport_plan(snapshot_iface, snapshot_obj, plan_obj, *, source):
+        captured_plan.append(plan_obj)
+
+    monkeypatch.setattr(snapshot_mod, "apply_viewport_plan", _fake_apply_viewport_plan)
+
+    plan = snapshot_mod.ViewportOps(
+        mode=RenderMode.VOLUME,
+        level_change=False,
+        slice_task=None,
+        slice_signature=None,
+        level_context=None,
+        pose_event=None,
+        zoom_hint=None,
+        metadata_replay=False,
     )
 
-    original_apply_dims = plane_mod.apply_dims_from_snapshot
+    class _Runner:
+        def __init__(self):
+            self.plans: list[RenderLedgerSnapshot] = []
 
-    def _track_apply_dims(snapshot_iface_obj, snapshot_obj, *, signature):
-        snapshot_iface_obj._worker._apply_dims_calls += 1  # type: ignore[attr-defined]
-        original_apply_dims(snapshot_iface_obj, snapshot_obj, signature=signature)
+        def plan_from_snapshot(self, snapshot_obj, **_kwargs):
+            self.plans.append(snapshot_obj)
+            return plan
 
-    monkeypatch.setattr(plane_mod, "apply_dims_from_snapshot", _track_apply_dims)
-    monkeypatch.setattr(
-        RenderApplyInterface,
-        "viewport_roi_for_level",
-        lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
-    )
+        def mark_level_applied(self, *_args, **_kwargs):
+            return None
 
-    snapshot_iface = RenderApplyInterface(worker)
-    ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
-    plane_ops = ops["plane"]
-    assert plane_ops is not None
-    snapshot_iface.set_last_slice_signature(plane_ops["slice_token"])
+        def mark_slice_applied(self, *_args, **_kwargs):
+            return None
 
-    snapshot_mod.apply_render_snapshot(snapshot_iface, snapshot)
-    assert worker._apply_dims_calls == 0
+        def mark_plane_metadata_applied(self):
+            return None
+
+        def reset_for_volume(self):
+            return None
+
+    worker._viewport_runner = _Runner()  # type: ignore[attr-defined]
+
+    snapshot_mod.apply_render_snapshot(RenderApplyInterface(worker), snapshot)
+
+    assert isinstance(captured_plan[0], snapshot_mod.ViewportOps)
+    assert captured_plan[0].mode is RenderMode.VOLUME
+    assert captured_plan[0].level_context is not None
+    assert captured_plan[0].metadata_replay is True
+    assert captured_plan[0].level_change is True
+    # Mode switch happens in apply_viewport_plan, which we replaced above.
