@@ -974,25 +974,42 @@ def reduce_view_update(
     metadata = _metadata_from_intent(resolved_intent_id)
 
     baseline_step = tuple(int(v) for v in spec.current_step) if spec.current_step else None
-
     current_level_value = int(spec.current_level)
-    current_step_value: Optional[tuple[int, ...]] = spec.current_step
 
     if target_ndisplay >= 3:
+        # Snapshot plane state before entering volume so restores have authoritative data.
+        plane_state = _load_plane_state(ledger)
+        plane_state.target_ndisplay = 2
+        plane_state.awaiting_level_confirm = False
+        plane_state.target_level = current_level_value
+        plane_state.applied_level = current_level_value
+        if baseline_step is not None:
+            plane_state.target_step = baseline_step
+            plane_state.applied_step = baseline_step
+        _store_plane_state(
+            ledger,
+            plane_state,
+            origin=origin,
+            timestamp=ts,
+            metadata=metadata,
+        )
+
+        volume_state = _load_volume_state(ledger)
         coarsest_level = (
             len(spec.level_shapes) - 1
             if spec.level_shapes
             else current_level_value
         )
+        volume_state.level = int(coarsest_level)
+        _store_volume_state(
+            ledger,
+            volume_state,
+            origin=origin,
+            timestamp=ts,
+            metadata=metadata,
+        )
 
-        current_level_value = int(coarsest_level)
-        if baseline_step is not None:
-            current_step_value = dims_spec_remap_step_for_level(
-                spec,
-                step=tuple(int(v) for v in baseline_step),
-                prev_level=int(spec.current_level),
-                next_level=int(coarsest_level),
-            )
+    # Do not mutate dims slice in view toggle; restore/slider own it.
 
     if order is not None:
         order_value = tuple(int(idx) for idx in order)
@@ -1027,8 +1044,6 @@ def reduce_view_update(
         displayed=tuple(int(v) for v in displayed_value),
         plane_mode=int(target_ndisplay) < 3,
         axes=tuple(axes_list),
-        current_level=current_level_value,
-        current_step=tuple(int(v) for v in current_step_value) if current_step_value is not None else spec.current_step,
     )
 
     op_entry = ledger.get("scene", "main", "op_seq")
@@ -1130,7 +1145,42 @@ def reduce_plane_restore(
         metadata=metadata,
     )
 
-    # Do not write dims/multiscale here; planner/apply will drive level/step.
+    # Update dims_spec and multiscale level so the slider reflects the restored slice.
+    spec = _get_dims_spec(ledger)
+    axes_list: list[DimsSpecAxis] = []
+    for axis in spec.axes:
+        axis_index = int(axis.index)
+        current_step_value = step_tuple[axis_index] if axis_index < len(step_tuple) else axis.current_step
+        axes_list.append(
+            replace(
+                axis,
+                current_step=int(current_step_value),
+            )
+        )
+
+    new_spec = replace(
+        spec,
+        current_level=level_idx,
+        current_step=step_tuple,
+        axes=tuple(axes_list),
+    )
+
+    stored.update(
+        ledger.batch_record_confirmed(
+            [("dims", "main", "dims_spec", _serialize_dims_spec(new_spec))],
+            origin=origin,
+            timestamp=ts,
+        )
+    )
+
+    stored.update(
+        ledger.batch_record_confirmed(
+            [("multiscale", "main", "level", level_idx)],
+            origin=origin,
+            timestamp=ts,
+        )
+    )
+
     return stored
 
 

@@ -23,6 +23,7 @@ from napari_cuda.server.scene import (
 )
 
 from napari_cuda.server.scene.viewport import PlaneResult, PlaneState, PoseEvent, RenderMode
+from napari_cuda.shared.dims_spec import dims_spec_remap_step_for_level
 from napari_cuda.server.runtime.lod.context import build_level_context
 
 
@@ -104,6 +105,23 @@ class ViewportPlanner:
             if snapshot.current_step is not None
             else None
         )
+
+        if target_ndisplay >= 3 and snapshot.dims_spec is not None:
+            dims_spec = snapshot.dims_spec
+            prev_level = int(dims_spec.current_level) if dims_spec.current_level is not None else int(target_level)
+            coarsest_level = (
+                len(dims_spec.level_shapes) - 1
+                if dims_spec.level_shapes
+                else prev_level
+            )
+            if target_step is not None:
+                target_step = dims_spec_remap_step_for_level(
+                    dims_spec,
+                    step=tuple(int(v) for v in target_step),
+                    prev_level=prev_level,
+                    next_level=int(coarsest_level),
+                )
+            target_level = int(coarsest_level)
 
         request.level = target_level
         request.ndisplay = target_ndisplay

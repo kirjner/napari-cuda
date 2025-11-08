@@ -14,7 +14,6 @@ from typing import TYPE_CHECKING, Any, Optional
 
 import napari_cuda.server.data.lod as lod
 
-from napari_cuda.server.control.state_reducers import reduce_level_update
 from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
@@ -202,9 +201,6 @@ def apply_viewport_plan(
         if plan.level_context is not None:
             apply_volume_metadata(snapshot_iface, source_obj, plan.level_context)
             apply_volume_level(snapshot_iface, source_obj, plan.level_context)
-            # Do not mutate plane runner/applied level when in VOLUME; ledger update
-            # records volume level, and plane cache remains intact for replay.
-            _update_level_ledger(snapshot_iface, plan.level_context, RenderMode.VOLUME)
         elif plan.metadata_replay:
             raise AssertionError("volume metadata replay requires level context")
 
@@ -219,8 +215,6 @@ def apply_viewport_plan(
     if entering_plane:
         snapshot_iface.ensure_plane_visual()
         snapshot_iface.configure_camera_for_mode()
-
-    ledger_context = plan.level_context if (plan.metadata_replay or plan.level_change) else None
 
     context = plan.level_context
 
@@ -247,10 +241,8 @@ def apply_viewport_plan(
         if plan.slice_task is not None and entering_plane and plan.metadata_replay:
             print("[apply] plane replay: applying cached slice task (no ROI recompute)", flush=True)
             _apply_slice_task(snapshot_iface, source_obj, plan.slice_task)
-            _update_level_ledger(snapshot_iface, context, RenderMode.PLANE)
         else:
             apply_slice_level(snapshot_iface, source_obj, context)
-            _update_level_ledger(snapshot_iface, context, RenderMode.PLANE)
     elif plan.slice_task is not None:
         _apply_slice_task(snapshot_iface, source_obj, plan.slice_task)
     elif plan.slice_signature is not None:
@@ -271,7 +263,6 @@ def apply_viewport_plan(
                         flush=True,
                     )
                     apply_slice_level(snapshot_iface, source_obj, ctx)
-                    _update_level_ledger(snapshot_iface, ctx, RenderMode.PLANE)
 
     if snapshot is not None:
         update_z_index_from_snapshot(snapshot_iface, snapshot)
@@ -308,24 +299,3 @@ def _apply_slice_task(
         )
     )
     snapshot_iface.set_last_slice_signature(signature_token)
-
-
-def _update_level_ledger(
-    snapshot_iface: RenderApplyInterface,
-    context: lod.LevelContext,
-    mode: RenderMode,
-) -> None:
-    worker = snapshot_iface.worker
-    ledger = getattr(worker, "_ledger", None)
-    if ledger is None:
-        return
-    step_tuple = tuple(int(v) for v in context.step)
-    reduce_level_update(
-        ledger,
-        level=int(context.level),
-        step=step_tuple,
-        mode=mode,
-        plane_state=snapshot_iface.viewport_state.plane,
-        volume_state=snapshot_iface.viewport_state.volume,
-        origin="runtime.apply",
-    )
