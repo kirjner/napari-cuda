@@ -28,7 +28,15 @@ from napari_cuda.server.control.transactions import (
     apply_view_toggle_transaction,
     apply_volume_restore_transaction,
 )
-from napari_cuda.server.scene import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.scene import (
+    PlaneState,
+    RenderMode,
+    ViewportIntent,
+    plane_pose_from_state,
+    store_viewport_intent,
+    volume_pose_from_state,
+    VolumeState,
+)
 from napari_cuda.server.state_ledger import (
     LedgerEntry,
     PropertyKey,
@@ -815,6 +823,42 @@ def reduce_bootstrap_state(
         dims_spec=dims_spec,
     )
 
+    plane_state = PlaneState()
+    plane_state.target_level = int(dims_spec.current_level)
+    plane_state.applied_level = int(dims_spec.current_level)
+    plane_state.target_step = tuple(int(v) for v in dims_spec.current_step)
+    plane_state.applied_step = tuple(int(v) for v in dims_spec.current_step)
+    volume_state = VolumeState()
+    volume_state.level = int(dims_spec.current_level)
+
+    dims_entry = stored_entries.get(("dims", "main", "dims_spec"))
+    assert dims_entry is not None and dims_entry.version is not None, "bootstrap must return dims_spec entry"
+    dims_version_int = int(dims_entry.version)
+    level_entry = stored_entries.get(("multiscale", "main", "level"))
+    level_version_int = None
+    if level_entry is not None and level_entry.version is not None:
+        level_version_int = int(level_entry.version)
+
+    intent = ViewportIntent(
+        seq=int(next_op_seq),
+        mode=RenderMode.VOLUME if int(dims_spec.ndisplay) >= 3 else RenderMode.PLANE,
+        dims_spec=dims_spec,
+        plane_pose=plane_pose_from_state(plane_state),
+        volume_pose=volume_pose_from_state(volume_state),
+        dims_version=dims_version_int,
+        multiscale_version=level_version_int,
+        op_seq=int(next_op_seq),
+        op_kind="bootstrap",
+        metadata={},
+    )
+    store_viewport_intent(
+        ledger,
+        intent,
+        origin=origin,
+        timestamp=ts,
+        metadata=None,
+    )
+
     return [dims_update, view_update]
 
 
@@ -937,6 +981,31 @@ def reduce_dims_update(
         version,
         origin,
     )
+
+    intent_mode = RenderMode.VOLUME if int(new_spec.ndisplay) >= 3 else RenderMode.PLANE
+    intent_metadata = _metadata_from_intent(resolved_intent_id) or {}
+    intent = ViewportIntent(
+        seq=int(next_op_seq),
+        mode=intent_mode,
+        dims_spec=new_spec,
+        plane_pose=plane_pose_from_state(_load_plane_state(ledger)),
+        volume_pose=volume_pose_from_state(_load_volume_state(ledger)),
+        dims_version=version,
+        multiscale_version=None,
+        op_seq=int(next_op_seq),
+        op_kind="dims-update",
+        metadata=intent_metadata,
+    )
+    store_viewport_intent(
+        ledger,
+        intent,
+        origin=origin,
+        timestamp=ts,
+        metadata=intent_metadata,
+    )
+
+    assert intent.current_level == int(new_spec.current_level), "dims update intent/spec level mismatch"
+    assert intent.current_step == tuple(int(v) for v in new_spec.current_step), "dims update intent/spec step mismatch"
 
     return ServerLedgerUpdate(
         scope="dims",
@@ -1073,6 +1142,34 @@ def reduce_view_update(
         version,
         origin,
     )
+    dims_entry = stored_entries.get(("dims", "main", "dims_spec"))
+    assert dims_entry is not None and dims_entry.version is not None, "view toggle must return versioned dims_spec"
+    dims_version = int(dims_entry.version)
+
+    intent_mode = RenderMode.VOLUME if int(new_spec.ndisplay) >= 3 else RenderMode.PLANE
+    intent_metadata = _metadata_from_intent(resolved_intent_id) or {}
+    intent = ViewportIntent(
+        seq=int(next_op_seq),
+        mode=intent_mode,
+        dims_spec=new_spec,
+        plane_pose=plane_pose_from_state(_load_plane_state(ledger)),
+        volume_pose=volume_pose_from_state(_load_volume_state(ledger)),
+        dims_version=dims_version,
+        multiscale_version=None,
+        op_seq=int(next_op_seq),
+        op_kind="view-toggle",
+        metadata=intent_metadata,
+    )
+    store_viewport_intent(
+        ledger,
+        intent,
+        origin=origin,
+        timestamp=ts,
+        metadata=intent_metadata,
+    )
+
+    assert intent.current_level == int(new_spec.current_level), "intent/spec current_level mismatch"
+    assert intent.current_step == tuple(int(v) for v in new_spec.current_step), "intent/spec current_step mismatch"
 
     return ServerLedgerUpdate(
         scope="view",
@@ -1181,6 +1278,34 @@ def reduce_plane_restore(
         )
     )
 
+    dims_entry = stored.get(("dims", "main", "dims_spec"))
+    assert dims_entry is not None and dims_entry.version is not None, "plane restore must return versioned dims_spec entry"
+    dims_version = int(dims_entry.version)
+    level_entry = stored.get(("multiscale", "main", "level"))
+    multiscale_version = int(level_entry.version) if level_entry is not None and level_entry.version is not None else None
+    intent_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    intent = ViewportIntent(
+        seq=int(next_op_seq),
+        mode=RenderMode.PLANE,
+        dims_spec=new_spec,
+        plane_pose=plane_pose_from_state(base_plane),
+        volume_pose=volume_pose_from_state(_load_volume_state(ledger)),
+        dims_version=dims_version,
+        multiscale_version=multiscale_version,
+        op_seq=int(next_op_seq),
+        op_kind="plane-restore",
+        metadata=intent_metadata,
+    )
+    store_viewport_intent(
+        ledger,
+        intent,
+        origin=origin,
+        timestamp=ts,
+        metadata=intent_metadata,
+    )
+    assert intent.current_level == int(new_spec.current_level), "plane restore intent/spec level mismatch"
+    assert intent.current_step == tuple(int(v) for v in new_spec.current_step), "plane restore intent/spec step mismatch"
+
     return stored
 
 
@@ -1247,6 +1372,34 @@ def reduce_volume_restore(
         timestamp=ts,
         metadata=metadata,
     )
+
+    dims_spec_current = _get_dims_spec(ledger)
+    dims_entry = ledger.get("dims", "main", "dims_spec")
+    dims_version = None
+    if dims_entry is not None and dims_entry.version is not None:
+        dims_version = int(dims_entry.version)
+    intent_metadata = dict(metadata) if isinstance(metadata, Mapping) else {}
+    intent = ViewportIntent(
+        seq=int(next_op_seq),
+        mode=RenderMode.VOLUME,
+        dims_spec=dims_spec_current,
+        plane_pose=plane_pose_from_state(_load_plane_state(ledger)),
+        volume_pose=volume_pose_from_state(base_volume),
+        dims_version=dims_version,
+        multiscale_version=None,
+        op_seq=int(next_op_seq),
+        op_kind="volume-restore",
+        metadata=intent_metadata,
+    )
+    store_viewport_intent(
+        ledger,
+        intent,
+        origin=origin,
+        timestamp=ts,
+        metadata=intent_metadata,
+    )
+    assert intent.current_level == int(dims_spec_current.current_level), "volume restore intent/spec level mismatch"
+    assert intent.current_step == tuple(int(v) for v in dims_spec_current.current_step), "volume restore intent/spec step mismatch"
 
     return stored
 
@@ -1425,6 +1578,50 @@ def reduce_level_update(
         level_version,
         origin,
     )
+
+    # Build and persist a canonical ViewportIntent derived from the same inputs.
+    # Resolve render mode deterministically from the new dims spec when not provided
+    if isinstance(mode, RenderMode):
+        intent_mode = mode
+    elif isinstance(mode, str):
+        intent_mode = RenderMode[mode.upper()]
+    else:
+        if int(new_spec.ndisplay) >= 3:
+            intent_mode = RenderMode.VOLUME
+        else:
+            intent_mode = RenderMode.PLANE
+
+    dims_entry = stored_entries.get(("dims", "main", "dims_spec"))
+    assert dims_entry is not None, "level switch transaction must return dims_spec entry"
+    assert dims_entry.version is not None, "dims_spec entry must be versioned"
+    dims_version = int(dims_entry.version)
+
+    intent_metadata = _metadata_from_intent(intent_id) or {}
+    intent = ViewportIntent(
+        seq=int(next_op_seq),
+        mode=intent_mode,
+        dims_spec=new_spec,
+        plane_pose=plane_pose_from_state(_load_plane_state(ledger)),
+        volume_pose=volume_pose_from_state(_load_volume_state(ledger)),
+        dims_version=dims_version,
+        multiscale_version=level_version,
+        op_seq=int(next_op_seq),
+        op_kind="level-update",
+        metadata=intent_metadata,
+    )
+
+    # Persist the intent after we have versions
+    store_viewport_intent(
+        ledger,
+        intent,
+        origin=origin,
+        timestamp=ts,
+        metadata=intent_metadata,
+    )
+
+    # Invariants: the intent and spec we just wrote must agree
+    assert intent.current_level == int(new_spec.current_level), "viewport intent/spec level mismatch"
+    assert intent.current_step == tuple(int(v) for v in new_spec.current_step), "viewport intent/spec step mismatch"
 
     return ServerLedgerUpdate(
         scope="multiscale",

@@ -32,6 +32,14 @@ from .viewport import (
     VolumePose,
     VolumeState,
 )
+from .viewport_intent import (
+    PlanePoseIntent,
+    ViewportIntent,
+    VolumePoseIntent,
+    plane_pose_from_state,
+    store_viewport_intent,
+    volume_pose_from_state,
+)
 
 __all__ = [
     "CONTROL_KEYS",
@@ -49,6 +57,12 @@ __all__ = [
     "ViewportState",
     "VolumePose",
     "VolumeState",
+    "PlanePoseIntent",
+    "VolumePoseIntent",
+    "ViewportIntent",
+    "plane_pose_from_state",
+    "store_viewport_intent",
+    "volume_pose_from_state",
     "build_ledger_snapshot",
     "default_volume_state",
     "pull_render_snapshot",
