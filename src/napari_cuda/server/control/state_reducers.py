@@ -938,24 +938,6 @@ def reduce_dims_update(
         origin,
     )
 
-    if _current_ndisplay(ledger) < 3:
-        # Plane dims intent: update only target intent, never mutate applied cache.
-        plane_state = _load_plane_state(ledger)
-        level_idx = int(current_spec.current_level)
-        step_tuple = tuple(int(v) for v in requested_step)
-        plane_state.target_ndisplay = 2
-        plane_state.target_level = level_idx
-        plane_state.target_step = step_tuple
-        plane_state.awaiting_level_confirm = False
-        metadata = _metadata_from_intent(resolved_intent_id)
-        _store_plane_state(
-            ledger,
-            plane_state,
-            origin=origin,
-            timestamp=ts,
-            metadata=metadata,
-        )
-
     return ServerLedgerUpdate(
         scope="dims",
         target=control_target,
@@ -1001,33 +983,6 @@ def reduce_view_update(
             len(spec.level_shapes) - 1
             if spec.level_shapes
             else current_level_value
-        )
-        plane_state = _load_plane_state(ledger)
-        level_idx = int(spec.current_level)
-        if baseline_step is not None:
-            step_tuple = tuple(int(v) for v in baseline_step)
-            plane_state.target_step = step_tuple
-            plane_state.applied_step = step_tuple
-        plane_state.target_ndisplay = 2
-        plane_state.target_level = level_idx
-        plane_state.applied_level = level_idx
-        plane_state.awaiting_level_confirm = False
-        _store_plane_state(
-            ledger,
-            plane_state,
-            origin=origin,
-            timestamp=ts,
-            metadata=metadata,
-        )
-
-        volume_state = _load_volume_state(ledger)
-        volume_state.level = int(coarsest_level)
-        _store_volume_state(
-            ledger,
-            volume_state,
-            origin=origin,
-            timestamp=ts,
-            metadata=metadata,
         )
 
         current_level_value = int(coarsest_level)
