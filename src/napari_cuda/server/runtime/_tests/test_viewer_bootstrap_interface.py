@@ -129,7 +129,7 @@ def test_viewer_bootstrap_interface_lod_helpers(monkeypatch: pytest.MonkeyPatch)
         assert worker_arg is worker
         assert source == "scene"
         assert level == 5
-        return 7, True
+        return 7
 
     def fake_load(worker_arg, source, level):
         assert worker_arg is worker
@@ -159,5 +159,5 @@ def test_viewer_bootstrap_interface_lod_helpers(monkeypatch: pytest.MonkeyPatch)
     loaded = facade.load_volume("scene", 9)
 
     assert context == "built-context"
-    assert resolved == (7, True)
+    assert resolved == 7
     assert loaded == "volume-bytes"

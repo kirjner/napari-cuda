@@ -117,7 +117,6 @@ def _seed_default_spec(state: ControlStateContext) -> None:
         plane_mode=True,
         axes=axes,
         levels=({'index': 0, 'shape': list(level_shape)},),
-        downgraded=None,
         labels=None,
     )
     state.dims_spec = spec

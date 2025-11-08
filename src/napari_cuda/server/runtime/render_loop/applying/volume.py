@@ -33,7 +33,6 @@ class VolumeApplyResult:
     """Outcome of applying a volume snapshot."""
 
     level: int
-    downgraded: bool
     data_wh: tuple[int, int]
     data_d: Optional[int]
     scale: tuple[float, float, float]
@@ -67,8 +66,6 @@ def apply_volume_level(
     snapshot_iface: RenderApplyInterface,
     source: Any,
     applied: lod.LevelContext,
-    *,
-    downgraded: bool,
 ) -> VolumeApplyResult:
     """Load the volume level for ``applied`` and update worker metadata."""
 
@@ -105,16 +102,14 @@ def apply_volume_level(
             z_index=None,
             shape=shape,
             contrast=applied.contrast,
-            downgraded=downgraded,
         )
 
     volume_state = snapshot_iface.viewport_state.volume
-    update_level(volume_state, int(applied.level), downgraded=downgraded)
+    update_level(volume_state, int(applied.level))
     update_scale(volume_state, scale_tuple)
 
     return VolumeApplyResult(
         level=int(applied.level),
-        downgraded=bool(downgraded),
         data_wh=(int(data_wh[0]), int(data_wh[1])),
         data_d=int(data_d) if data_d is not None else None,
         scale=scale_tuple,

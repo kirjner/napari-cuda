@@ -84,7 +84,6 @@ def _seed_volume_spec(state: ControlStateContext) -> None:
         plane_mode=False,
         axes=axes,
         levels=({'index': 0, 'shape': list(level_shape)},),
-        downgraded=None,
         labels=None,
     )
     state.dims_spec = spec

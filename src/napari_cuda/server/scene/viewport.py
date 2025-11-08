@@ -190,7 +190,6 @@ class VolumeState:
     """Applied state for volume rendering."""
 
     level: int = 0
-    downgraded: bool = False
     scale: Optional[tuple[float, float, float]] = None
     world_extents: Optional[tuple[float, float, float]] = None
     pose: VolumePose = field(default_factory=VolumePose)

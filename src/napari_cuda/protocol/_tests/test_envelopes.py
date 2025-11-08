@@ -105,7 +105,6 @@ def test_notify_scene_level_roundtrip() -> None:
         session_id="session-2",
         payload={
             "current_level": 3,
-            "downgraded": False,
             "levels": [{"index": 0, "shape": [64, 64]}, {"index": 1, "shape": [32, 32]}],
         },
         sequencer=sequencer,
@@ -135,7 +134,7 @@ def test_parser_dispatch() -> None:
     level_seq.snapshot()
     level_frame = build_notify_scene_level(
         session_id="sess",
-        payload={"current_level": 1, "downgraded": True},
+        payload={"current_level": 1},
         sequencer=level_seq,
     )
     state_frame = build_state_update(

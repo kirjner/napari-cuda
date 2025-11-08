@@ -78,13 +78,10 @@ def assign_pose_from_snapshot(
 def update_level(
     state: VolumeState,
     level: int,
-    *,
-    downgraded: bool,
 ) -> None:
     """Update the level metadata stored by the volume state."""
 
     state.level = int(level)
-    state.downgraded = bool(downgraded)
 
 
 def update_scale(

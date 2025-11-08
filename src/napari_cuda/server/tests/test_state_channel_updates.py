@@ -233,7 +233,6 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
         plane_mode=True,
         axes=tuple(baseline_axes),
         levels=({"index": 0, "shape": [10, 10, 10]},),
-        downgraded=False,
         labels=None,
     )
 
@@ -242,7 +241,6 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
         level_shapes=((10, 10, 10),),
         levels=({"index": 0, "shape": [10, 10, 10]},),
         current_level=0,
-        downgraded=None,
         mode="plane",
         ndisplay=2,
         dims_spec=baseline_spec,
@@ -513,7 +511,6 @@ def _make_dims_snapshot(**overrides: Any) -> dict[str, Any]:
 
     mode_value = overrides.get("mode", "volume" if ndisplay >= 3 else "plane")
     current_level = int(overrides.get("current_level", 0))
-    downgraded = overrides.get("downgraded")
     labels_value = overrides.pop("labels", None)
 
     axes: list[DimsSpecAxis] = []
@@ -562,7 +559,6 @@ def _make_dims_snapshot(**overrides: Any) -> dict[str, Any]:
         plane_mode=(mode_value != "volume"),
         axes=tuple(axes),
         levels=tuple(dict(level) for level in levels_payload),
-        downgraded=downgraded,
         labels=None if labels_value is None else tuple(str(v) for v in labels_value),
     )
 
@@ -574,7 +570,6 @@ def _make_dims_snapshot(**overrides: Any) -> dict[str, Any]:
         "levels": levels_payload,
         "current_level": current_level,
         "level_shapes": [list(shape) for shape in level_shapes],
-        "downgraded": downgraded,
         "labels": labels_value,
         "dims_spec": dims_spec_to_payload(base_spec),
     }
@@ -624,7 +619,6 @@ def _dims_spec_from_notify_payload(payload: NotifyDimsPayload) -> DimsSpec:
         plane_mode=int(payload.ndisplay) < 3,
         axes=tuple(axes),
         levels=levels,
-        downgraded=bool(payload.downgraded) if payload.downgraded is not None else False,
         labels=tuple(payload.labels) if payload.labels is not None else None,
     )
 
@@ -935,7 +929,6 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
         level_shapes=[[512, 256, 64], [256, 128, 32]],
         displayed=[0, 1, 2],
         current_level=1,
-        downgraded=True,
     )
     snapshot_payload["levels"] = [
         {"index": 0, "shape": [512, 256, 64]},
@@ -950,13 +943,11 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
     assert dims_frames, "expected dims broadcast"
     payload = dims_frames[-1]["payload"]
     assert payload["current_level"] == 1
-    assert payload.get("downgraded") is True
 
     ms_state = snapshot_multiscale_state(server._state_ledger.snapshot())
     assert ms_state.get("current_level") == 1
     levels_snapshot = ms_state.get("levels") or []
     assert levels_snapshot and levels_snapshot[1]["shape"] == [256, 128, 32]
-    assert ms_state.get("downgraded") is True
 
 
 
@@ -1514,14 +1505,13 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
         plane_state.applied_level = 0
         plane_state.applied_step = (2, 0, 0)
         plane_state.update_pose(rect=(0.0, 0.0, 20.0, 20.0), center=(10.0, 10.0), zoom=2.0)
-        volume_state = VolumeState(level=0, downgraded=False)
+        volume_state = VolumeState(level=0)
         volume_state.update_pose(center=(0.0, 0.0, 0.0))
 
         reduce_level_update(
             ledger,
             level=0,
             level_shape=(32, 512, 512),
-            downgraded=False,
             origin="test.level",
             mode=RenderMode.PLANE,
             plane_state=plane_state,

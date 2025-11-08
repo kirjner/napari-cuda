@@ -115,7 +115,7 @@ def _resolve_snapshot_ops(
 
     if target_volume:
         requested_level = int(target_level)
-        selected_level, downgraded = snapshot_iface.resolve_volume_intent_level(
+        selected_level = snapshot_iface.resolve_volume_intent_level(
             source,
             requested_level,
         )
@@ -147,7 +147,6 @@ def _resolve_snapshot_ops(
 
         ops["volume"] = {
             "entering_volume": not was_volume,
-            "downgraded": bool(downgraded),
             "load_needed": load_needed,
             "applied_context": applied_context,
             "effective_level": int(effective_level),
@@ -235,7 +234,6 @@ def _apply_snapshot_ops(
         if runner is not None and entering_volume:
             runner.reset_for_volume()
 
-        snapshot_iface.viewport_state.volume.downgraded = bool(volume_ops["downgraded"])
         if volume_ops["load_needed"]:
             applied_context = volume_ops["applied_context"]
             assert applied_context is not None
@@ -244,7 +242,6 @@ def _apply_snapshot_ops(
                 snapshot_iface,
                 source,
                 applied_context,
-                downgraded=bool(volume_ops["downgraded"]),
             )
             snapshot_iface.mark_level_applied(int(applied_context.level))
             if (
@@ -271,7 +268,6 @@ def _apply_snapshot_ops(
         snapshot_iface.configure_camera_for_mode()
 
     apply_plane_metadata(snapshot_iface, source, plane_ops["applied_context"])
-    snapshot_iface.viewport_state.volume.downgraded = False
     apply_slice_camera_pose(snapshot_iface, snapshot)
 
     if plane_ops["skip_slice"]:

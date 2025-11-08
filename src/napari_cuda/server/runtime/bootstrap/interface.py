@@ -188,7 +188,7 @@ class ViewerBootstrapInterface:
         self,
         source: Any,
         requested_level: int,
-    ) -> tuple[int, bool]:
+    ) -> int:
         """Resolve the requested volume level against worker policies."""
 
         return lod_resolve_volume_intent_level(
@@ -232,8 +232,6 @@ class ViewerBootstrapInterface:
         self,
         source: Any,
         context: Any,
-        *,
-        downgraded: bool,
     ) -> VolumeApplyResult:
         """Apply the volume level for bootstrap using shared helpers."""
 
@@ -241,5 +239,4 @@ class ViewerBootstrapInterface:
             self.worker,
             source,
             context,
-            downgraded=downgraded,
         )

@@ -63,7 +63,6 @@ def _make_axes_spec(
         plane_mode=ndisplay < 3,
         axes=tuple(axes),
         levels=tuple({"index": idx, "shape": list(shape)} for idx, shape in enumerate(level_shapes)),
-        downgraded=False,
         labels=None,
     )
 
@@ -249,13 +248,12 @@ class _StubWorker:
         dtype_size = 4  # float32
         return voxels, voxels * dtype_size
 
-    def _resolve_volume_intent_level(self, source, requested_level: int) -> tuple[int, bool]:
+    def _resolve_volume_intent_level(self, source, requested_level: int) -> int:
         descriptors = getattr(source, "level_descriptors", ())
         if not descriptors:
-            return int(requested_level), False
+            return int(requested_level)
         coarsest = max(0, len(descriptors) - 1)
-        downgraded = coarsest != int(requested_level)
-        return int(coarsest), downgraded
+        return int(coarsest)
 
     def _update_level_metadata(self, descriptor, context) -> None:
         self._level_metadata = (descriptor, context)
@@ -325,10 +323,9 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
             step=step,
         )
 
-    def _fake_volume(_snapshot_iface, _source, context, *, downgraded: bool):
+    def _fake_volume(_snapshot_iface, _source, context):
         calls["volume"] = context.level
         call_order.append("volume")
-        calls["downgraded"] = downgraded
 
     monkeypatch.setattr(snapshot_mod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
@@ -401,7 +398,7 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
             step=last_step,
         )
 
-    def _fake_volume(_worker, _source, context, *, downgraded: bool):
+    def _fake_volume(_worker, _source, context):
         nonlocal volume_called
         volume_called = True
 
@@ -516,8 +513,8 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
             step=step,
         )
 
-    def _fake_volume(_snapshot_iface, _source, context, *, downgraded: bool):
-        calls.setdefault("volume", []).append((context.level, downgraded))
+    def _fake_volume(_snapshot_iface, _source, context):
+        calls.setdefault("volume", []).append(context.level)
 
     monkeypatch.setattr(snapshot_mod, "build_level_context", _fake_build)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
@@ -535,7 +532,7 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
     assert calls["build"] == [(2, (1, 0, 0))]
-    assert calls["volume"] == [(2, True)]
+    assert calls["volume"] == [2]
 
 
 def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -201,7 +201,7 @@ def test_enforce_budgets_downgrades_when_needed() -> None:
         if level == 0:
             raise LevelBudgetError("reject finest")
 
-    downgraded = enforce_budgets(
+    clamped = enforce_budgets(
         decision,
         source=source,
         use_volume=False,
@@ -209,5 +209,4 @@ def test_enforce_budgets_downgrades_when_needed() -> None:
         log_layer_debug=False,
     )
 
-    assert downgraded.selected_level == 1
-    assert downgraded.downgraded is True
+    assert clamped.selected_level == 1

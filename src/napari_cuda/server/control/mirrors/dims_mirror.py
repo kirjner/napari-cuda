@@ -127,7 +127,6 @@ class ServerDimsMirror:
             level_shapes=spec.level_shapes,
             levels=spec.levels,
             current_level=spec.current_level,
-            downgraded=spec.downgraded,
             mode="volume" if int(spec.ndisplay) >= 3 else "plane",
             ndisplay=spec.ndisplay,
             labels=spec.labels,
@@ -147,7 +146,6 @@ class ServerDimsMirror:
             labels=spec.labels,
             levels=spec.levels,
             level_shapes=spec.level_shapes,
-            downgraded=spec.downgraded,
         )
 
 

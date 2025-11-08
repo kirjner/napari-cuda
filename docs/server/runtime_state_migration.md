@@ -13,7 +13,7 @@ the control/runtime/engine dependency contract this plan works toward.
 - Volume pose handling is still routed through `apply_volume_camera_pose` and plane pose via `apply_slice_camera_pose`.
 
 ### 1.2 Worker fields mutated during apply
-- Mode and level: `worker.use_volume`, `worker._active_ms_level`, `worker._level_downgraded` (`render_loop/apply/apply.py:209`, `render_loop/apply/apply.py:298`).
+- Mode and level: `worker.use_volume`, `worker._active_ms_level` (`render_loop/apply/apply.py:209`, `render_loop/apply/apply.py:298`).
 - Plane metadata: `_data_wh`, `_current_panzoom_rect`, `_viewport_runner.state.*` (`render_loop/apply/apply.py:120`–`render_loop/apply/apply.py:150`, `render_loop/apply/apply.py:418`).
 - Volume metadata: `_volume_scale`, `_data_d` (`render_loop/apply/apply.py:404`), plus logging via `_layer_logger`.
 - Camera pose emission: `_emit_current_camera_pose` invoked with reasons `slice-apply` or `level-reload` (`render_loop/apply/apply.py:430`, `worker/egl.py:1623`).
@@ -73,7 +73,7 @@ the control/runtime/engine dependency contract this plan works toward.
 3. Seed `ViewportState` in `EGLRendererWorker.__init__` (`src/napari_cuda/server/runtime/worker/egl.py:128`). Shim properties:
    - `@property use_volume` → `self.viewport_state.mode is RenderMode.VOLUME`
    - `_active_ms_level` → proxy to `viewport_state.plane.applied_level`.
-   ✅ Implemented along with shims for `_level_downgraded` and `_volume_scale`.
+   ✅ Implemented along with shims for `_volume_scale`.
 4. Update worker helpers (`_ensure_scene_source`, `render_loop.ticks.viewport.run`, `_build_scene_state_context`) to read/write through the new struct, guarding mutations with `_state_lock` where required.
    ✅ Worker shims now funnel level/volume updates, ROI tracking, and napari camera snapshots into `ViewportState`.
 5. Extend existing tests to assert the struct mirrors legacy values (e.g., `test_render_snapshot` confirms `PlaneState.applied_level` changes on apply; harness checks mode flag).
@@ -93,7 +93,7 @@ the control/runtime/engine dependency contract this plan works toward.
 
 ### Stage D — Shim removal
 1. Remove temporary properties (`worker.use_volume`, `_active_ms_level`) once all call sites consume the new state. ✅ Harnesses now mutate `ViewportState` directly.
-2. Delete legacy ROI/logging flags that are redundant (`_level_downgraded`, `_roi_cache` duplicates) after verifying new plane loader handles them. ✅ Completed.
+2. Delete legacy ROI/logging flags that are redundant (`_roi_cache` duplicates) after verifying new plane loader handles them. ✅ Completed.
 3. Run full test suite (`uv run pytest src/napari_cuda/server -q`), `make pre`, and `tox -e mypy`.
 4. Drop the `preserve_view_on_switch` policy flag; cached `PlaneState.pose` now drives every restore.
 
@@ -104,7 +104,7 @@ the control/runtime/engine dependency contract this plan works toward.
 - Plane pose: `pose.rect`, `pose.center`, `pose.zoom`, `zoom_hint`, `camera_pose_dirty`.
 - Applied plane state: `applied_level`, `applied_step`, `applied_roi`, `applied_roi_signature`.
 - Plane reload bookkeeping: `camera_dirty`, `zoom_hint`, `_last_roi`.
-- Volume state: `current_level`, `downgraded`, `pose` (center, angles, distance, fov), `scale`, `world_extents`.
+- Volume state: `current_level`, `pose` (center, angles, distance, fov), `scale`, `world_extents`.
 - Shared metadata: `mode` (`PLANE` | `VOLUME`), `last_pose_reason`, `last_zoom_hint`.
 
 ### 4.2 Side-effects to preserve during refactors

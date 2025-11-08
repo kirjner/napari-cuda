@@ -29,8 +29,8 @@ def apply_level_with_budget(
     apply_level_cb: Callable[[ZarrSceneSource, int, Optional[int]], None],
     on_switch: Callable[[int, int, float], None],
     logger_ref: logging.Logger = logger,
-) -> tuple[int, bool]:
-    """Pick the finest level allowed by budgets, apply it, and report downgrade."""
+) -> int:
+    """Pick the finest level allowed by budgets and apply it."""
 
     level_count = len(source.level_descriptors)
     if level_count == 0:
@@ -58,14 +58,7 @@ def apply_level_with_budget(
         apply_level_cb(source, level, current_level)
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         on_switch(current_level, level, elapsed_ms)
-        downgraded = level != desired_level
-        if downgraded and log_layer_debug:
-            logger_ref.info(
-                "level downgrade: requested=%d active=%d",
-                desired_level,
-                level,
-            )
-        return level, downgraded
+        return level
 
     raise RuntimeError("Unable to select multiscale level within budget")
 
@@ -77,7 +70,7 @@ def select_volume_level(
     max_voxels: Optional[int],
     max_bytes: Optional[int],
     error_cls: type[Exception] = LevelBudgetError,
-) -> tuple[int, bool]:
+) -> int:
     """Clamp ``requested_level`` against voxel/byte budgets using source metadata."""
 
     level_shapes = [descriptor.shape for descriptor in source.level_descriptors]
@@ -105,13 +98,12 @@ def select_volume_level(
 
     fits_request, estimate, cap = _fits(clamped_request)
     if fits_request:
-        return int(clamped_request), bool(clamped_request != requested_level)
+        return int(clamped_request)
 
     coarsest = max_index
     fits_coarse, coarse_estimate, coarse_cap = _fits(coarsest)
     if fits_coarse:
-        downgraded = coarsest != clamped_request or clamped_request != requested_level
-        return int(coarsest), downgraded
+        return int(coarsest)
 
     if max_voxels and estimate > max_voxels:
         msg = f"voxels={estimate} exceeds cap={int(max_voxels)}"

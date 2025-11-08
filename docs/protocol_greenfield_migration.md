@@ -300,7 +300,7 @@ translating to legacy formats.
   for deletion. The streaming loop will instead issue `call.command` envelopes via
   the new RPC helper and wait on `reply.command` / `error.command` for completion.
 - **Protocol extension:** add a resumable `notify.scene.level` lane carrying the
-  active multiscale level (`current_level`, `downgraded`, optional `levels` metadata)
+  active multiscale level (`current_level`, optional `levels` metadata)
   so HUD/slider consumers stay in sync with server-driven LOD switches without
   forcing a full scene snapshot rebroadcast. Advertise the feature in
   `session.welcome.payload.features`, sequence it alongside `notify.scene`, and

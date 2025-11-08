@@ -46,7 +46,6 @@ def _make_notify_dims_frame(
     timestamp: float = 1.5,
     levels: Sequence[dict[str, Any]] | None = None,
     current_level: int = 0,
-    downgraded: bool | None = None,
     axis_labels: Sequence[str] | None = None,
     order: Sequence[int] | None = None,
     displayed: Sequence[int] | None = None,
@@ -72,9 +71,6 @@ def _make_notify_dims_frame(
         'mode': mode,
         'ndisplay': int(ndisplay),
     }
-
-    if downgraded is not None:
-        payload['downgraded'] = bool(downgraded)
 
     ndim = len(level_shapes[0]) if level_shapes else len(step_values)
     resolved_labels = list(axis_labels) if axis_labels is not None else [f"axis-{i}" for i in range(ndim)]
@@ -118,7 +114,6 @@ def _make_notify_dims_frame(
         plane_mode=(mode != 'volume'),
         axes=tuple(axes),
         levels=tuple(level_entries),
-        downgraded=downgraded,
         labels=None,
     )
     payload['dims_spec'] = dims_spec_to_payload(dims_spec)
@@ -314,7 +309,6 @@ def test_state_channel_notify_scene_includes_policies() -> None:
         'multiscale': {
             'policy': 'oversampling',
             'active_level': 2,
-            'downgraded': False,
             'index_space': 'zyx',
             'levels': [
                 {'index': 0, 'path': 'level_00', 'shape': [32, 32, 8], 'downsample': [1, 1, 1]},
@@ -345,7 +339,6 @@ def test_state_channel_notify_scene_includes_policies() -> None:
     assert isinstance(multiscale, dict)
     assert multiscale['policy'] == 'oversampling'
     assert multiscale['active_level'] == 2
-    assert multiscale['downgraded'] is False
     levels = multiscale['levels']
     assert isinstance(levels, list)
     assert levels[0]['path'] == 'level_00'

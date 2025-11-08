@@ -474,7 +474,6 @@ class EGLRendererWorker:
             previous_level=current_level,
             oversampling=decision.oversampling,
             timestamp=decision.timestamp,
-            downgraded=decision.downgraded,
             zoom_ratio=zoom_ratio,
             lock_level=self._lock_level,
             mode=self.viewport_state.mode,
@@ -484,11 +483,10 @@ class EGLRendererWorker:
         )
 
         logger.info(
-            "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
+            "intent.level_switch: prev=%d target=%d reason=%s",
             int(current_level),
             int(context.level),
             decision.reason,
-            intent.downgraded,
         )
 
         callback = self._level_intent_callback

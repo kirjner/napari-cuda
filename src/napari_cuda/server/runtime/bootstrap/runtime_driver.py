@@ -213,7 +213,6 @@ def setup_worker_runtime(
     worker._napari_layer = None  # type: ignore[attr-defined]
     worker._scene_source = None  # type: ignore[attr-defined]
     worker._set_current_level_index(0)  # type: ignore[attr-defined]
-    worker._viewport_state.volume.downgraded = False  # type: ignore[attr-defined]
     worker._viewport_state.volume.scale = (1.0, 1.0, 1.0)  # type: ignore[attr-defined]
     worker._data_wh = (int(worker.width), int(worker.height))  # type: ignore[attr-defined]
     worker._data_d = None  # type: ignore[attr-defined]

@@ -73,7 +73,6 @@ class LevelDecision:
     oversampling: Mapping[int, float]
     blocked_reason: Optional[str] = None
     cooldown_remaining_ms: float = 0.0
-    downgraded: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +276,6 @@ def evaluate_policy(
         oversampling=overs_map,
         blocked_reason=decision.blocked_reason,
         cooldown_remaining_ms=float(decision.cooldown_remaining_ms),
-        downgraded=False,
     )
 
 
@@ -314,14 +312,7 @@ def enforce_budgets(
                 )
             continue
 
-        downgraded = level != desired
-        if downgraded and log_layer_debug:
-            logger_ref.info(
-                "level downgrade: requested=%d active=%d",
-                desired,
-                level,
-            )
-        return replace(decision, selected_level=int(level), downgraded=downgraded)
+        return replace(decision, selected_level=int(level))
 
     raise RuntimeError("Unable to select multiscale level within budget")
 

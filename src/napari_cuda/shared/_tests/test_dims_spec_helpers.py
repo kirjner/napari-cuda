@@ -83,7 +83,6 @@ def _build_sample_spec() -> DimsSpec:
         plane_mode=True,
         axes=axes,
         levels=({"index": 0}, {"index": 1}),
-        downgraded=False,
         labels=("a", "b", "c"),
     )
 

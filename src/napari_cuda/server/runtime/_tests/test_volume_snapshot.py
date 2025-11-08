@@ -32,7 +32,6 @@ class _FakeLayerLogger:
         z_index: int | None,
         shape: tuple[int, ...],
         contrast: tuple[float, float],
-        downgraded: bool,
     ) -> None:
         self.calls.append(
             {
@@ -42,7 +41,6 @@ class _FakeLayerLogger:
                 "z_index": z_index,
                 "shape": shape,
                 "contrast": contrast,
-                "downgraded": downgraded,
             }
         )
 
@@ -122,18 +120,15 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         snapshot_iface,
         source=_Source(),
         applied=context,
-        downgraded=True,
     )
 
     assert result.level == 2
-    assert result.downgraded is True
     assert result.data_wh == (128, 256)
     assert result.data_d == 64
     assert pytest.approx(result.scale) == (0.5, 1.5, 3.0)
 
     volume_state = viewport_state.volume
     assert volume_state.level == 2
-    assert volume_state.downgraded is True
     assert volume_state.scale == (0.5, 1.5, 3.0)
 
     assert worker._volume_scale == (0.5, 1.5, 3.0)
@@ -143,7 +138,6 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
     assert logger.calls[-1]["mode"] == "volume"
     assert logger.calls[-1]["level"] == 2
     assert logger.calls[-1]["shape"] == (64, 256, 128)
-    assert logger.calls[-1]["downgraded"] is True
 
     assert calls["scale"] == (0.5, 1.5, 3.0)
     assert calls["volume"] == ("volume", 2)

@@ -112,9 +112,6 @@ def snapshot_multiscale_state(
     state["level_shapes"] = [
         [int(dim) for dim in shape] for shape in spec.level_shapes
     ]
-    if spec.downgraded is not None:
-        state["downgraded"] = bool(spec.downgraded)
-
     return state
 
 

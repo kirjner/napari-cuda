@@ -97,8 +97,6 @@ class NapariDimsMirror:
                 'current_level': multiscale_snapshot['current_level'],
                 'levels': [dict(entry) for entry in multiscale_snapshot['levels']],
             }
-            if 'downgraded' in multiscale_snapshot:
-                state.multiscale_state['downgraded'] = multiscale_snapshot['downgraded']
         else:
             state.multiscale_state = {}
         self._apply_multiscale_to_presenter(multiscale_snapshot)
@@ -125,8 +123,6 @@ class NapariDimsMirror:
                 entries.append(('multiscale', 'main', 'level', int(level_snapshot['level'])))
             if 'policy' in level_snapshot:
                 entries.append(('multiscale', 'main', 'policy', level_snapshot['policy']))
-            if 'downgraded' in level_snapshot:
-                entries.append(('multiscale', 'main', 'downgraded', bool(level_snapshot['downgraded'])))
         self._ledger.batch_record_confirmed(entries)
 
         if first_ready:
@@ -324,9 +320,6 @@ def _build_multiscale_snapshot(payload: Any) -> dict[str, Any] | None:
         'current_level': level_value,
         'level': level_value,
     }
-    downgraded = getattr(payload, 'downgraded', None)
-    if downgraded is not None:
-        snapshot['downgraded'] = bool(downgraded)
     return snapshot
 
 

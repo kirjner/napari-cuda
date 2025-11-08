@@ -40,7 +40,6 @@ class _FakeLayerLogger:
         z_index: int | None,
         shape: tuple[int, int],
         contrast: tuple[float, float],
-        downgraded: bool,
     ) -> None:
         self.calls.append(
             {
@@ -50,7 +49,6 @@ class _FakeLayerLogger:
                 "z_index": z_index,
                 "shape": shape,
                 "contrast": contrast,
-                "downgraded": downgraded,
             }
         )
 

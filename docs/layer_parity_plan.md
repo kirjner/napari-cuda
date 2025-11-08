@@ -15,7 +15,7 @@ Current State Snapshot
 * Notify pipeline: `NotifyDimsPayload` is now spec-only; server and client
   paths rely on `dims_spec` for axis/order/displayed metadata.
 * Ledger: reducers still write legacy mirrors (`view/main/ndisplay`,
-  `multiscale/main/{level,level_shapes,levels,downgraded}`,
+  `multiscale/main/{level,level_shapes,levels}`,
   `dims/main/current_step`) alongside the spec; bootstrap + level-switch
   transactions expect those tuples.
 * Viewport persistence: `_record_viewport_state` and `_store_*` continue
@@ -92,7 +92,7 @@ Testing & Validation
 * Integration: server bootstrap → notify → client ingest, runtime render
   loop, level switches, plane/volume restore.
 * Regression: ensure CUDA streaming + client control loops operate with
-  spec-only payloads; add coverage for downgraded multiscale + plane mode.
+  spec-only payloads; add coverage for multiscale + plane mode.
 
 -----------------------------------------------------------------------
 

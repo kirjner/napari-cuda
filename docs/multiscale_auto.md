@@ -156,7 +156,7 @@ We’re addressing both gaps with the following steps:
 
 4. **Documentation & UX**
    - Keep the harness in sync with the priming behavior but make it optional: if the worker advertises `ms_state.prime_complete=True`, the harness can skip its own warm-up sequence.
-   - Surface the active level (and whether it was downgraded) in `metrics.json` so we can regress-test level switches without scraping logs.
+   - Surface the active level in `metrics.json` so we can regress-test level switches without scraping logs.
 
 Execution order: implement the worker priming helper and render tick enforcement first (this resolves the missing timing samples we observed), then update the latency policy heuristics, and finally hook up the UX/telemetry improvements.
 

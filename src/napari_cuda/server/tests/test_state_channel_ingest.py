@@ -128,7 +128,6 @@ def _build_dims_spec(
         plane_mode=ndisplay < 3,
         axes=tuple(axes),
         levels=levels,
-        downgraded=False,
         labels=None,
     )
 
@@ -244,7 +243,6 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
                 ("dims", "main", "current_step", (60, 0, 0)),
                 ("multiscale", "main", "level_shapes", level_shapes),
                 ("multiscale", "main", "levels", tuple(dict(level) for level in dims_spec.levels)),
-                ("multiscale", "main", "downgraded", False),
                 ("dims", "main", "dims_spec", dims_spec_to_payload(dims_spec)),
             ],
             origin="test.seed",
@@ -387,7 +385,6 @@ async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
                 ("dims", "main", "current_step", (0, 0, 0)),
                 ("multiscale", "main", "level_shapes", level_shapes),
                 ("multiscale", "main", "levels", tuple(dict(entry) for entry in dims_spec.levels)),
-                ("multiscale", "main", "downgraded", False),
                 ("dims", "main", "dims_spec", dims_spec_to_payload(dims_spec)),
             ],
             origin="test.seed",
@@ -513,7 +510,7 @@ async def _test_roi_applied_once_on_level_switch() -> None:
         )
         assert ack["payload"]["status"] == "accepted"
 
-        harness.server._commit_level(level=1, level_shape=(16, 480, 640), downgraded=False)
+        harness.server._commit_level(level=1, level_shape=(16, 480, 640))
         await harness.drain_scheduled()
 
         assert len(roi_calls) == 1

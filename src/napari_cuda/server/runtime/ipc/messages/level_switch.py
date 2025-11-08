@@ -22,7 +22,6 @@ class LevelSwitchIntent:
     previous_level: int
     oversampling: Mapping[int, float]
     timestamp: float
-    downgraded: bool
     zoom_ratio: float | None = None
     lock_level: int | None = None
     mode: RenderMode = RenderMode.PLANE

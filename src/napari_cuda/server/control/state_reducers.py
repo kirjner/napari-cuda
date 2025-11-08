@@ -748,7 +748,6 @@ def reduce_bootstrap_state(
         plane_mode=resolved_ndisplay < 3,
         axes=tuple(axes_entries),
         levels=resolved_levels,
-        downgraded=False,
         labels=None,
     )
 
@@ -1281,7 +1280,6 @@ def reduce_level_update(
     level_shape: Optional[Sequence[int]] = None,
     shape: Optional[Sequence[int]] = None,
     applied: Mapping[str, Any] | object | None = None,
-    downgraded: Optional[bool] = None,
     intent_id: Optional[str] = None,
     timestamp: Optional[float] = None,
     origin: str = "control.multiscale",
@@ -1400,7 +1398,6 @@ def reduce_level_update(
         step=step_tuple,
         dims_spec_payload=_serialize_dims_spec(new_spec),
         level_shapes=updated_level_shapes if updated_level_shapes else None,
-        downgraded=bool(downgraded) if downgraded is not None else None,
         origin=origin,
         timestamp=ts,
         op_seq=next_op_seq,

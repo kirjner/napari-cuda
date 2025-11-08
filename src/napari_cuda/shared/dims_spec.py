@@ -62,7 +62,6 @@ class DimsSpec:
     plane_mode: bool
     axes: tuple[DimsSpecAxis, ...]
     levels: tuple[Mapping[str, Any], ...]
-    downgraded: bool | None
     labels: tuple[str, ...] | None
 
     def axis_by_label(self, label: str) -> DimsSpecAxis:
@@ -128,7 +127,6 @@ def dims_spec_to_payload(spec: DimsSpec | None) -> dict[str, Any] | None:
         "plane_mode": spec.plane_mode,
         "axes": dims_payload,
         "levels": [dict(level) for level in spec.levels],
-        "downgraded": spec.downgraded,
         "labels": list(spec.labels) if spec.labels is not None else None,
     }
 
@@ -183,13 +181,6 @@ def dims_spec_from_payload(data: Mapping[str, Any] | None) -> DimsSpec | None:
         assert isinstance(labels_entry, Sequence), "dims spec labels entry must be sequence"
         labels = tuple(str(v) for v in labels_entry)
 
-    downgraded_entry = data.get("downgraded")
-    downgraded_value: bool | None
-    if downgraded_entry is None:
-        downgraded_value = None
-    else:
-        downgraded_value = bool(downgraded_entry)
-
     return DimsSpec(
         version=int(data["version"]),
         ndim=int(data["ndim"]),
@@ -202,7 +193,6 @@ def dims_spec_from_payload(data: Mapping[str, Any] | None) -> DimsSpec | None:
         plane_mode=bool(data["plane_mode"]),
         axes=tuple(dims_payload),
         levels=tuple(levels),
-        downgraded=downgraded_value,
         labels=labels,
     )
 

@@ -78,10 +78,9 @@ def run(worker: EGLRendererWorker) -> None:
         if apply_iface.viewport_state.mode is RenderMode.VOLUME:
             apply_volume_metadata(apply_iface, source, applied_context)
             apply_volume_level(
-                worker,
+                apply_iface,
                 source,
                 applied_context,
-                downgraded=bool(apply_iface.viewport_state.volume.downgraded),
             )
         else:
             apply_plane_metadata(apply_iface, source, applied_context)

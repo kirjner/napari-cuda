@@ -44,8 +44,6 @@ def apply_volume_level(
     worker: Any,
     source: Any,
     context: lod.LevelContext,
-    *,
-    downgraded: bool,
 ) -> VolumeApplyResult:
     """Load + apply volume level mutations via the render-loop façade."""
 
@@ -54,7 +52,6 @@ def apply_volume_level(
         snapshot_iface,
         source,
         context,
-        downgraded=downgraded,
     )
 
 

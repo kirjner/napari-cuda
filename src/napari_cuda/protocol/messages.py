@@ -514,16 +514,12 @@ class NotifyScenePayload:
 @dataclass(slots=True)
 class NotifySceneLevelPayload:
     current_level: int
-    downgraded: bool | None = None
     levels: tuple[dict[str, Any], ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "current_level": int(self.current_level),
-                "downgraded": bool(self.downgraded)
-                if self.downgraded is not None
-                else None,
                 "levels": [dict(entry) for entry in self.levels] if self.levels else None,
             }
         )
@@ -534,7 +530,7 @@ class NotifySceneLevelPayload:
         _ensure_keyset(
             mapping,
             required=("current_level",),
-            optional=("downgraded", "levels"),
+            optional=("levels",),
             context="notify.scene.level payload",
         )
         try:
@@ -548,13 +544,7 @@ class NotifySceneLevelPayload:
                 _as_mutable_mapping(entry, "notify.scene.level payload.levels[]")
                 for entry in _as_sequence(levels_payload, "notify.scene.level payload.levels")
             )
-        downgraded_raw = mapping.get("downgraded")
-        downgraded: bool | None
-        if downgraded_raw is None:
-            downgraded = None
-        else:
-            downgraded = bool(downgraded_raw)
-        return cls(current_level=current_level, downgraded=downgraded, levels=levels)
+        return cls(current_level=current_level, levels=levels)
 
 
 @dataclass(slots=True)
@@ -670,7 +660,6 @@ class NotifyDimsPayload:
     level_shapes: tuple[tuple[int, ...], ...]
     levels: tuple[dict[str, Any], ...]
     current_level: int
-    downgraded: bool | None
     mode: str
     ndisplay: int
     dims_spec: DimsSpec
@@ -700,8 +689,6 @@ class NotifyDimsPayload:
 
         payload["level_shapes"] = [[int(v) for v in shape] for shape in self.level_shapes]
 
-        if self.downgraded is not None:
-            payload["downgraded"] = bool(self.downgraded)
         if self.labels is not None:
             payload["labels"] = [str(label) for label in self.labels]
         payload["dims_spec"] = dims_spec_to_payload(self.dims_spec)
@@ -713,16 +700,13 @@ class NotifyDimsPayload:
         _ensure_keyset(
             mapping,
             required=("step", "levels", "current_level", "mode", "ndisplay", "level_shapes", "dims_spec"),
-            optional=("downgraded", "labels", "current_step"),
+            optional=("labels", "current_step"),
             context="notify.dims payload",
         )
 
         step_seq = _as_sequence(mapping["step"], "notify.dims payload.step")
         current_step_seq = _as_sequence(mapping.get("current_step", step_seq), "notify.dims payload.current_step")
         levels_seq = _as_sequence(mapping["levels"], "notify.dims payload.levels")
-
-        downgraded_value = mapping.get("downgraded")
-        downgraded = bool(downgraded_value) if downgraded_value is not None else None
 
         labels_value = mapping.get("labels")
         labels = (
@@ -753,7 +737,6 @@ class NotifyDimsPayload:
             level_shapes=level_shapes,
             levels=tuple(levels),
             current_level=int(mapping["current_level"]),
-            downgraded=downgraded,
             mode=str(mapping["mode"]),
             ndisplay=int(mapping["ndisplay"]),
             labels=labels,

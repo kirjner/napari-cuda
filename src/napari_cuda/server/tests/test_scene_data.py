@@ -57,7 +57,6 @@ def test_snapshot_render_state_preserves_dims_metadata() -> None:
             {"index": 0, "shape": [10, 20, 30]},
             {"index": 1, "shape": [5, 10, 15]},
         ),
-        downgraded=False,
         labels=None,
     )
     ledger.record_confirmed(

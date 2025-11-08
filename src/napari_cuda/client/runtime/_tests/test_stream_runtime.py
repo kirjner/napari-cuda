@@ -183,7 +183,6 @@ def _make_spec(
         plane_mode=ndisplay < 3,
         axes=tuple(axes),
         levels=tuple(level_entries),
-        downgraded=None,
         labels=None,
     )
 

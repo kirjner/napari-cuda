@@ -372,17 +372,15 @@ class EGLHeadlessServer:
 
         if logger.isEnabledFor(logging.INFO):
             logger.info(
-                "apply.level_intent: prev=%d target=%d reason=%s downgraded=%s",
+                "apply.level_intent: prev=%d target=%d reason=%s",
                 int(intent.previous_level),
                 int(intent.selected_level),
                 intent.reason,
-                bool(intent.downgraded),
             )
         reduce_level_update(
             self._state_ledger,
             level=int(intent.selected_level),
             level_shape=tuple(int(dim) for dim in intent.level_shape) if intent.level_shape is not None else None,
-            downgraded=bool(intent.downgraded),
             intent_id=None,
             timestamp=None,
             origin="worker.state.level",

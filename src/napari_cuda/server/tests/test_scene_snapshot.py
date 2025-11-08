@@ -76,7 +76,6 @@ def _seed_plane_ledger(ndisplay: int = 2) -> ServerStateLedger:
         levels=(
             {"index": 0, "shape": [10, 20, 30], "downsample": [1.0, 1.0, 1.0]},
         ),
-        downgraded=False,
         labels=("z", "y", "x"),
     )
     ledger.record_confirmed("dims", "main", "dims_spec", dims_spec_to_payload(spec), origin="test.plane")

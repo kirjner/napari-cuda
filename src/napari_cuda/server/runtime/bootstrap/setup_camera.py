@@ -185,7 +185,6 @@ def _bootstrap_camera_pose(
         facade.apply_volume_level(
             source,
             applied_context,
-            downgraded=False,
         )
         extent = worker._volume_world_extents()
         if extent is None:
@@ -212,8 +211,7 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
     source = worker._ensure_scene_source()
     requested_level = _coarsest_level_index(source)
     assert requested_level is not None and requested_level >= 0, "Volume mode requires a multiscale level"
-    selected_level, downgraded = facade.resolve_volume_intent_level(source, int(requested_level))
-    worker._viewport_state.volume.downgraded = bool(downgraded)
+    selected_level = facade.resolve_volume_intent_level(source, int(requested_level))
 
     decision = lod.LevelDecision(
         desired_level=int(requested_level),
@@ -221,7 +219,6 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
         reason="ndisplay-3d",
         timestamp=time.perf_counter(),
         oversampling={},
-        downgraded=bool(downgraded),
     )
     spec = ledger_dims_spec(worker._ledger)
     assert spec is not None, "dims spec required before entering volume"
@@ -249,7 +246,6 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
         previous_level=int(worker._current_level_index()),
         oversampling={},
         timestamp=decision.timestamp,
-        downgraded=bool(downgraded),
         zoom_ratio=None,
         lock_level=worker._lock_level,
         mode=worker.viewport_state.mode,
@@ -258,11 +254,10 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
         level_shape=shape_tuple,
     )
     logger.info(
-        "intent.level_switch: prev=%d target=%d reason=%s downgraded=%s",
+        "intent.level_switch: prev=%d target=%d reason=%s",
         int(worker._current_level_index()),
         int(context.level),
         intent.reason,
-        intent.downgraded,
     )
     requested = worker._viewport_runner.request_level(int(context.level))
     if requested and worker._level_intent_callback is not None:
@@ -284,10 +279,9 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
         _emit_current_camera_pose(worker, "enter-3d")
     if logger.isEnabledFor(logging.INFO):
         logger.info(
-            "toggle.enter_3d: requested_level=%d selected_level=%d downgraded=%s",
+            "toggle.enter_3d: requested_level=%d selected_level=%d",
             int(requested_level),
             int(selected_level),
-            bool(downgraded),
         )
     worker._request_encoder_idr()
     worker._mark_render_tick_needed()
@@ -354,7 +348,6 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
         previous_level=int(worker._current_level_index()),
         oversampling={},
         timestamp=decision.timestamp,
-        downgraded=False,
         mode=worker.viewport_state.mode,
         plane_state=deepcopy(worker.viewport_state.plane),
         volume_state=deepcopy(worker.viewport_state.volume),

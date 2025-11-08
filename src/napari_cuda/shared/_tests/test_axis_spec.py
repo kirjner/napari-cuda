@@ -79,7 +79,6 @@ def _spec_payload() -> dict[str, object]:
             {"index": 0, "shape": [10, 20, 30]},
             {"index": 1, "shape": [4, 12, 15]},
         ],
-        "downgraded": False,
         "labels": ["z", "y", "x"],
     }
 

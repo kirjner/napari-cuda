@@ -116,10 +116,6 @@ def _build_policies_block(
     if level_entry is not None and level_entry.value is not None:
         policy_payload["active_level"] = level_entry.value
 
-    downgraded_entry = snapshot.get(("multiscale", "main", "downgraded"))
-    if downgraded_entry is not None and downgraded_entry.value is not None:
-        policy_payload["downgraded"] = bool(downgraded_entry.value)
-
     index_space_entry = snapshot.get(("multiscale", "main", "index_space"))
     if index_space_entry is not None and index_space_entry.value is not None:
         policy_payload["index_space"] = str(index_space_entry.value)

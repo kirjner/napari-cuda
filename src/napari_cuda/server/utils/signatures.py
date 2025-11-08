@@ -102,7 +102,6 @@ def dims_content_signature(
     labels: Optional[Tuple[str, ...]],
     levels: Tuple[Mapping[str, Any], ...],
     level_shapes: Tuple[Tuple[int, ...], ...],
-    downgraded: Optional[bool],
 ) -> SignatureToken:
     """Signature describing the dims payload delivered to clients."""
 
@@ -118,7 +117,6 @@ def dims_content_signature(
         None if labels is None else tuple(str(v) for v in labels),
         levels_sig,
         tuple(tuple(int(dim) for dim in shape) for shape in level_shapes),
-        None if downgraded is None else bool(downgraded),
     )
     return SignatureToken(token)
 
@@ -140,7 +138,6 @@ def dims_content_signature_from_payload(payload: Any) -> SignatureToken:
         labels=None if payload.labels is None else tuple(str(v) for v in payload.labels),
         levels=tuple(dict(level) for level in payload.levels),
         level_shapes=tuple(tuple(int(dim) for dim in shape) for shape in spec.level_shapes),
-        downgraded=payload.downgraded,
     )
 
 

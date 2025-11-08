@@ -23,7 +23,6 @@ class LayerAssignmentLogger:
         z_index: Optional[int],
         shape: tuple[int, ...],
         contrast: tuple[float, float],
-        downgraded: bool,
     ) -> None:
         if not enabled or not self.logger_ref.isEnabledFor(logging.INFO):
             return
@@ -32,14 +31,13 @@ class LayerAssignmentLogger:
             return
         self._last_key = key
         self.logger_ref.info(
-            "layer assign: mode=%s level=%d z=%s shape=%s contrast=(%.4f, %.4f) downgraded=%s",
+            "layer assign: mode=%s level=%d z=%s shape=%s contrast=(%.4f, %.4f)",
             mode,
             int(level),
             z_index if z_index is not None else "na",
             "x".join(str(int(x)) for x in shape),
             float(contrast[0]),
             float(contrast[1]),
-            bool(downgraded),
         )
 
 

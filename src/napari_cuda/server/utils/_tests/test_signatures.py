@@ -48,7 +48,6 @@ def _sample_axes_spec() -> DimsSpec:
         plane_mode=True,
         axes=tuple(axes),
         levels=tuple({"index": idx, "shape": list(shape)} for idx, shape in enumerate(level_shapes)),
-        downgraded=False,
         labels=None,
     )
 
@@ -141,7 +140,6 @@ def test_dims_content_signature_sorts_level_items() -> None:
             {"shape": (50, 50), "downsample": (2, 2)},
         ),
         level_shapes=((100, 100), (50, 50)),
-        downgraded=False,
     )
     token_b = dims_content_signature(
         current_step=(0, 0),
@@ -154,7 +152,6 @@ def test_dims_content_signature_sorts_level_items() -> None:
         labels=None,
         levels=({"downsample": (1, 1), "shape": (100, 100)}, {"downsample": (2, 2), "shape": (50, 50)}),
         level_shapes=((100, 100), (50, 50)),
-        downgraded=False,
     )
     assert token_a.value == token_b.value
 

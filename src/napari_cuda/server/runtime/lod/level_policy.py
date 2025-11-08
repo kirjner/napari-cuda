@@ -155,14 +155,13 @@ def resolve_volume_intent_level(
     worker: EGLRendererWorker,
     source: ZarrSceneSource,
     requested_level: int,
-) -> tuple[int, bool]:
-    """Clamp volume requests to the coarsest available descriptor."""
+) -> int:
+    """Return the coarsest available descriptor, ignoring finer requests."""
 
     descriptors = source.level_descriptors
     if not descriptors:
-        return int(requested_level), False
-    coarsest = max(0, len(descriptors) - 1)
-    return int(coarsest), bool(coarsest != int(requested_level))
+        return int(requested_level)
+    return max(0, len(descriptors) - 1)
 
 
 def load_volume(

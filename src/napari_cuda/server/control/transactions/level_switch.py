@@ -19,7 +19,6 @@ def apply_level_switch_transaction(
     step: Sequence[int],
     dims_spec_payload: Mapping[str, Any],
     level_shapes: Optional[Sequence[Sequence[int]]] = None,
-    downgraded: Optional[bool] = None,
     origin: str = "worker.state.level",
     timestamp: Optional[float] = None,
     op_seq: Optional[int] = None,
@@ -46,11 +45,6 @@ def apply_level_switch_transaction(
         batch_entries.append(
             ("multiscale", "main", "level_shapes", normalized_shapes),
         )
-    if downgraded is not None:
-        batch_entries.append(
-            ("multiscale", "main", "downgraded", bool(downgraded)),
-        )
-
     # Persist the requested step with the level switch so the worker can apply
     # the snapshot verbatim without additional remapping.
     batch_entries.append(("dims", "main", "current_step", step_tuple))

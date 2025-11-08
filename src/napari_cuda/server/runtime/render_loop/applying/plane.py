@@ -197,7 +197,6 @@ def apply_slice_snapshot(
         snapshot_iface.reset_last_plane_pose()
 
     apply_plane_metadata(worker, source, applied_context)
-    snapshot_iface.viewport_state.volume.downgraded = False
     apply_slice_camera_pose(snapshot_iface, snapshot)
     return apply_slice_level(snapshot_iface, source, applied_context)
 
@@ -285,7 +284,6 @@ def apply_slice_level(
             z_index=snapshot_iface.z_index(),
             shape=(int(height_px), int(width_px)),
             contrast=applied.contrast,
-            downgraded=snapshot_iface.viewport_state.volume.downgraded,
         )
 
     mark_slice_applied(
