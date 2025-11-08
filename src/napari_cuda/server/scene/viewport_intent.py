@@ -49,15 +49,19 @@ class PlanePoseIntent:
     def from_payload(payload: Mapping[str, Any] | None) -> PlanePoseIntent | None:
         if payload is None:
             return None
-        rect_payload = payload["rect"]
-        center_payload = payload["center"]
-        sig_payload = payload["roi_signature"]
-        zoom_payload = payload["zoom"]
+        rect_payload = payload.get("rect")
+        center_payload = payload.get("center")
+        sig_payload = payload.get("roi_signature")
+        zoom_payload = payload.get("zoom")
+        rect = tuple(float(v) for v in rect_payload) if rect_payload is not None else None
+        center = tuple(float(v) for v in center_payload) if center_payload is not None else None
+        zoom = float(zoom_payload) if zoom_payload is not None else None
+        signature = tuple(int(v) for v in sig_payload) if sig_payload is not None else None
         return PlanePoseIntent(
-            rect=tuple(float(v) for v in rect_payload),
-            center=tuple(float(v) for v in center_payload),
-            zoom=float(zoom_payload),
-            roi_signature=tuple(int(v) for v in sig_payload),
+            rect=rect,
+            center=center,
+            zoom=zoom,
+            roi_signature=signature,
         )
 
 
@@ -89,17 +93,22 @@ class VolumePoseIntent:
     def from_payload(payload: Mapping[str, Any] | None) -> VolumePoseIntent | None:
         if payload is None:
             return None
-        center_payload = payload["center"]
-        angles_payload = payload["angles"]
-        distance_payload = payload["distance"]
-        fov_payload = payload["fov"]
-        level_payload = payload["level"]
+        center_payload = payload.get("center")
+        angles_payload = payload.get("angles")
+        distance_payload = payload.get("distance")
+        fov_payload = payload.get("fov")
+        level_payload = payload.get("level")
+        center = tuple(float(v) for v in center_payload) if center_payload is not None else None
+        angles = tuple(float(v) for v in angles_payload) if angles_payload is not None else None
+        distance = float(distance_payload) if distance_payload is not None else None
+        fov = float(fov_payload) if fov_payload is not None else None
+        level = int(level_payload) if level_payload is not None else None
         return VolumePoseIntent(
-            center=tuple(float(v) for v in center_payload),
-            angles=tuple(float(v) for v in angles_payload),
-            distance=float(distance_payload),
-            fov=float(fov_payload),
-            level=int(level_payload),
+            center=center,
+            angles=angles,
+            distance=distance,
+            fov=fov,
+            level=level,
         )
 
 
@@ -132,6 +141,10 @@ class ViewportIntent:
     @property
     def displayed_axes(self) -> tuple[int, ...]:
         return tuple(int(v) for v in self.dims_spec.displayed)
+
+    @property
+    def order(self) -> tuple[int, ...]:
+        return tuple(int(v) for v in self.dims_spec.order)
 
     @property
     def current_level(self) -> int:

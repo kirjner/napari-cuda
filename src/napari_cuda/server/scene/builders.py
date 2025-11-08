@@ -28,6 +28,7 @@ from napari_cuda.server.scene.models import (
 )
 from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode
+from napari_cuda.server.scene.viewport_intent import ViewportIntent
 from napari_cuda.shared.dims_spec import (
     dims_block_from_spec,
     dims_spec_from_payload,
@@ -242,22 +243,15 @@ def snapshot_viewport_state(
 ) -> dict[str, Any]:
     """Extract viewport mode and plane/volume payloads from the ledger snapshot."""
 
-    payload: dict[str, Any] = {}
-
-    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
-    if spec_entry is not None and spec_entry.value is not None:
-        spec = dims_spec_from_payload(spec_entry.value)
-        if spec is not None:
-            payload["mode"] = RenderMode.VOLUME.name if int(spec.ndisplay) >= 3 else RenderMode.PLANE.name
-
-    plane_entry = snapshot.get(("viewport", "plane", "state"))
-    if plane_entry is not None and plane_entry.value is not None:
-        payload["plane"] = plane_entry.value
-
-    volume_entry = snapshot.get(("viewport", "volume", "state"))
-    if volume_entry is not None and volume_entry.value is not None:
-        payload["volume"] = volume_entry.value
-
+    intent_entry = snapshot.get(("scene", "main", "viewport_intent"))
+    assert intent_entry is not None, "ledger missing viewport_intent entry"
+    intent_payload = intent_entry.value
+    intent = ViewportIntent.from_payload(intent_payload)
+    payload: dict[str, Any] = {"mode": intent.mode.name}
+    if intent.plane_pose is not None:
+        payload["plane"] = intent.plane_pose.to_payload()
+    if intent.volume_pose is not None:
+        payload["volume"] = intent.volume_pose.to_payload()
     return payload
 
 
@@ -659,35 +653,54 @@ def build_ledger_snapshot(
     """Construct a render snapshot from confirmed ledger state."""
 
     snapshot = snapshot if snapshot is not None else ledger.snapshot()
-    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
-    if spec_entry is None:
-        raise AssertionError("ledger missing dims_spec entry for render snapshot")
-    assert isinstance(spec_entry, LedgerEntry), "ledger dims_spec entry malformed"
-    dims_spec = dims_spec_from_payload(spec_entry.value)
-    assert dims_spec is not None, "dims spec ledger entry missing payload"
+    intent_entry = snapshot.get(("scene", "main", "viewport_intent"))
+    assert intent_entry is not None, "ledger missing viewport_intent entry"
+    intent_payload = intent_entry.value
+    intent = ViewportIntent.from_payload(intent_payload)
+    dims_spec = intent.dims_spec
     validate_ledger_against_dims_spec(dims_spec, snapshot)
 
-    plane_center_tuple = _ledger_value(snapshot, "camera_plane", "main", "center")
-    plane_zoom_float = _ledger_value(snapshot, "camera_plane", "main", "zoom")
-    plane_rect_tuple = _ledger_value(snapshot, "camera_plane", "main", "rect")
+    plane_pose = intent.plane_pose
+    plane_center_tuple = (
+        tuple(float(value) for value in plane_pose.center)
+        if plane_pose is not None and plane_pose.center is not None
+        else None
+    )
+    plane_zoom_float = float(plane_pose.zoom) if plane_pose is not None and plane_pose.zoom is not None else None
+    plane_rect_tuple = (
+        tuple(float(value) for value in plane_pose.rect)
+        if plane_pose is not None and plane_pose.rect is not None
+        else None
+    )
 
-    volume_center_tuple = _ledger_value(snapshot, "camera_volume", "main", "center")
-    volume_angles_tuple = _ledger_value(snapshot, "camera_volume", "main", "angles")
-    volume_distance_float = _ledger_value(snapshot, "camera_volume", "main", "distance")
-    volume_fov_float = _ledger_value(snapshot, "camera_volume", "main", "fov")
+    volume_pose = intent.volume_pose
+    volume_center_tuple = (
+        tuple(float(value) for value in volume_pose.center)
+        if volume_pose is not None and volume_pose.center is not None
+        else None
+    )
+    volume_angles_tuple = (
+        tuple(float(value) for value in volume_pose.angles)
+        if volume_pose is not None and volume_pose.angles is not None
+        else None
+    )
+    volume_distance_float = (
+        float(volume_pose.distance) if volume_pose is not None and volume_pose.distance is not None else None
+    )
+    volume_fov_float = float(volume_pose.fov) if volume_pose is not None and volume_pose.fov is not None else None
 
-    current_step = tuple(int(v) for v in dims_spec.current_step)
-    dims_version = _version_or_none(spec_entry.version)
+    current_step = intent.current_step
+    dims_version = intent.dims_version
 
-    ndisplay_val = int(dims_spec.ndisplay)
-    dims_mode = "volume" if ndisplay_val >= 3 else "plane"
-    displayed_axes = tuple(int(idx) for idx in dims_spec.displayed)
-    order_axes = tuple(int(idx) for idx in dims_spec.order)
+    ndisplay_val = intent.ndisplay
+    dims_mode = intent.mode.name.lower()
+    displayed_axes = intent.displayed_axes
+    order_axes = intent.order
     axis_labels = tuple(axis.label for axis in dims_spec.axes)
-    dims_labels = tuple(str(lbl) for lbl in dims_spec.labels) if dims_spec.labels is not None else None
-    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
-    current_level = int(dims_spec.current_level)
-    multiscale_level_version = dims_version
+    dims_labels = dims_spec.labels
+    level_shapes = intent.level_shapes
+    current_level = intent.current_level
+    multiscale_level_version = intent.multiscale_version
 
     volume_mode = _ledger_value(snapshot, "volume", "main", "rendering")
     volume_colormap = _ledger_value(snapshot, "volume", "main", "colormap")
@@ -765,15 +778,21 @@ def build_ledger_snapshot(
                 camera_versions[f"{prefix}.{camera_key}"] = int(version_value)
     camera_versions_payload = camera_versions or None
 
-    op_seq_entry = snapshot.get(("scene", "main", "op_seq"))
-    op_seq_value = int(op_seq_entry.value) if op_seq_entry is not None and op_seq_entry.value is not None else 0
+    op_seq_value = int(intent.op_seq) if intent.op_seq is not None else 0
+
+    camera_versions: dict[str, int] = {}
+    if intent.plane_state_version is not None:
+        camera_versions["plane.state"] = int(intent.plane_state_version)
+    if intent.volume_state_version is not None:
+        camera_versions["volume.state"] = int(intent.volume_state_version)
+    camera_versions_payload = camera_versions or None
 
     return RenderLedgerSnapshot(
-        plane_center=plane_center_tuple if plane_center_tuple is not None else None,
+        plane_center=plane_center_tuple,
         plane_zoom=plane_zoom_float,
-        plane_rect=plane_rect_tuple if plane_rect_tuple is not None else None,
-        volume_center=volume_center_tuple if volume_center_tuple is not None else None,
-        volume_angles=volume_angles_tuple if volume_angles_tuple is not None else None,
+        plane_rect=plane_rect_tuple,
+        volume_center=volume_center_tuple,
+        volume_angles=volume_angles_tuple,
         volume_distance=volume_distance_float,
         volume_fov=volume_fov_float,
         current_step=current_step,
