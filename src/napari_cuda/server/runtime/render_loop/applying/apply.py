@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Optional
 
 from napari_cuda.server.runtime.lod.context import build_level_context
 from napari_cuda.server.runtime.render_loop.applying.interface import (
@@ -18,6 +18,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 from napari_cuda.server.utils.signatures import SignatureToken
+from napari_cuda.shared.dims_spec import dims_spec_remap_step_for_level
 
 from .plane import (
     aligned_roi_signature,
@@ -34,20 +35,6 @@ logger = logging.getLogger(__name__)
 
 apply_slice_roi = _apply_slice_roi
 apply_plane_slice_roi = apply_slice_roi
-
-
-def _clamp_step_for_shape(step: Sequence[int], shape: Sequence[int]) -> tuple[int, ...]:
-    clamped: list[int] = []
-    for idx, bound in enumerate(shape):
-        limit = max(1, int(bound))
-        value = 0
-        if idx < len(step):
-            try:
-                value = int(step[idx])
-            except Exception:
-                value = 0
-        clamped.append(max(0, min(limit - 1, value)))
-    return tuple(clamped)
 
 
 @contextmanager
@@ -110,11 +97,10 @@ def _resolve_snapshot_ops(
     target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
     level_changed = target_level != prev_level
 
-    snapshot_step = (
-        tuple(int(v) for v in snapshot.current_step)
-        if snapshot.current_step is not None
-        else None
-    )
+    dims_spec = snapshot.dims_spec
+    assert dims_spec is not None, "render snapshot missing dims_spec"
+
+    snapshot_step = dims_spec.current_step
 
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
     ledger_snapshot_step = snapshot_iface.ledger_step()
@@ -139,15 +125,24 @@ def _resolve_snapshot_ops(
         if step_hint is None and ledger_snapshot_step is not None:
             step_hint = tuple(int(v) for v in ledger_snapshot_step)
 
+        spec = snapshot.dims_spec
         applied_context = None
         if load_needed:
             assert step_hint is not None, "volume load requires explicit step"
-            descriptor = source.level_descriptors[int(effective_level)]
-            clamped_step = _clamp_step_for_shape(step_hint, descriptor.shape)
+            base_step = tuple(int(v) for v in step_hint)
+            if spec is not None and spec.current_level is not None:
+                curr_level = int(spec.current_level)
+                if curr_level != int(effective_level):
+                    base_step = dims_spec_remap_step_for_level(
+                        spec,
+                        step=base_step,
+                        prev_level=curr_level,
+                        next_level=int(effective_level),
+                    )
             applied_context = build_level_context(
                 source=source,
                 level=int(effective_level),
-                step=clamped_step,
+                step=base_step,
             )
 
         ops["volume"] = {
@@ -165,12 +160,21 @@ def _resolve_snapshot_ops(
     if step_hint is None and ledger_snapshot_step is not None:
         step_hint = tuple(int(v) for v in ledger_snapshot_step)
     assert step_hint is not None, "plane apply requires explicit step"
-    descriptor = source.level_descriptors[int(target_level)]
-    clamped_step = _clamp_step_for_shape(step_hint, descriptor.shape)
+    spec = snapshot.dims_spec
+    base_step = tuple(int(v) for v in step_hint)
+    if spec is not None and spec.current_level is not None:
+        curr_level = int(spec.current_level)
+        if curr_level != int(target_level):
+            base_step = dims_spec_remap_step_for_level(
+                spec,
+                step=base_step,
+                prev_level=curr_level,
+                next_level=int(target_level),
+            )
     applied_context = build_level_context(
         source=source,
         level=int(target_level),
-        step=clamped_step,
+        step=base_step,
     )
     step_tuple = tuple(int(v) for v in applied_context.step)
     level_int = int(applied_context.level)

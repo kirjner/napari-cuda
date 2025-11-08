@@ -291,7 +291,7 @@ class _StubWorker:
 def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
     level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
-    current_step = (5, 0, 0)
+    current_step = (4, 0, 0)
     order = (0, 1, 2)
     axis_labels = ("z", "y", "x")
     spec = _make_axes_spec(
@@ -357,7 +357,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
     assert worker.viewport_state.mode is RenderMode.VOLUME
     assert worker.configure_calls == 1
-    assert calls["build"] == (2, (1, 0, 0))
+    assert calls["build"] == (2, (0, 0, 0))
     assert calls["volume"] == 2
     assert call_order == ["volume", "configure"]
     assert worker.viewport_state.mode is RenderMode.VOLUME
@@ -541,7 +541,7 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
 def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch: pytest.MonkeyPatch) -> None:
     worker = _StubWorker(use_volume=False, level=1)
     level_shapes = ((10, 10, 10), (5, 5, 5), (2, 2, 2))
-    current_step = (5, 0, 0)
+    current_step = (4, 0, 0)
     order = (0, 1, 2)
     axis_labels = ("z", "y", "x")
     spec = _make_axes_spec(
