@@ -114,7 +114,7 @@ def _resolve_snapshot_ops(
 
     if target_volume:
         # Apply path is read-only for level: use the level carried by the snapshot
-        load_needed = snapshot_level != current_level
+        load_needed = (snapshot_level != current_level) or (not was_volume)
         step_hint = snapshot_step
         if step_hint is None and ledger_snapshot_step is not None:
             step_hint = tuple(int(v) for v in ledger_snapshot_step)
