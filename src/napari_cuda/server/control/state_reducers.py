@@ -998,6 +998,8 @@ def reduce_view_update(
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     spec = _get_dims_spec(ledger)
+    plane_state = _load_plane_state(ledger)
+    volume_state = _load_volume_state(ledger)
 
     if ndisplay is not None:
         target_ndisplay = 3 if int(ndisplay) >= 3 else 2
@@ -1010,7 +1012,6 @@ def reduce_view_update(
     baseline_step = tuple(int(v) for v in spec.current_step) if spec.current_step else None
 
     if target_ndisplay >= 3:
-        plane_state = _load_plane_state(ledger)
         level_idx = int(spec.current_level)
         if baseline_step is not None:
             step_tuple = tuple(int(v) for v in baseline_step)
@@ -1020,6 +1021,11 @@ def reduce_view_update(
         plane_state.target_level = level_idx
         plane_state.applied_level = level_idx
         plane_state.awaiting_level_confirm = False
+
+        snapshot_level = plane_state.snapshot_level
+        assert snapshot_level is not None, "plane snapshot level required for volume toggle"
+        volume_state.level = int(snapshot_level)
+
         _store_plane_state(
             ledger,
             plane_state,
@@ -1028,7 +1034,6 @@ def reduce_view_update(
             metadata=metadata,
         )
 
-        volume_state = _load_volume_state(ledger)
         _store_volume_state(
             ledger,
             volume_state,
@@ -1075,6 +1080,14 @@ def reduce_view_update(
     op_entry = ledger.get("scene", "main", "op_seq")
     next_op_seq = int(op_entry.value) + 1 if op_entry is not None and isinstance(op_entry.value, int) else 1
 
+    active_mode = "volume" if int(target_ndisplay) >= 3 else "plane"
+    if active_mode == "volume":
+        level_value = volume_state.level
+        assert level_value is not None, "volume level missing for view toggle"
+        active_level = int(level_value)
+    else:
+        active_level = int(spec.current_level)
+
     stored_entries = apply_view_toggle_transaction(
         ledger=ledger,
         op_seq=next_op_seq,
@@ -1082,6 +1095,8 @@ def reduce_view_update(
         order_value=order_value,
         displayed_value=displayed_value,
         dims_spec_payload=_serialize_dims_spec(new_spec),
+        active_mode=active_mode,
+        active_level=active_level,
         origin=origin,
         timestamp=ts,
     )
@@ -1098,15 +1113,6 @@ def reduce_view_update(
         displayed_value,
         version,
         origin,
-    )
-
-    # Update ActiveView based on the new display mode and current level
-    apply_active_view_transaction(
-        ledger=ledger,
-        mode=("volume" if int(target_ndisplay) >= 3 else "plane"),
-        level=int(new_spec.current_level),
-        origin=origin,
-        timestamp=ts,
     )
 
     return ServerLedgerUpdate(
@@ -1223,15 +1229,6 @@ def reduce_plane_restore(
         op_kind="plane-restore",
     )
 
-    # Active view is plane at the requested level
-    apply_active_view_transaction(
-        ledger=ledger,
-        mode="plane",
-        level=level_idx,
-        origin=origin,
-        timestamp=ts,
-    )
-
     return stored
 
 
@@ -1297,15 +1294,6 @@ def reduce_volume_restore(
         origin=origin,
         timestamp=ts,
         metadata=metadata,
-    )
-
-    # Active view is volume at the requested level
-    apply_active_view_transaction(
-        ledger=ledger,
-        mode="volume",
-        level=level_idx,
-        origin=origin,
-        timestamp=ts,
     )
 
     return stored

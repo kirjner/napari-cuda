@@ -14,6 +14,7 @@ References:
 
 ## Current State (2025‑11‑09)
 - ActiveView authority in ledger; server emits `notify.level` (resumable).
+- View toggles stamp ActiveView immediately with the intended mode+level so the HUD never lags behind plane/volume switches.
 - Client consumes `notify.level`; HUD renders mode/level from ActiveView.
 - DimsSpec-first notify for dims metadata; render mailbox with unified signature (per‑block planned).
 
@@ -68,4 +69,3 @@ References:
 ## Status Tags
 - Implemented: ActiveView + notify.level; HUD integration; server/client wiring; protocol rename + tests.
 - Next: remove `current_level` in DimsSpec/notify.dims; remove multiscale writes; per‑block signatures; apply API rename.
-

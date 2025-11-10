@@ -17,6 +17,7 @@ Tracks intentional updates to the architecture spec and the authoritative module
 - **Protocol rename**: `notify.scene.level` → `notify.level`. Constants/payloads/builders/parsers/tests renamed under src/napari_cuda/protocol/*.
 - **Handshake/Resumable features**: server advertises `notify.level` as resumable; history store tracks it; state channel stores the resume cursor.
 - **Baseline replay**: new `send_level_snapshot` and connect-time baseline now replay the stored ActiveView snapshot to every client, so HUDs see mode/level on connect (src/napari_cuda/server/control/topics/notify/level.py, `notify/baseline.py`).
+- **ActiveView derives from intented state**: `reduce_view_update` now passes the plane/volume intent into `apply_view_toggle_transaction`, so the ledger records the target mode+level immediately (no stale dims_spec). Plane/volume restore reducers remain worker-driven; only level switches rewrite ActiveView afterward.
 
 ### Client
 - **State channel** now negotiates and consumes `notify.level` (see `_REQUIRED_FEATURES`, `_RESUMABLE_TOPICS`, and `_ingest_notify_level` in src/napari_cuda/client/control/control_channel_client.py). Channel threads forward the callback into `ClientStreamLoop`.
