@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import (
     Any,
     Mapping,
@@ -77,6 +77,38 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
+@dataclass(frozen=True)
+class _ActiveViewState:
+    mode: RenderMode
+    level: int
+
+
+def _active_view_state(
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
+) -> _ActiveViewState:
+    entry = snapshot.get(("viewport", "active", "state"))
+    if entry is None or entry.value is None:
+        raise AssertionError("active view missing from snapshot")
+    value = entry.value
+    if not isinstance(value, Mapping):
+        raise AssertionError("active view payload must be a mapping")
+    mode_value = value.get("mode")
+    if not isinstance(mode_value, str):
+        raise AssertionError("active view mode missing")
+    normalized_mode = mode_value.lower()
+    if normalized_mode == "plane":
+        resolved_mode = RenderMode.PLANE
+    elif normalized_mode == "volume":
+        resolved_mode = RenderMode.VOLUME
+    else:
+        raise AssertionError(f"unknown active view mode: {mode_value!r}")
+    level_value = value.get("level")
+    if level_value is None:
+        raise AssertionError("active view level missing")
+    return _ActiveViewState(mode=resolved_mode, level=int(level_value))
+
+
+# ---------------------------------------------------------------------------
 # Ledger adapters
 
 
@@ -95,19 +127,12 @@ def snapshot_multiscale_state(
     if index_space_entry is not None and index_space_entry.value is not None:
         state["index_space"] = str(index_space_entry.value)
 
-    level_entry = snapshot.get(("multiscale", "main", "level"))
-    if level_entry is not None and level_entry.value is not None:
-        level_value = level_entry.value
-        if isinstance(level_value, (int, float)):
-            state["current_level"] = int(level_value)
-        else:
-            state["current_level"] = level_value
-
     spec_entry = snapshot.get(("dims", "main", "dims_spec"))
     assert spec_entry is not None and spec_entry.value is not None, "dims_spec missing from snapshot"
     spec = dims_spec_from_payload(spec_entry.value)
     assert spec is not None, "dims_spec payload missing"
-    state["current_level"] = int(spec.current_level)
+    active_view = _active_view_state(snapshot)
+    state["current_level"] = int(active_view.level)
     state["levels"] = [dict(level) for level in spec.levels]
     state["level_shapes"] = [
         [int(dim) for dim in shape] for shape in spec.level_shapes
@@ -244,11 +269,8 @@ def snapshot_viewport_state(
 
     payload: dict[str, Any] = {}
 
-    spec_entry = snapshot.get(("dims", "main", "dims_spec"))
-    if spec_entry is not None and spec_entry.value is not None:
-        spec = dims_spec_from_payload(spec_entry.value)
-        if spec is not None:
-            payload["mode"] = RenderMode.VOLUME.name if int(spec.ndisplay) >= 3 else RenderMode.PLANE.name
+    active_view = _active_view_state(snapshot)
+    payload["mode"] = active_view.mode.name
 
     plane_entry = snapshot.get(("viewport", "plane", "state"))
     if plane_entry is not None and plane_entry.value is not None:
@@ -326,6 +348,7 @@ def snapshot_scene(
     )
 
     layer_snapshots: list[LayerSnapshot] = []
+    active_view = _active_view_state(ledger_snapshot)
     if default_layer_id:
         layer_id_str = str(default_layer_id)
 
@@ -339,7 +362,7 @@ def snapshot_scene(
 
         controls_block = _resolve_layer_controls(layer_overrides)
 
-        current_level = int(spec.current_level)
+        current_level = int(active_view.level)
         level_shapes = list(spec.level_shapes)
         if 0 <= current_level < len(level_shapes):
             layer_shape = [int(dim) for dim in level_shapes[current_level]]
@@ -666,6 +689,7 @@ def build_ledger_snapshot(
     dims_spec = dims_spec_from_payload(spec_entry.value)
     assert dims_spec is not None, "dims spec ledger entry missing payload"
     validate_ledger_against_dims_spec(dims_spec, snapshot)
+    active_view = _active_view_state(snapshot)
 
     plane_center_tuple = _ledger_value(snapshot, "camera_plane", "main", "center")
     plane_zoom_float = _ledger_value(snapshot, "camera_plane", "main", "zoom")
@@ -680,13 +704,17 @@ def build_ledger_snapshot(
     dims_version = _version_or_none(spec_entry.version)
 
     ndisplay_val = int(dims_spec.ndisplay)
-    dims_mode = "volume" if ndisplay_val >= 3 else "plane"
+    dims_mode = active_view.mode.name.lower()
+    if dims_mode == "volume":
+        assert ndisplay_val >= 3, "ndisplay must be >=3 when active view is volume"
+    else:
+        assert ndisplay_val < 3, "ndisplay must be <3 when active view is plane"
     displayed_axes = tuple(int(idx) for idx in dims_spec.displayed)
     order_axes = tuple(int(idx) for idx in dims_spec.order)
     axis_labels = tuple(axis.label for axis in dims_spec.axes)
     dims_labels = tuple(str(lbl) for lbl in dims_spec.labels) if dims_spec.labels is not None else None
     level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in dims_spec.level_shapes)
-    current_level = int(dims_spec.current_level)
+    current_level = int(active_view.level)
     multiscale_level_version = dims_version
 
     volume_mode = _ledger_value(snapshot, "volume", "main", "rendering")

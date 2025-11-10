@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import threading
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -28,8 +28,9 @@ class ServerDimsMirror:
     """Project server ledger updates into notify.dims broadcasts."""
 
     _WATCH_KEYS: tuple[_Key, ...] = (
-        _Key("scene", "main", "op_state"),
-        _Key("dims", "main", "dims_spec"),
+    _Key("scene", "main", "op_state"),
+    _Key("dims", "main", "dims_spec"),
+    _Key("viewport", "active", "state"),
     )
 
     def __init__(
@@ -59,8 +60,9 @@ class ServerDimsMirror:
             self._ledger.subscribe(key.scope, key.target, key.key, self._on_ledger_event)
         snapshot = self._ledger.snapshot()
         spec = self._extract_spec(snapshot)
-        signature = self._compute_state_signature(spec)
-        payload = self._build_payload_from_spec(spec)
+        active_view = _active_view_payload(snapshot)
+        signature = self._compute_state_signature(spec, active_view)
+        payload = self._build_payload(spec, active_view)
         with self._lock:
             self._latest_payload = payload
             self._last_signature = signature
@@ -76,12 +78,13 @@ class ServerDimsMirror:
                 return
 
         spec = self._extract_spec(snapshot)
-        token = self._compute_state_signature(spec)
+        active_view = _active_view_payload(snapshot)
+        token = self._compute_state_signature(spec, active_view)
         with self._lock:
             if not token.changed(self._last_signature):
                 return
             self._last_signature = token
-            payload = self._build_payload_from_spec(spec)
+            payload = self._build_payload(spec, active_view)
             self._latest_payload = payload
 
         if self._on_payload is not None:
@@ -95,8 +98,9 @@ class ServerDimsMirror:
                 return self._latest_payload
         snapshot = self._ledger.snapshot()
         spec = self._extract_spec(snapshot)
-        token = self._compute_state_signature(spec)
-        payload = self._build_payload_from_spec(spec)
+        active_view = _active_view_payload(snapshot)
+        token = self._compute_state_signature(spec, active_view)
+        payload = self._build_payload(spec, active_view)
         with self._lock:
             self._latest_payload = payload
             self._last_signature = token
@@ -121,25 +125,25 @@ class ServerDimsMirror:
         assert isinstance(dims_spec, DimsSpec), "ledger dims_spec entry malformed"
         return dims_spec
 
-    def _build_payload_from_spec(self, spec: DimsSpec) -> NotifyDimsPayload:
+    def _build_payload(self, spec: DimsSpec, active_view: Mapping[str, Any]) -> NotifyDimsPayload:
         return NotifyDimsPayload(
             current_step=spec.current_step,
             level_shapes=spec.level_shapes,
             levels=spec.levels,
-            current_level=spec.current_level,
-            mode="volume" if int(spec.ndisplay) >= 3 else "plane",
+            current_level=int(active_view["level"]),
+            mode=str(active_view["mode"]),
             ndisplay=spec.ndisplay,
             labels=spec.labels,
             dims_spec=spec,
         )
 
     # ------------------------------------------------------------------
-    def _compute_state_signature(self, spec: DimsSpec) -> SignatureToken:
+    def _compute_state_signature(self, spec: DimsSpec, active_view: Mapping[str, Any]) -> SignatureToken:
         return dims_content_signature(
             current_step=spec.current_step,
-            current_level=spec.current_level,
+            current_level=int(active_view["level"]),
             ndisplay=spec.ndisplay,
-            mode="volume" if int(spec.ndisplay) >= 3 else "plane",
+            mode=str(active_view["mode"]),
             displayed=spec.displayed,
             axis_labels=tuple(axis.label for axis in spec.axes),
             order=spec.order,
@@ -147,6 +151,24 @@ class ServerDimsMirror:
             levels=spec.levels,
             level_shapes=spec.level_shapes,
         )
+
+
+def _active_view_payload(snapshot: Mapping[tuple[str, str, str], LedgerEntry]) -> Mapping[str, Any]:
+    entry = snapshot.get(("viewport", "active", "state"))
+    if entry is None or entry.value is None:
+        raise ValueError("active view missing from ledger snapshot")
+    if not isinstance(entry.value, Mapping):
+        raise TypeError("active view entry must be a mapping")
+    mode = entry.value.get("mode")
+    if not isinstance(mode, str):
+        raise ValueError("active view missing mode")
+    normalized_mode = mode.lower()
+    if normalized_mode not in {"plane", "volume"}:
+        raise ValueError(f"unknown active view mode: {mode!r}")
+    level = entry.value.get("level")
+    if level is None:
+        raise ValueError("active view missing level")
+    return {"mode": normalized_mode, "level": int(level)}
 
 
 __all__ = ["ServerDimsMirror"]

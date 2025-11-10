@@ -129,9 +129,9 @@ def dims_content_signature_from_payload(payload: Any) -> SignatureToken:
 
     return dims_content_signature(
         current_step=tuple(int(v) for v in spec.current_step),
-        current_level=int(spec.current_level),
-        ndisplay=int(spec.ndisplay),
-        mode="plane" if spec.plane_mode else "volume",
+        current_level=int(payload.current_level),
+        ndisplay=int(payload.ndisplay),
+        mode=str(payload.mode),
         displayed=tuple(int(v) for v in spec.displayed),
         axis_labels=tuple(axis.label for axis in spec.axes),
         order=tuple(int(v) for v in spec.order),
@@ -182,15 +182,19 @@ def _split_camera_attr(attr: str) -> Tuple[str, str]:
 def _dims_tuple_from_snapshot(snapshot: RenderLedgerSnapshot) -> SignatureTuple:
     spec = snapshot.dims_spec
     assert spec is not None, "render snapshot missing dims spec"
+    assert snapshot.current_level is not None, "render snapshot missing current_level"
+    assert snapshot.dims_mode is not None, "render snapshot missing dims_mode"
+    current_level = int(snapshot.current_level)
+    mode = str(snapshot.dims_mode)
 
     return (
         int(spec.ndisplay),
         tuple(int(v) for v in spec.order),
         tuple(int(v) for v in spec.displayed),
         tuple(int(v) for v in spec.current_step),
-        int(spec.current_level),
+        int(current_level),
         tuple(axis.label for axis in spec.axes),
-        "plane" if spec.plane_mode else "volume",
+        str(mode),
     )
 
 

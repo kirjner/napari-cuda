@@ -14,7 +14,8 @@ References:
 
 ## Current State (2025‑11‑09)
 - ActiveView authority in ledger; server emits `notify.level` (resumable).
-- View toggles stamp ActiveView immediately with the intended mode+level so the HUD never lags behind plane/volume switches.
+- View toggles avoid touching cache state; reducers just rewrite dims while worker restores keep ActiveView authoritative.
+- Render snapshot + scene builders read ActiveView for mode/level; dims specs only provide shapes/order metadata.
 - Client consumes `notify.level`; HUD renders mode/level from ActiveView.
 - DimsSpec-first notify for dims metadata; render mailbox with unified signature (per‑block planned).
 

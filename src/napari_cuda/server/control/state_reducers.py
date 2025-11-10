@@ -998,9 +998,6 @@ def reduce_view_update(
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     spec = _get_dims_spec(ledger)
-    plane_state = _load_plane_state(ledger)
-    volume_state = _load_volume_state(ledger)
-
     if ndisplay is not None:
         target_ndisplay = 3 if int(ndisplay) >= 3 else 2
     else:
@@ -1008,39 +1005,6 @@ def reduce_view_update(
 
     resolved_intent_id = intent_id or f"view-{uuid.uuid4().hex}"
     metadata = _metadata_from_intent(resolved_intent_id)
-
-    baseline_step = tuple(int(v) for v in spec.current_step) if spec.current_step else None
-
-    if target_ndisplay >= 3:
-        level_idx = int(spec.current_level)
-        if baseline_step is not None:
-            step_tuple = tuple(int(v) for v in baseline_step)
-            plane_state.target_step = step_tuple
-            plane_state.applied_step = step_tuple
-        plane_state.target_ndisplay = 2
-        plane_state.target_level = level_idx
-        plane_state.applied_level = level_idx
-        plane_state.awaiting_level_confirm = False
-
-        snapshot_level = plane_state.snapshot_level
-        assert snapshot_level is not None, "plane snapshot level required for volume toggle"
-        volume_state.level = int(snapshot_level)
-
-        _store_plane_state(
-            ledger,
-            plane_state,
-            origin=origin,
-            timestamp=ts,
-            metadata=metadata,
-        )
-
-        _store_volume_state(
-            ledger,
-            volume_state,
-            origin=origin,
-            timestamp=ts,
-            metadata=metadata,
-        )
 
     if order is not None:
         order_value = tuple(int(idx) for idx in order)
@@ -1082,9 +1046,7 @@ def reduce_view_update(
 
     active_mode = "volume" if int(target_ndisplay) >= 3 else "plane"
     if active_mode == "volume":
-        level_value = volume_state.level
-        assert level_value is not None, "volume level missing for view toggle"
-        active_level = int(level_value)
+        active_level = len(spec.level_shapes) - 1 if spec.level_shapes else 0
     else:
         active_level = int(spec.current_level)
 
@@ -1442,7 +1404,7 @@ def reduce_level_update(
             metadata=_metadata_from_intent(intent_id),
         )
 
-    if volume_payload is not None:
+    if volume_payload is not None and mode_value == "volume":
         volume_model = VolumeState(**volume_payload)
         _store_volume_state(
             ledger,
