@@ -8,7 +8,6 @@ from typing import Any, Optional
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 
-from .camera import apply_camera_overrides
 from .dims import apply_dims_step
 from .layers import apply_layer_visual_updates
 from .volume import apply_volume_visual_params
@@ -40,11 +39,8 @@ def drain_render_state(worker: Any, snapshot: RenderLedgerSnapshot) -> DrainOutc
     if worker.viewport_state.mode is RenderMode.VOLUME:  # type: ignore[attr-defined]
         apply_volume_visual_params(worker, snapshot)
 
-    if snapshot.layer_values:
-        if apply_layer_visual_updates(worker, snapshot.layer_values):
-            render_marked = True
-
-    apply_camera_overrides(worker, snapshot)
+    if snapshot.layer_values and apply_layer_visual_updates(worker, snapshot.layer_values):
+        render_marked = True
 
     return DrainOutcome(z_index=z_index_update, render_marked=render_marked)
 

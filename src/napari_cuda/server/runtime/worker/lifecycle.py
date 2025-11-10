@@ -227,6 +227,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 server._bootstrap_snapshot = None  # type: ignore[attr-defined]
             consume_render_snapshot(worker, initial_snapshot)
             drain_scene_updates(worker)
+            frame_state = pull_render_snapshot(server)
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
@@ -259,14 +260,11 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             next_tick = time.perf_counter()
 
             while not state.stop_event.is_set():
-                snapshot = pull_render_snapshot(server)
                 has_camera_deltas = len(server._camera_queue) > 0
 
                 # Request view ndisplay if provided by staged intents
                 if has_camera_deltas and server._log_state_traces:
                     logger.info("frame camera deltas snapshot pending")
-
-                frame_state = snapshot
 
                 if has_camera_deltas and (server._log_cam_info or server._log_cam_debug):
                     message = "apply: cam deltas pending"
@@ -299,6 +297,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         time.sleep(sleep_duration)
                     else:
                         next_tick = time.perf_counter()
+                    frame_state = pull_render_snapshot(server)
                     continue
 
                 logger.debug(
@@ -313,6 +312,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 )
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
+                frame_state = pull_render_snapshot(server)
                 # Post-frame: capture thumbnail on worker and hand off via mailbox
                 viewer = worker.viewer_model()
                 if viewer is not None and viewer.layers:
