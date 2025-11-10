@@ -818,6 +818,15 @@ def reduce_bootstrap_state(
         dims_spec=dims_spec,
     )
 
+    # Seed ActiveView from bootstrap so notify.level has a baseline.
+    apply_active_view_transaction(
+        ledger=ledger,
+        mode=mode_value,
+        level=resolved_current_level,
+        origin=origin,
+        timestamp=ts,
+    )
+
     return [dims_update, view_update]
 
 

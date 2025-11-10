@@ -9,6 +9,7 @@ from typing import Any
 
 from napari_cuda.protocol import (
     NOTIFY_LAYERS_TYPE,
+    NOTIFY_LEVEL_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
 )
@@ -23,6 +24,7 @@ from napari_cuda.server.control.resumable_history_store import (
 )
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
+from napari_cuda.protocol.messages import NotifyLevelPayload
 from .dims import broadcast_dims_state, send_dims_state
 from .layers import (
     send_layer_baseline,
@@ -35,6 +37,7 @@ from .stream import (
     send_stream_frame,
     send_stream_snapshot,
 )
+from .level import send_level, send_level_snapshot
 
 logger = logging.getLogger("napari_cuda.server.control.control_channel_server")
 
@@ -50,6 +53,7 @@ async def orchestrate_connect(
     scene_plan = plan_map.get(NOTIFY_SCENE_TYPE)
     layers_plan = plan_map.get(NOTIFY_LAYERS_TYPE)
     stream_plan = plan_map.get(NOTIFY_STREAM_TYPE)
+    level_plan = plan_map.get(NOTIFY_LEVEL_TYPE)
 
     scene_snapshot = _ensure_scene_snapshot(server)
     ledger_snapshot = server._state_ledger.snapshot()
@@ -71,6 +75,7 @@ async def orchestrate_connect(
     (logger.info if server._log_dims_info else logger.debug)("connect: notify.scene sent")
 
     await _send_dims_baseline(server, ws)
+    await _send_level_baseline(server, ws, plan=level_plan)
     await _send_layer_baseline(
         server,
         ws,
@@ -280,6 +285,41 @@ async def _send_stream_baseline(
         )
     else:
         server.mark_stream_config_dirty()
+
+
+async def _send_level_baseline(
+    server: Any,
+    ws: Any,
+    *,
+    plan: ResumePlan | None,
+) -> None:
+    store = history_store(server)
+    if store is not None and plan is not None:
+        if plan.decision == ResumeDecision.REPLAY and plan.deltas:
+            for snapshot in plan.deltas:
+                await send_level_snapshot(server, ws, snapshot)
+            return
+        if plan.decision == ResumeDecision.RESET:
+            snapshot = store.current_snapshot(NOTIFY_LEVEL_TYPE)
+            if snapshot is not None:
+                await send_level_snapshot(server, ws, snapshot)
+                return
+
+    entry = server._state_ledger.get("viewport", "active", "state")
+    if entry is None or not isinstance(entry.value, Mapping):
+        logger.debug("connect: notify.level baseline skipped (active view unavailable)")
+        return
+    value_map = entry.value
+    mode_value = str(value_map["mode"])
+    level_value = int(value_map["level"])
+    await send_level(
+        server,
+        ws,
+        payload=NotifyLevelPayload(current_level=level_value, mode=mode_value),
+        intent_id=None,
+        timestamp=time.time(),
+    )
+    logger.debug("connect: notify.level baseline sent")
 
 
 async def _send_dims_baseline(server: Any, ws: Any) -> None:

@@ -16,6 +16,7 @@ Tracks intentional updates to the architecture spec and the authoritative module
 - **Mirror + broadcaster**: `ActiveViewMirror` (src/napari_cuda/server/control/mirrors/active_view_mirror.py) listens to `("viewport","active","state")` and publishes `notify.level` through `broadcast_level` (src/napari_cuda/server/control/topics/notify/level.py).
 - **Protocol rename**: `notify.scene.level` → `notify.level`. Constants/payloads/builders/parsers/tests renamed under src/napari_cuda/protocol/*.
 - **Handshake/Resumable features**: server advertises `notify.level` as resumable; history store tracks it; state channel stores the resume cursor.
+- **Baseline replay**: new `send_level_snapshot` and connect-time baseline now replay the stored ActiveView snapshot to every client, so HUDs see mode/level on connect (src/napari_cuda/server/control/topics/notify/level.py, `notify/baseline.py`).
 
 ### Client
 - **State channel** now negotiates and consumes `notify.level` (see `_REQUIRED_FEATURES`, `_RESUMABLE_TOPICS`, and `_ingest_notify_level` in src/napari_cuda/client/control/control_channel_client.py). Channel threads forward the callback into `ClientStreamLoop`.
