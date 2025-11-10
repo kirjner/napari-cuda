@@ -15,7 +15,7 @@ from .envelopes import (
     NOTIFY_DIMS_TYPE,
     NOTIFY_ERROR_TYPE,
     NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_LEVEL_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     NOTIFY_TELEMETRY_TYPE,
@@ -34,8 +34,8 @@ from .envelopes import (
     NotifyDims,
     NotifyError,
     NotifyLayers,
+    NotifyLevel,
     NotifyScene,
-    NotifySceneLevel,
     NotifyStream,
     NotifyTelemetry,
     ReplyCommand,
@@ -115,8 +115,8 @@ class EnvelopeParser:
     def parse_notify_scene(self, data: Mapping[str, Any]) -> NotifyScene:
         return self._ensure_type(data, NOTIFY_SCENE_TYPE, NotifyScene.from_dict)
 
-    def parse_notify_scene_level(self, data: Mapping[str, Any]) -> NotifySceneLevel:
-        return self._ensure_type(data, NOTIFY_SCENE_LEVEL_TYPE, NotifySceneLevel.from_dict)
+    def parse_notify_level(self, data: Mapping[str, Any]) -> NotifyLevel:
+        return self._ensure_type(data, NOTIFY_LEVEL_TYPE, NotifyLevel.from_dict)
 
     def parse_notify_layers(self, data: Mapping[str, Any]) -> NotifyLayers:
         return self._ensure_type(data, NOTIFY_LAYERS_TYPE, NotifyLayers.from_dict)

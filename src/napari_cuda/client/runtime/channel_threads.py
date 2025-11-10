@@ -20,6 +20,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing aid only
     from napari_cuda.protocol.messages import (
         NotifyDimsFrame,
         NotifyLayersFrame,
+        NotifyLevelFrame,
         NotifySceneFrame,
         NotifyStreamFrame,
     )
@@ -35,6 +36,7 @@ class StateController:
     ingest_dims_notify: Optional[Callable[[NotifyDimsFrame], None]] = None
     ingest_notify_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None
     ingest_notify_layers: Optional[Callable[[NotifyLayersFrame], None]] = None
+    ingest_notify_level: Optional[Callable[[NotifyLevelFrame], None]] = None
     ingest_notify_camera: Optional[Callable[[Any], None]] = None
     ingest_ack_state: Optional[Callable[[AckState], None]] = None
     ingest_reply_command: Optional[Callable[[ReplyCommand], None]] = None
@@ -55,6 +57,7 @@ class StateController:
             ingest_dims_notify=self.ingest_dims_notify,
             ingest_notify_scene_snapshot=self.ingest_notify_scene_snapshot,
             ingest_notify_layers=self.ingest_notify_layers,
+            ingest_notify_level=self.ingest_notify_level,
             ingest_notify_camera=self.ingest_notify_camera,
             ingest_ack_state=self.ingest_ack_state,
             ingest_reply_command=self.ingest_reply_command,

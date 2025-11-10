@@ -241,3 +241,20 @@ __all__ = [
     "VolumePose",
     "VolumeState",
 ]
+
+# ---------------------------------------------------------------------------
+# Active view state (authoritative mode + level)
+
+@dataclass(frozen=True)
+class ActiveViewState:
+    """Authoritative active view selector persisted in the ledger.
+
+    - mode: 'plane' or 'volume'
+    - level: current multiscale level index
+    """
+
+    mode: str
+    level: int
+
+
+__all__.append("ActiveViewState")

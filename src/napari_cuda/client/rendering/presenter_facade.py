@@ -69,6 +69,7 @@ class PresenterFacade:
         }
         self._hud_level: Optional[int] = None
         self._hud_level_total: Optional[int] = None
+        self._hud_mode: Optional[str] = None
 
         # Misc state
         self._viewer_ref: Optional[weakref.ReferenceType[Any]] = None
@@ -178,6 +179,7 @@ class PresenterFacade:
         }
         self._hud_level = None
         self._hud_level_total = None
+        self._hud_mode = None
         self._camera_summaries = {}
         self._hud_camera_snapshot = {}
 
@@ -201,7 +203,6 @@ class PresenterFacade:
         """Cache the latest dims spec and notify any registered dispatcher."""
 
         self._last_dims_spec = spec
-        self._hud_level = int(spec.current_level)
         total_levels = len(spec.levels)
         self._hud_level_total = total_levels - 1
         dispatcher = self._intent_dispatcher
@@ -211,6 +212,17 @@ class PresenterFacade:
             dispatcher('dims', {'spec': spec, 'viewer': dict(viewer_update)})
         except Exception:
             logger.exception('PresenterFacade intent dispatcher failed')
+
+    def apply_active_view(
+        self,
+        *,
+        mode: str,
+        level: int,
+    ) -> None:
+        """Update HUD-visible active view state from notify.level."""
+
+        self._hud_mode = str(mode)
+        self._hud_level = int(level)
 
     def apply_camera_update(self, *, mode: str, payload: Mapping[str, Any]) -> None:
         """Record camera payloads so HUD overlays stay in sync."""
@@ -456,6 +468,8 @@ class PresenterFacade:
         txt += f"\nqueues: presenter[vt:{buf_vt} py:{buf_py}] pipeline[vt:{q_vt} py:{q_py}]"
         if vt_q_len is not None:
             txt += f" vt_count:{vt_q_len}"
+        if self._hud_mode:
+            txt += f" mode:{self._hud_mode}"
         if self._hud_level is not None:
             if self._hud_level_total is not None:
                 txt += f" level:{self._hud_level}/{self._hud_level_total}"

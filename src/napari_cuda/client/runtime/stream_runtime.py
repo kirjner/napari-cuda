@@ -76,6 +76,7 @@ from napari_cuda.codec.h264 import contains_idr_annexb, contains_idr_avcc
 from napari_cuda.protocol import (
     AckState,
     NotifyCamera,
+    NotifyLevel,
     build_call_command,
     build_state_update,
 )
@@ -597,6 +598,19 @@ class ClientStreamLoop:
 
         def _apply() -> None:
             mirror.ingest_notify_camera(frame)
+
+        self._run_on_ui(_apply)
+
+    def _ingest_notify_level(self, frame: NotifyLevel) -> None:
+        def _apply() -> None:
+            presenter = self._presenter_facade
+            if presenter is None:
+                return
+            payload = frame.payload
+            presenter.apply_active_view(
+                mode=str(payload.mode),
+                level=int(payload.current_level),
+            )
 
         self._run_on_ui(_apply)
 

@@ -9,7 +9,7 @@ from napari_cuda.protocol import (
     NOTIFY_DIMS_TYPE,
     NOTIFY_ERROR_TYPE,
     NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_LEVEL_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     NOTIFY_TELEMETRY_TYPE,
@@ -21,8 +21,8 @@ from napari_cuda.protocol import (
     EnvelopeParser,
     HelloClientInfo,
     NotifyError,
+    NotifyLevel,
     NotifyScene,
-    NotifySceneLevel,
     NotifyTelemetry,
     ResumableTopicSequencer,
     SessionAck,
@@ -33,7 +33,7 @@ from napari_cuda.protocol import (
     build_notify_dims,
     build_notify_error,
     build_notify_layers_delta,
-    build_notify_scene_level,
+    build_notify_level,
     build_notify_scene_snapshot,
     build_notify_stream,
     build_notify_telemetry,
@@ -54,13 +54,13 @@ def test_session_hello_roundtrip() -> None:
         ),
         features={
             "notify.scene": True,
-            "notify.scene.level": True,
+            "notify.level": True,
             "notify.layers": True,
             "notify.stream": True,
         },
         resume_tokens={
             "notify.scene": None,
-            "notify.scene.level": None,
+            "notify.level": None,
             "notify.layers": None,
             "notify.stream": None,
         },
@@ -75,7 +75,7 @@ def test_session_hello_roundtrip() -> None:
     assert decoded.envelope.frame_id == "hello-1"
     assert decoded.envelope.timestamp == 1.23
     assert decoded.payload.client.name == "test-client"
-    assert decoded.payload.protocols == (1,)
+    assert decoded.payload.protocols == (PROTO_VERSION,)
 
 
 def test_notify_scene_roundtrip() -> None:
@@ -98,21 +98,22 @@ def test_notify_scene_roundtrip() -> None:
     assert decoded.payload.layers[0]["layer_id"] == "layer-1"
 
 
-def test_notify_scene_level_roundtrip() -> None:
-    sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_LEVEL_TYPE)
+def test_notify_level_roundtrip() -> None:
+    sequencer = ResumableTopicSequencer(topic=NOTIFY_LEVEL_TYPE)
     sequencer.snapshot()
-    level_frame = build_notify_scene_level(
+    level_frame = build_notify_level(
         session_id="session-2",
         payload={
             "current_level": 3,
+            "mode": "volume",
             "levels": [{"index": 0, "shape": [64, 64]}, {"index": 1, "shape": [32, 32]}],
         },
         sequencer=sequencer,
     )
     encoded = level_frame.to_dict()
 
-    assert encoded["type"] == NOTIFY_SCENE_LEVEL_TYPE
-    decoded = NotifySceneLevel.from_dict(encoded)
+    assert encoded["type"] == NOTIFY_LEVEL_TYPE
+    decoded = NotifyLevel.from_dict(encoded)
 
     assert decoded.envelope.session == "session-2"
     assert decoded.envelope.seq == 1
@@ -130,11 +131,11 @@ def test_parser_dispatch() -> None:
         layers=[{"layer_id": "layer"}],
         sequencer=sequencer,
     )
-    level_seq = ResumableTopicSequencer(topic=NOTIFY_SCENE_LEVEL_TYPE)
+    level_seq = ResumableTopicSequencer(topic=NOTIFY_LEVEL_TYPE)
     level_seq.snapshot()
-    level_frame = build_notify_scene_level(
+    level_frame = build_notify_level(
         session_id="sess",
-        payload={"current_level": 1},
+        payload={"current_level": 1, "mode": "plane"},
         sequencer=level_seq,
     )
     state_frame = build_state_update(
@@ -145,7 +146,7 @@ def test_parser_dispatch() -> None:
     )
 
     scene_env = parser.parse_notify_scene(scene_frame.to_dict())
-    level_env = parser.parse_notify_scene_level(level_frame.to_dict())
+    level_env = parser.parse_notify_level(level_frame.to_dict())
     state_env = parser.parse_state_update(state_frame.to_dict())
 
     assert scene_env.payload.viewer["dims"]["ndim"] == 3
@@ -239,7 +240,7 @@ def test_notify_layers_delta_uses_sequencer() -> None:
     sequencer.snapshot()
     frame = build_notify_layers_delta(
         session_id="sess",
-        payload={"layer_id": "layer-1", "changes": {"opacity": 0.5}},
+        payload={"layer_id": "layer-1", "controls": {"opacity": 0.5}},
         sequencer=sequencer,
     )
 
@@ -272,10 +273,56 @@ def test_notify_dims_short_frame_id_when_no_intent() -> None:
     frame = build_notify_dims(
         session_id="sess",
         payload={
+            "step": [0, 1],
             "current_step": [0, 1],
+            "levels": [{"index": 0, "shape": [64, 64]}],
+            "current_level": 0,
+            "mode": "plane",
             "ndisplay": 2,
-            "mode": "2d",
-            "source": "server",
+            "level_shapes": [[64, 64]],
+            "dims_spec": {
+                "version": 1,
+                "ndim": 2,
+                "ndisplay": 2,
+                "order": [0, 1],
+                "displayed": [0, 1],
+                "current_level": 0,
+                "current_step": [0, 1],
+                "level_shapes": [[64, 64]],
+                "plane_mode": True,
+                "axes": [
+                    {
+                        "index": 0,
+                        "label": "y",
+                        "role": "space",
+                        "displayed": True,
+                        "order_pos": 0,
+                        "current_step": 0,
+                        "margin_left_steps": 0.0,
+                        "margin_right_steps": 0.0,
+                        "margin_left_world": 0.0,
+                        "margin_right_world": 0.0,
+                        "per_level_steps": [64],
+                        "per_level_world": [{"start": 0.0, "stop": 63.0, "step": 1.0}],
+                    },
+                    {
+                        "index": 1,
+                        "label": "x",
+                        "role": "space",
+                        "displayed": True,
+                        "order_pos": 1,
+                        "current_step": 1,
+                        "margin_left_steps": 0.0,
+                        "margin_right_steps": 0.0,
+                        "margin_left_world": 0.0,
+                        "margin_right_world": 0.0,
+                        "per_level_steps": [64],
+                        "per_level_world": [{"start": 0.0, "stop": 63.0, "step": 1.0}],
+                    },
+                ],
+                "levels": [{"shape": [64, 64], "downsample": [1.0, 1.0]}],
+                "labels": ["y", "x"],
+            },
         },
     )
 

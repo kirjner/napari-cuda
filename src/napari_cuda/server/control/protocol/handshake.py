@@ -15,6 +15,7 @@ from websockets.exceptions import ConnectionClosed
 
 from napari_cuda.protocol import (
     NOTIFY_LAYERS_TYPE,
+    NOTIFY_LEVEL_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     PROTO_VERSION,
@@ -40,11 +41,12 @@ logger = logging.getLogger(__name__)
 
 _HANDSHAKE_TIMEOUT_S = 5.0
 _REQUIRED_NOTIFY_FEATURES = ("notify.scene", "notify.layers", "notify.stream")
-_RESUMABLE_TOPICS = (NOTIFY_SCENE_TYPE, NOTIFY_LAYERS_TYPE, NOTIFY_STREAM_TYPE)
+_RESUMABLE_TOPICS = (NOTIFY_SCENE_TYPE, NOTIFY_LEVEL_TYPE, NOTIFY_LAYERS_TYPE, NOTIFY_STREAM_TYPE)
 _ENVELOPE_PARSER = EnvelopeParser()
 
 _SERVER_FEATURES: dict[str, FeatureToggle] = {
     "notify.scene": FeatureToggle(enabled=True, version=1, resume=True),
+    "notify.level": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
     "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),

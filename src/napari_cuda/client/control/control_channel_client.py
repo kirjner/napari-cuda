@@ -24,6 +24,7 @@ from napari_cuda.protocol import (
     NOTIFY_CAMERA_TYPE,
     NOTIFY_DIMS_TYPE,
     NOTIFY_LAYERS_TYPE,
+    NOTIFY_LEVEL_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     REPLY_COMMAND_TYPE,
@@ -44,6 +45,7 @@ from napari_cuda.protocol import (
 from napari_cuda.protocol.messages import (
     NotifyDimsFrame,
     NotifyLayersFrame,
+    NotifyLevelFrame,
     NotifySceneFrame,
     NotifyStreamFrame,
 )
@@ -87,9 +89,10 @@ _ENVELOPE_PARSER = EnvelopeParser()
 
 _HANDSHAKE_TIMEOUT_S = 5.0
 
-_RESUMABLE_TOPICS = ("notify.scene", "notify.layers", "notify.stream")
+_RESUMABLE_TOPICS = ("notify.scene", "notify.level", "notify.layers", "notify.stream")
 _REQUIRED_FEATURES = {
     "notify.scene": True,
+    "notify.level": True,
     "notify.layers": True,
     "notify.stream": True,
     "notify.dims": True,
@@ -125,6 +128,7 @@ class StateChannel:
         ingest_dims_notify: Optional[Callable[[NotifyDimsFrame], None]] = None,
         ingest_notify_scene_snapshot: Optional[Callable[[NotifySceneFrame], None]] = None,
         ingest_notify_layers: Optional[Callable[[NotifyLayersFrame], None]] = None,
+        ingest_notify_level: Optional[Callable[[NotifyLevelFrame], None]] = None,
         ingest_notify_camera: Optional[Callable[[Any], None]] = None,
         ingest_ack_state: Optional[Callable[[AckState], None]] = None,
         ingest_reply_command: Optional[Callable[[ReplyCommand], None]] = None,
@@ -139,6 +143,7 @@ class StateChannel:
         self.ingest_dims_notify = ingest_dims_notify
         self.ingest_notify_scene_snapshot = ingest_notify_scene_snapshot
         self.ingest_notify_layers = ingest_notify_layers
+        self.ingest_notify_level = ingest_notify_level
         self.ingest_notify_camera = ingest_notify_camera
         self.ingest_ack_state = ingest_ack_state
         self.ingest_reply_command = ingest_reply_command
@@ -385,6 +390,10 @@ class StateChannel:
             self._ingest_notify_layers(data)
             return
 
+        if msg_type == NOTIFY_LEVEL_TYPE:
+            self._ingest_notify_level(data)
+            return
+
         if msg_type == NOTIFY_STREAM_TYPE:
             self._ingest_notify_stream(data)
             return
@@ -517,6 +526,13 @@ class StateChannel:
             self.ingest_notify_layers(frame)
         except Exception:
             logger.debug("ingest_notify_layers callback failed", exc_info=True)
+
+    def _ingest_notify_level(self, data: Mapping[str, object]) -> None:
+        if not self.ingest_notify_level:
+            return
+        frame = _ENVELOPE_PARSER.parse_notify_level(data)
+        self._store_resume_cursor(NOTIFY_LEVEL_TYPE, frame.envelope)
+        self.ingest_notify_level(frame)
 
     def _ingest_notify_stream(self, data: Mapping[str, object]) -> None:
         frame = _ENVELOPE_PARSER.parse_notify_stream(data)

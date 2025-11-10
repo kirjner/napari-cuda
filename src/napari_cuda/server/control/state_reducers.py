@@ -19,6 +19,7 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.control.transactions import (
+    apply_active_view_transaction,
     apply_bootstrap_transaction,
     apply_camera_update_transaction,
     apply_dims_step_transaction,
@@ -206,6 +207,8 @@ def _get_dims_spec(ledger: ServerStateLedger) -> DimsSpec:
     spec = dims_spec_from_payload(entry.value)
     assert spec is not None, "dims spec payload missing"
     return spec
+
+
 
 
 def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
@@ -1088,6 +1091,15 @@ def reduce_view_update(
         origin,
     )
 
+    # Update ActiveView based on the new display mode and current level
+    apply_active_view_transaction(
+        ledger=ledger,
+        mode=("volume" if int(target_ndisplay) >= 3 else "plane"),
+        level=int(new_spec.current_level),
+        origin=origin,
+        timestamp=ts,
+    )
+
     return ServerLedgerUpdate(
         scope="view",
         target="main",
@@ -1202,6 +1214,15 @@ def reduce_plane_restore(
         op_kind="plane-restore",
     )
 
+    # Active view is plane at the requested level
+    apply_active_view_transaction(
+        ledger=ledger,
+        mode="plane",
+        level=level_idx,
+        origin=origin,
+        timestamp=ts,
+    )
+
     return stored
 
 
@@ -1267,6 +1288,15 @@ def reduce_volume_restore(
         origin=origin,
         timestamp=ts,
         metadata=metadata,
+    )
+
+    # Active view is volume at the requested level
+    apply_active_view_transaction(
+        ledger=ledger,
+        mode="volume",
+        level=level_idx,
+        origin=origin,
+        timestamp=ts,
     )
 
     return stored
@@ -1434,6 +1464,15 @@ def reduce_level_update(
         level,
         level_version,
         origin,
+    )
+
+    # Keep ActiveView in sync when level changes (mode derived from dims_spec)
+    apply_active_view_transaction(
+        ledger=ledger,
+        mode=("volume" if int(new_spec.ndisplay) >= 3 else "plane"),
+        level=int(level),
+        origin=origin,
+        timestamp=ts,
     )
 
     return ServerLedgerUpdate(

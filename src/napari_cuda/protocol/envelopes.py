@@ -23,7 +23,7 @@ from .messages import (
     CALL_COMMAND_TYPE,
     ERROR_COMMAND_TYPE,
     NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_LEVEL_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     PROTO_VERSION,
@@ -45,8 +45,8 @@ from .messages import (
     NotifyLayers,
     NotifyLayersPayload,
     NotifyScene,
-    NotifySceneLevel,
-    NotifySceneLevelPayload,
+    NotifyLevel,
+    NotifyLevelPayload,
     NotifyScenePayload,
     NotifyStream,
     NotifyStreamPayload,
@@ -428,30 +428,30 @@ def build_notify_scene_snapshot(
     return frame
 
 
-def build_notify_scene_level(
+def build_notify_level(
     *,
     session_id: str,
-    payload: NotifySceneLevelPayload | Mapping[str, Any],
+    payload: NotifyLevelPayload | Mapping[str, Any],
     timestamp: float | None = None,
     frame_id: str | None = None,
     intent_id: str | None = None,
     seq: int | None = None,
     delta_token: str | None = None,
     sequencer: ResumableTopicSequencer | None = None,
-) -> NotifySceneLevel:
-    """Construct a resumable ``notify.scene.level`` update."""
+) -> NotifyLevel:
+    """Construct a resumable ``notify.level`` update."""
 
-    if not isinstance(payload, NotifySceneLevelPayload):
-        payload = NotifySceneLevelPayload.from_dict(payload)
+    if not isinstance(payload, NotifyLevelPayload):
+        payload = NotifyLevelPayload.from_dict(payload)
     cursor = _resolve_resumable_cursor(
-        topic=NOTIFY_SCENE_LEVEL_TYPE,
+        topic=NOTIFY_LEVEL_TYPE,
         sequencer=sequencer,
         seq=seq,
         delta_token=delta_token,
         snapshot=False,
     )
     envelope = FrameEnvelope(
-        type=NOTIFY_SCENE_LEVEL_TYPE,
+        type=NOTIFY_LEVEL_TYPE,
         version=PROTO_VERSION,
         session=str(session_id),
         frame_id=frame_id,
@@ -460,7 +460,7 @@ def build_notify_scene_level(
         delta_token=cursor.delta_token,
         intent_id=intent_id,
     )
-    frame = NotifySceneLevel(envelope=envelope, payload=payload)
+    frame = NotifyLevel(envelope=envelope, payload=payload)
     frame._validate()
     return frame
 
@@ -767,7 +767,7 @@ __all__ = [
     "build_session_ack",
     "build_session_goodbye",
     "build_notify_scene_snapshot",
-    "build_notify_scene_level",
+    "build_notify_level",
     "build_notify_layers_delta",
     "build_notify_dims",
     "build_notify_camera",

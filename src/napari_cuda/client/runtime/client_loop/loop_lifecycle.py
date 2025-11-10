@@ -44,6 +44,7 @@ def start_loop(loop: ClientStreamLoop) -> None:
         ingest_dims_notify=loop._ingest_notify_dims,
         ingest_notify_scene_snapshot=loop._ingest_notify_scene_snapshot,
         ingest_notify_layers=loop._ingest_notify_layers,
+        ingest_notify_level=loop._ingest_notify_level,
         ingest_notify_camera=loop._ingest_notify_camera,
         ingest_ack_state=loop._ingest_ack_state,
         ingest_reply_command=loop._ingest_reply_command,

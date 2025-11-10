@@ -23,7 +23,7 @@ import websockets
 
 from napari_cuda.protocol import (
     NOTIFY_LAYERS_TYPE,
-    NOTIFY_SCENE_LEVEL_TYPE,
+    NOTIFY_LEVEL_TYPE,
     NOTIFY_SCENE_TYPE,
     NOTIFY_STREAM_TYPE,
     NotifyDimsPayload,
@@ -58,6 +58,7 @@ from napari_cuda.server.control.control_payload_builder import (
     build_notify_scene_payload,
 )
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
+from napari_cuda.server.control.mirrors.active_view_mirror import ActiveViewMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.protocol.runtime import state_sequencer
 from napari_cuda.server.control.resumable_history_store import (
@@ -72,6 +73,7 @@ from napari_cuda.server.control.state_reducers import (
 from napari_cuda.server.control.topics.notify.camera import broadcast_camera_update
 from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
 from napari_cuda.server.control.topics.notify.layers import broadcast_layers_delta
+from napari_cuda.server.control.topics.notify.level import broadcast_level
 from napari_cuda.server.control.topics.notify.stream import broadcast_stream_config
 from napari_cuda.server.data.hw_limits import get_hw_limits
 from napari_cuda.server.data.zarr_discovery import (
@@ -181,7 +183,7 @@ class EGLHeadlessServer:
         self._resumable_store = ResumableHistoryStore(
             {
                 NOTIFY_SCENE_TYPE: ResumableRetention(),
-                NOTIFY_SCENE_LEVEL_TYPE: ResumableRetention(),
+                NOTIFY_LEVEL_TYPE: ResumableRetention(),
                 NOTIFY_LAYERS_TYPE: ResumableRetention(
                     min_deltas=512,
                     max_deltas=2048,
@@ -260,6 +262,15 @@ class EGLHeadlessServer:
             broadcaster=_mirror_broadcast,
             schedule=_schedule_from_mirror,
             on_payload=_mirror_apply,
+        )
+
+        async def _active_view_broadcast(payload):
+            await broadcast_level(self, payload=payload)
+
+        self._active_view_mirror = ActiveViewMirror(
+            ledger=self._state_ledger,
+            broadcaster=_active_view_broadcast,
+            schedule=_schedule_from_mirror,
         )
         async def _mirror_layer_broadcast(
             layer_id: str,
@@ -778,6 +789,7 @@ class EGLHeadlessServer:
     def _start_mirrors_if_needed(self) -> None:
         if not self._mirrors_started:
             self._dims_mirror.start()
+            self._active_view_mirror.start()
             self._layer_mirror.start()
             self._mirrors_started = True
 

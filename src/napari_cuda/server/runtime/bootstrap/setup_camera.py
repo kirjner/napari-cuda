@@ -216,7 +216,7 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
     decision = lod.LevelDecision(
         desired_level=int(requested_level),
         selected_level=int(selected_level),
-        reason="ndisplay-3d",
+        reason="enter-volume",
         timestamp=time.perf_counter(),
         oversampling={},
     )
@@ -242,7 +242,7 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
     intent = LevelSwitchIntent(
         desired_level=int(requested_level),
         selected_level=int(context.level),
-        reason="ndisplay-3d",
+        reason="enter-volume",
         previous_level=int(worker._current_level_index()),
         oversampling={},
         timestamp=decision.timestamp,
@@ -328,7 +328,7 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
     decision = lod.LevelDecision(
         desired_level=int(lvl_idx),
         selected_level=int(lvl_idx),
-        reason="ndisplay-2d",
+        reason="exit-volume",
         timestamp=time.perf_counter(),
         oversampling={},
     )
@@ -344,7 +344,7 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
     intent = LevelSwitchIntent(
         desired_level=int(lvl_idx),
         selected_level=int(context.level),
-        reason="ndisplay-2d",
+        reason="exit-volume",
         previous_level=int(worker._current_level_index()),
         oversampling={},
         timestamp=decision.timestamp,

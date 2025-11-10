@@ -29,7 +29,7 @@ SESSION_GOODBYE_TYPE = "session.goodbye"
 # Notify frame types
 NOTIFY_SCENE_TYPE = "notify.scene"
 NOTIFY_LAYERS_TYPE = "notify.layers"
-NOTIFY_SCENE_LEVEL_TYPE = "notify.scene.level"
+NOTIFY_LEVEL_TYPE = "notify.level"
 NOTIFY_STREAM_TYPE = "notify.stream"
 NOTIFY_DIMS_TYPE = "notify.dims"
 NOTIFY_CAMERA_TYPE = "notify.camera"
@@ -512,39 +512,42 @@ class NotifyScenePayload:
 
 
 @dataclass(slots=True)
-class NotifySceneLevelPayload:
+class NotifyLevelPayload:
     current_level: int
+    mode: str
     levels: tuple[dict[str, Any], ...] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return _strip_none(
             {
                 "current_level": int(self.current_level),
+                "mode": str(self.mode),
                 "levels": [dict(entry) for entry in self.levels] if self.levels else None,
             }
         )
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> NotifySceneLevelPayload:
-        mapping = _as_mapping(data, "notify.scene.level payload")
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyLevelPayload:
+        mapping = _as_mapping(data, "notify.level payload")
         _ensure_keyset(
             mapping,
-            required=("current_level",),
+            required=("current_level", "mode"),
             optional=("levels",),
-            context="notify.scene.level payload",
+            context="notify.level payload",
         )
         try:
             current_level = int(mapping["current_level"])
         except Exception as exc:  # pragma: no cover - defensive
-            raise ValueError("notify.scene.level current_level must be an int") from exc
+            raise ValueError("notify.level current_level must be an int") from exc
+        mode = str(mapping["mode"])
         levels_payload = mapping.get("levels")
         levels: tuple[dict[str, Any], ...] | None = None
         if levels_payload is not None:
             levels = tuple(
-                _as_mutable_mapping(entry, "notify.scene.level payload.levels[]")
-                for entry in _as_sequence(levels_payload, "notify.scene.level payload.levels")
+                _as_mutable_mapping(entry, "notify.level payload.levels[]")
+                for entry in _as_sequence(levels_payload, "notify.level payload.levels")
             )
-        return cls(current_level=current_level, levels=levels)
+        return cls(current_level=current_level, mode=mode, levels=levels)
 
 
 @dataclass(slots=True)
@@ -1304,35 +1307,29 @@ class NotifySceneFrame:
 
 
 @dataclass(slots=True)
-class NotifySceneLevelFrame:
+class NotifyLevelFrame:
     envelope: FrameEnvelope
-    payload: NotifySceneLevelPayload
+    payload: NotifyLevelPayload
 
     def __post_init__(self) -> None:
         self._validate()
 
     def _validate(self) -> None:
         env = self.envelope
-        _require(
-            env.type == NOTIFY_SCENE_LEVEL_TYPE,
-            "notify.scene.level frame must have type=notify.scene.level",
-        )
-        _require(
-            env.version == PROTO_VERSION,
-            f"notify.scene.level must use protocol version {PROTO_VERSION}",
-        )
-        _require(env.session is not None, "notify.scene.level requires session id")
-        _require(env.timestamp is not None, "notify.scene.level requires timestamp")
-        _require(env.seq is not None, "notify.scene.level requires seq")
-        _require(env.delta_token is not None, "notify.scene.level requires delta_token")
+        _require(env.type == NOTIFY_LEVEL_TYPE, "notify.level frame must have type=notify.level")
+        _require(env.version == PROTO_VERSION, f"notify.level must use protocol version {PROTO_VERSION}")
+        _require(env.session is not None, "notify.level requires session id")
+        _require(env.timestamp is not None, "notify.level requires timestamp")
+        _require(env.seq is not None, "notify.level requires seq")
+        _require(env.delta_token is not None, "notify.level requires delta_token")
 
     def to_dict(self) -> dict[str, Any]:
         return _frame_dict(self.envelope, self.payload.to_dict())
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, Any]) -> NotifySceneLevelFrame:
+    def from_dict(cls, data: Mapping[str, Any]) -> NotifyLevelFrame:
         envelope, payload = _pull_payload(data)
-        frame = cls(envelope=envelope, payload=NotifySceneLevelPayload.from_dict(payload))
+        frame = cls(envelope=envelope, payload=NotifyLevelPayload.from_dict(payload))
         frame._validate()
         return frame
 
@@ -1690,7 +1687,7 @@ SessionHeartbeat = SessionHeartbeatFrame
 SessionAck = SessionAckFrame
 SessionGoodbye = SessionGoodbyeFrame
 NotifyScene = NotifySceneFrame
-NotifySceneLevel = NotifySceneLevelFrame
+NotifyLevel = NotifyLevelFrame
 NotifyLayers = NotifyLayersFrame
 NotifyStream = NotifyStreamFrame
 NotifyDims = NotifyDimsFrame
@@ -1714,7 +1711,7 @@ __all__ = [
     "SESSION_ACK_TYPE",
     "SESSION_GOODBYE_TYPE",
     "NOTIFY_SCENE_TYPE",
-    "NOTIFY_SCENE_LEVEL_TYPE",
+    "NOTIFY_LEVEL_TYPE",
     "NOTIFY_LAYERS_TYPE",
     "NOTIFY_STREAM_TYPE",
     "NOTIFY_DIMS_TYPE",
@@ -1754,7 +1751,7 @@ __all__ = [
     "SessionGoodbye",
     # Notify payloads/frames
     "NotifyScenePayload",
-    "NotifySceneLevelPayload",
+    "NotifyLevelPayload",
     "NotifyLayersPayload",
     "NotifyStreamPayload",
     "NotifyDimsPayload",
@@ -1762,7 +1759,7 @@ __all__ = [
     "NotifyTelemetryPayload",
     "NotifyErrorPayload",
     "NotifySceneFrame",
-    "NotifySceneLevelFrame",
+    "NotifyLevelFrame",
     "NotifyLayersFrame",
     "NotifyStreamFrame",
     "NotifyDimsFrame",
@@ -1770,7 +1767,7 @@ __all__ = [
     "NotifyTelemetryFrame",
     "NotifyErrorFrame",
     "NotifyScene",
-    "NotifySceneLevel",
+    "NotifyLevel",
     "NotifyLayers",
     "NotifyStream",
     "NotifyDims",
