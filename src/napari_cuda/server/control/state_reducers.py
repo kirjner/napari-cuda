@@ -1396,6 +1396,16 @@ def reduce_level_update(
     plane_payload = _plain_plane_state(plane_state)
     if plane_payload is not None:
         plane_model = PlaneState(**plane_payload)
+        # Worker intents may carry stale slice indices; overwrite them with the
+        # controller-resolved level/step so plane restores match dims state.
+        sanitized_step = tuple(int(v) for v in step_tuple) if step_tuple is not None else None
+        plane_model.target_ndisplay = 2
+        plane_model.target_level = int(level)
+        plane_model.applied_level = int(level)
+        plane_model.target_step = sanitized_step
+        plane_model.applied_step = sanitized_step
+        plane_model.awaiting_level_confirm = False
+        plane_model.camera_pose_dirty = False
         _store_plane_state(
             ledger,
             plane_model,
