@@ -290,51 +290,18 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
 def _exit_volume_mode(worker: EGLRendererWorker) -> None:
     if worker._viewport_state.mode is not RenderMode.VOLUME:
         return
-    worker._viewport_state.mode = RenderMode.PLANE
     facade = ViewerBootstrapInterface(worker)
     spec = ledger_dims_spec(worker._ledger)
     assert spec is not None, "plane restore requires dims spec"
-    lvl_idx = int(spec.current_level)
+    level = int(spec.current_level)
     step_tuple = tuple(int(v) for v in spec.current_step)
     if logger.isEnabledFor(logging.INFO):
-        logger.info(
-            "toggle.exit_3d: restore level=%s step=%s", lvl_idx, step_tuple
-        )
+        logger.info("toggle.exit_3d: restore level=%s step=%s", level, step_tuple)
+
     source = worker._ensure_scene_source()
-    plane_entry = worker._ledger.get("viewport", "plane", "state")
-    assert plane_entry is not None and isinstance(plane_entry.value, dict), "plane camera cache missing viewport state"
-    plane_state = PlaneState(**dict(plane_entry.value))  # type: ignore[arg-type]
-    worker._viewport_state.plane = PlaneState(**dict(plane_entry.value))
-    rect_pose = plane_state.pose.rect
-    assert rect_pose is not None, "plane camera cache missing rect"
-    rect = tuple(float(v) for v in rect_pose)
-
-    view = worker.view
-    if view is not None:
-        view.camera = scene.cameras.PanZoomCamera(aspect=1.0)
-        cam = view.camera
-        sy, sx = plane_scale_for_level(source, lvl_idx)
-        h_full, w_full = plane_wh_for_level(source, lvl_idx)
-        world_w = float(w_full) * float(max(1e-12, sx))
-        world_h = float(h_full) * float(max(1e-12, sy))
-        cam.set_range(x=(0.0, max(1.0, world_w)), y=(0.0, max(1.0, world_h)))
-        cam.rect = Rect(*rect)
-        if plane_state.pose.center is not None:
-            cx, cy = plane_state.pose.center
-            cam.center = (float(cx), float(cy), 0.0)  # type: ignore[attr-defined]
-        if plane_state.pose.zoom is not None:
-            cam.zoom = float(plane_state.pose.zoom)
-
-    decision = lod.LevelDecision(
-        desired_level=int(lvl_idx),
-        selected_level=int(lvl_idx),
-        reason="exit-volume",
-        timestamp=time.perf_counter(),
-        oversampling={},
-    )
     context = facade.build_level_context(
         source=source,
-        level=int(lvl_idx),
+        level=int(level),
         step=step_tuple,
     )
     facade.apply_plane_metadata(source, context)
@@ -342,12 +309,12 @@ def _exit_volume_mode(worker: EGLRendererWorker) -> None:
     shape_tuple = tuple(int(dim) for dim in descriptor.shape)
 
     intent = LevelSwitchIntent(
-        desired_level=int(lvl_idx),
+        desired_level=int(level),
         selected_level=int(context.level),
         reason="exit-volume",
         previous_level=int(worker._current_level_index()),
         oversampling={},
-        timestamp=decision.timestamp,
+        timestamp=time.perf_counter(),
         mode=worker.viewport_state.mode,
         plane_state=deepcopy(worker.viewport_state.plane),
         volume_state=deepcopy(worker.viewport_state.volume),

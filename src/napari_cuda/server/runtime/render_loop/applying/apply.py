@@ -93,9 +93,8 @@ def _resolve_snapshot_ops(
     target_volume = nd >= 3
 
     source = snapshot_iface.ensure_scene_source()
-    prev_level = snapshot_iface.current_level_index()
-    target_level = int(snapshot.current_level) if snapshot.current_level is not None else prev_level
-    level_changed = target_level != prev_level
+    current_level = snapshot_iface.current_level_index()
+    snapshot_level = int(snapshot.current_level)
 
     dims_spec = snapshot.dims_spec
     assert dims_spec is not None, "render snapshot missing dims_spec"
@@ -114,13 +113,8 @@ def _resolve_snapshot_ops(
     }
 
     if target_volume:
-        requested_level = int(target_level)
-        selected_level = snapshot_iface.resolve_volume_intent_level(
-            source,
-            requested_level,
-        )
-        effective_level = int(selected_level)
-        load_needed = (effective_level != prev_level) or (not was_volume)
+        # Apply path is read-only for level: use the level carried by the snapshot
+        load_needed = snapshot_level != current_level
         step_hint = snapshot_step
         if step_hint is None and ledger_snapshot_step is not None:
             step_hint = tuple(int(v) for v in ledger_snapshot_step)
@@ -132,16 +126,16 @@ def _resolve_snapshot_ops(
             base_step = tuple(int(v) for v in step_hint)
             if spec is not None and spec.current_level is not None:
                 curr_level = int(spec.current_level)
-                if curr_level != int(effective_level):
+                if curr_level != int(snapshot_level):
                     base_step = dims_spec_remap_step_for_level(
                         spec,
                         step=base_step,
                         prev_level=curr_level,
-                        next_level=int(effective_level),
+                        next_level=int(snapshot_level),
                     )
             applied_context = build_level_context(
                 source=source,
-                level=int(effective_level),
+                level=snapshot_level,
                 step=base_step,
             )
 
@@ -149,9 +143,9 @@ def _resolve_snapshot_ops(
             "entering_volume": not was_volume,
             "load_needed": load_needed,
             "applied_context": applied_context,
-            "effective_level": int(effective_level),
+            "snapshot_level": int(snapshot_level),
             "step_hint": step_hint,
-            "prev_level": prev_level,
+            "current_level": current_level,
         }
         return ops
 
@@ -163,16 +157,16 @@ def _resolve_snapshot_ops(
     base_step = tuple(int(v) for v in step_hint)
     if spec is not None and spec.current_level is not None:
         curr_level = int(spec.current_level)
-        if curr_level != int(target_level):
+        if curr_level != int(snapshot_level):
             base_step = dims_spec_remap_step_for_level(
                 spec,
                 step=base_step,
                 prev_level=curr_level,
-                next_level=int(target_level),
+                next_level=int(snapshot_level),
             )
     applied_context = build_level_context(
         source=source,
-        level=int(target_level),
+        level=int(snapshot_level),
         step=base_step,
     )
     step_tuple = tuple(int(v) for v in applied_context.step)
@@ -186,7 +180,7 @@ def _resolve_snapshot_ops(
     )
     slice_token = SignatureToken((level_int, step_tuple, roi_signature))
     last_slice_token = snapshot_iface.last_slice_signature()
-    level_changed = target_level != prev_level
+    level_changed = snapshot_level != current_level
     skip_slice = not level_changed and last_slice_token is not None and last_slice_token.value == slice_token.value
     chunk_tuple = (
         (int(chunk_shape[0]), int(chunk_shape[1]))
