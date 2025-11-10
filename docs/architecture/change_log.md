@@ -6,7 +6,7 @@ Tracks intentional updates to the architecture spec and the authoritative module
 
 ### Docs
 - Centralised the **architecture tree** by moving every legacy doc into `docs/archive_local/`; only `docs/architecture/` stays live (see repo restructure in docs/architecture/repo_structure.md).
-- Added this change log plus updates across:
+- Added this change log and a central roadmap (docs/architecture/roadmap.md), plus updates across:
   - docs/architecture/system_design_spec.md (§4 Ledger Model, §10 Active View, Notify Contracts)
   - docs/architecture/per_function_contracts.md (Control transactions + notify.level broadcaster)
   - docs/architecture/cut_down_guides/* references (`server_overview`, `scene_builders_notify`, `client_integration`)
