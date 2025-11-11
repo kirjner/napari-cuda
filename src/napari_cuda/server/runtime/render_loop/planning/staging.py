@@ -16,11 +16,12 @@ from napari_cuda.server.runtime.render_loop.applying import (
 from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
-from napari_cuda.server.scene.viewport import RenderMode
+from napari_cuda.server.scene.viewport import PlaneViewportCache, RenderMode, VolumeViewportCache
 from napari_cuda.server.scene import (
     LayerVisualState,
     RenderLedgerSnapshot,
 )
+from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
 from napari_cuda.server.utils.signatures import snapshot_versions
 
 from .interface import RenderPlanInterface
@@ -35,6 +36,64 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+
+def _plane_pose_complete(snapshot: RenderLedgerSnapshot) -> bool:
+    return (
+        snapshot.plane_rect is not None
+        and snapshot.plane_center is not None
+        and snapshot.plane_zoom is not None
+        and snapshot.current_step is not None
+        and snapshot.current_level is not None
+    )
+
+
+def _plane_cache_from_snapshot(snapshot: RenderLedgerSnapshot) -> PlaneViewportCache:
+    plane_state = PlaneViewportCache()
+    target_level = int(snapshot.current_level) if snapshot.current_level is not None else plane_state.target_level
+    plane_state.target_level = target_level
+    plane_state.applied_level = target_level
+    plane_state.target_ndisplay = int(snapshot.ndisplay) if snapshot.ndisplay is not None else plane_state.target_ndisplay
+    if snapshot.current_step is not None:
+        step_tuple = tuple(int(v) for v in snapshot.current_step)
+        plane_state.target_step = step_tuple
+        plane_state.applied_step = step_tuple
+    if snapshot.plane_rect is not None:
+        plane_state.update_pose(rect=tuple(float(v) for v in snapshot.plane_rect))
+    if snapshot.plane_center is not None and len(snapshot.plane_center) >= 2:
+        plane_state.update_pose(center=(float(snapshot.plane_center[0]), float(snapshot.plane_center[1])))
+    if snapshot.plane_zoom is not None:
+        plane_state.update_pose(zoom=float(snapshot.plane_zoom))
+    plane_state.awaiting_level_confirm = False
+    plane_state.camera_pose_dirty = False
+    plane_state.applied_roi = None
+    plane_state.applied_roi_signature = None
+    return plane_state
+
+
+def _volume_pose_complete(snapshot: RenderLedgerSnapshot) -> bool:
+    return (
+        snapshot.volume_center is not None
+        and snapshot.volume_angles is not None
+        and snapshot.volume_distance is not None
+        and snapshot.volume_fov is not None
+        and snapshot.current_level is not None
+    )
+
+
+def _volume_cache_from_snapshot(snapshot: RenderLedgerSnapshot) -> VolumeViewportCache:
+    volume_state = VolumeViewportCache()
+    target_level = int(snapshot.current_level) if snapshot.current_level is not None else volume_state.level
+    volume_state.level = target_level
+    if snapshot.volume_center is not None:
+        volume_state.update_pose(center=tuple(float(v) for v in snapshot.volume_center))
+    if snapshot.volume_angles is not None:
+        volume_state.update_pose(angles=tuple(float(v) for v in snapshot.volume_angles))
+    if snapshot.volume_distance is not None:
+        volume_state.update_pose(distance=float(snapshot.volume_distance))
+    if snapshot.volume_fov is not None:
+        volume_state.update_pose(fov=float(snapshot.volume_fov))
+    return volume_state
 
 
 def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
@@ -127,8 +186,15 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
         tick_iface.viewport_state.plane = updates.plane_state
         if tick_iface.viewport_runner is not None:
             tick_iface.viewport_runner._plane = tick_iface.viewport_state.plane  # type: ignore[attr-defined]
+    elif ENABLE_VIEW_AXES_INDEX_BLOCKS and _plane_pose_complete(state):
+        plane_state = _plane_cache_from_snapshot(state)
+        tick_iface.viewport_state.plane = plane_state
+        if tick_iface.viewport_runner is not None:
+            tick_iface.viewport_runner._plane = plane_state  # type: ignore[attr-defined]
     if updates.volume_state is not None:
         tick_iface.viewport_state.volume = updates.volume_state
+    elif ENABLE_VIEW_AXES_INDEX_BLOCKS and _volume_pose_complete(state):
+        tick_iface.viewport_state.volume = _volume_cache_from_snapshot(state)
 
     previous_mode = tick_iface.viewport_state.mode
     mode_update = updates.mode

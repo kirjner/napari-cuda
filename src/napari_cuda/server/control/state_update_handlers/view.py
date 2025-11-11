@@ -13,7 +13,11 @@ from napari_cuda.server.control.state_reducers import (
     reduce_view_update,
     reduce_volume_restore,
 )
-from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
+from napari_cuda.server.scene.blocks import (
+    ENABLE_VIEW_AXES_INDEX_BLOCKS,
+    PlaneRestoreCacheBlock,
+    VolumeRestoreCacheBlock,
+)
 from napari_cuda.server.scene import (
     PlaneViewportCache,
     RenderMode,
@@ -27,6 +31,46 @@ if TYPE_CHECKING:
     from napari_cuda.server.control.control_channel_server import StateUpdateContext
 
 logger = logging.getLogger("napari_cuda.server.control.control_channel_server")
+
+
+def _plane_cache_from_restore_block(cache: PlaneRestoreCacheBlock) -> PlaneViewportCache:
+    pose = cache.pose
+    assert pose.center is not None, "plane restore cache missing center"
+    assert pose.rect is not None, "plane restore cache missing rect"
+    assert pose.zoom is not None, "plane restore cache missing zoom"
+
+    plane_state = PlaneViewportCache()
+    plane_state.target_ndisplay = 2
+    plane_state.target_level = cache.level
+    plane_state.target_step = cache.index
+    plane_state.applied_level = cache.level
+    plane_state.applied_step = cache.index
+    plane_state.update_pose(
+        center=pose.center,
+        rect=pose.rect,
+        zoom=pose.zoom,
+    )
+    plane_state.camera_pose_dirty = False
+    plane_state.awaiting_level_confirm = False
+    return plane_state
+
+
+def _volume_cache_from_restore_block(cache: VolumeRestoreCacheBlock) -> VolumeViewportCache:
+    pose = cache.pose
+    assert pose.center is not None, "volume restore cache missing center"
+    assert pose.angles is not None, "volume restore cache missing angles"
+    assert pose.distance is not None, "volume restore cache missing distance"
+    assert pose.fov is not None, "volume restore cache missing fov"
+
+    volume_state = VolumeViewportCache()
+    volume_state.level = cache.level
+    volume_state.update_pose(
+        center=pose.center,
+        angles=pose.angles,
+        distance=pose.distance,
+        fov=pose.fov,
+    )
+    return volume_state
 
 
 def _apply_plane_restore_from_ledger(
@@ -264,37 +308,10 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
         ledger = server._state_ledger
         if new_ndisplay >= 3:
             cache = load_volume_restore_cache(ledger)
-            pose = cache.pose
-            assert pose.center is not None, "volume restore cache missing center"
-            assert pose.angles is not None, "volume restore cache missing angles"
-            assert pose.distance is not None, "volume restore cache missing distance"
-            assert pose.fov is not None, "volume restore cache missing fov"
-            vs = VolumeViewportCache()
-            vs.level = cache.level
-            vs.update_pose(
-                center=pose.center,
-                angles=pose.angles,
-                distance=pose.distance,
-                fov=pose.fov,
-            )
-            restored_volume_state = vs
+            restored_volume_state = _volume_cache_from_restore_block(cache)
         if was_volume and new_ndisplay == 2:
             cache = load_plane_restore_cache(ledger)
-            pose = cache.pose
-            assert pose.center is not None, "plane restore cache missing center"
-            assert pose.rect is not None, "plane restore cache missing rect"
-            assert pose.zoom is not None, "plane restore cache missing zoom"
-            ps = PlaneViewportCache()
-            ps.target_ndisplay = 2
-            ps.applied_level = cache.level
-            ps.applied_step = cache.index
-            ps.update_pose(
-                center=pose.center,
-                zoom=pose.zoom,
-                rect=pose.rect,
-            )
-            ps.camera_pose_dirty = False
-            plane_state_override = ps
+            plane_state_override = _plane_cache_from_restore_block(cache)
     else:
         if new_ndisplay >= 3:
             restored_volume_state = _apply_volume_restore_from_ledger(

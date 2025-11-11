@@ -1642,10 +1642,30 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
             asyncio.run(scheduled.pop(0))
 
 
+def test_notify_scene_payload_includes_block_viewport_state(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload = _scene_payload_for_block_flag(monkeypatch, enabled=True)
+    metadata = payload.metadata or {}
+    viewport_meta = metadata.get("viewport_state")
+    assert viewport_meta is not None
+    assert viewport_meta["mode"] == "VOLUME"
+    assert "view" in viewport_meta and "camera" in viewport_meta
+    assert "axes" in viewport_meta and "index" in viewport_meta
+
+
 def test_notify_scene_payload_block_flag_parity(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload_off = _scene_payload_for_block_flag(monkeypatch, enabled=False)
-    payload_on = _scene_payload_for_block_flag(monkeypatch, enabled=True)
-    assert payload_off == payload_on
+    payload_off = _scene_payload_for_block_flag(monkeypatch, enabled=False).to_dict()
+    payload_on = _scene_payload_for_block_flag(monkeypatch, enabled=True).to_dict()
+
+    def _without_viewport_state(data: dict[str, Any]) -> dict[str, Any]:
+        metadata = data.get("metadata")
+        if metadata and "viewport_state" in metadata:
+            metadata = dict(metadata)
+            metadata.pop("viewport_state", None)
+            data = dict(data)
+            data["metadata"] = metadata or None
+        return data
+
+    assert _without_viewport_state(payload_off) == _without_viewport_state(payload_on)
 
 
 def test_reduce_plane_restore_updates_viewport_state() -> None:

@@ -4,9 +4,14 @@ import pytest
 
 from napari_cuda.server.control import state_reducers as reducers
 from napari_cuda.server.scene import blocks as scene_blocks
+from napari_cuda.server.scene import builders as scene_builders
 from napari_cuda.server.scene.blocks import (
+    CameraBlock,
+    PlaneCameraBlock,
+    VolumeCameraBlock,
     axes_from_payload,
     camera_block_from_payload,
+    camera_block_to_payload,
     index_block_from_payload,
     lod_block_from_payload,
     view_block_from_payload,
@@ -19,6 +24,7 @@ from napari_cuda.shared.dims_spec import dims_spec_from_payload
 def _enable_block_writes(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(reducers, "ENABLE_VIEW_AXES_INDEX_BLOCKS", True, raising=False)
     monkeypatch.setattr(scene_blocks, "ENABLE_VIEW_AXES_INDEX_BLOCKS", True, raising=False)
+    monkeypatch.setattr(scene_builders, "ENABLE_VIEW_AXES_INDEX_BLOCKS", True, raising=False)
 
 
 def _bootstrap_ledger() -> ServerStateLedger:
@@ -182,3 +188,54 @@ def test_camera_block_matches_plane_and_volume_pose(monkeypatch: pytest.MonkeyPa
     assert tuple(block.volume.angles or ()) == (30.0, 10.0, 5.0)
     assert block.volume.distance == 15.0
     assert block.volume.fov == 45.0
+
+
+def test_render_snapshot_prefers_camera_block_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_block_writes(monkeypatch)
+    ledger = _bootstrap_ledger()
+
+    ledger.record_confirmed(
+        "camera_plane",
+        "main",
+        "center",
+        (5.0, 6.0),
+        origin="test.legacy.plane",
+    )
+    ledger.record_confirmed(
+        "camera_volume",
+        "main",
+        "center",
+        (1.0, 1.0, 1.0),
+        origin="test.legacy.volume",
+    )
+
+    block = CameraBlock(
+        plane=PlaneCameraBlock(
+            rect=(9.0, 8.0, 7.0, 6.0),
+            center=(42.0, 24.0),
+            zoom=3.25,
+        ),
+        volume=VolumeCameraBlock(
+            center=(11.0, 22.0, 33.0),
+            angles=(10.0, 20.0, 5.0),
+            distance=77.0,
+            fov=55.0,
+        ),
+    )
+    ledger.record_confirmed(
+        "camera",
+        "main",
+        "state",
+        camera_block_to_payload(block),
+        origin="test.camera.block",
+    )
+
+    snapshot = scene_builders.build_ledger_snapshot(ledger, ledger.snapshot())
+
+    assert snapshot.plane_center == block.plane.center
+    assert snapshot.plane_rect == block.plane.rect
+    assert snapshot.plane_zoom == block.plane.zoom
+    assert snapshot.volume_center == block.volume.center
+    assert snapshot.volume_angles == block.volume.angles
+    assert snapshot.volume_distance == block.volume.distance
+    assert snapshot.volume_fov == block.volume.fov

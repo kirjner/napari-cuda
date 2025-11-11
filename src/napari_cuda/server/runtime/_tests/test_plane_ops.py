@@ -97,3 +97,21 @@ def test_apply_pose_to_camera_sets_panzoom_fields() -> None:
     assert cam.rect == Rect(5.0, 6.0, 7.0, 8.0)
     assert cam.center == (30.0, 40.0)
     assert cam.zoom == 4.5
+
+
+def test_assign_pose_from_snapshot_handles_block_payload_lists() -> None:
+    state = PlaneViewportCache()
+    snapshot = RenderLedgerSnapshot(
+        plane_rect=[1.0, 2.0, 3.0, 4.0],
+        plane_center=[9.0, 11.0],
+        plane_zoom=1.75,
+    )
+
+    rect, center, zoom = assign_pose_from_snapshot(state, snapshot)
+
+    assert rect == (1.0, 2.0, 3.0, 4.0)
+    assert center == (9.0, 11.0)
+    assert zoom == 1.75
+    assert state.pose.rect == rect
+    assert state.pose.center == center
+    assert state.pose.zoom == zoom
