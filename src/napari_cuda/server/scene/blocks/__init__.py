@@ -15,6 +15,16 @@ from .camera import (
 from .index import IndexBlock, index_block_from_payload, index_block_to_payload
 from .lod import LodBlock, lod_block_from_payload, lod_block_to_payload
 from .view import ViewBlock, view_block_from_payload, view_block_to_payload
+from .restore import (
+    PlaneRestoreCachePose,
+    PlaneRestoreCache,
+    VolumeRestoreCachePose,
+    VolumeRestoreCache,
+    plane_restore_cache_from_payload,
+    plane_restore_cache_to_payload,
+    volume_restore_cache_from_payload,
+    volume_restore_cache_to_payload,
+)
 
 ENABLE_VIEW_AXES_INDEX_BLOCKS = os.environ.get("NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX", "0") == "1"
 
@@ -39,4 +49,13 @@ __all__ = [
     "view_block_from_payload",
     "view_block_to_payload",
     "ENABLE_VIEW_AXES_INDEX_BLOCKS",
+    # restore caches
+    "PlaneRestoreCachePose",
+    "PlaneRestoreCache",
+    "VolumeRestoreCachePose",
+    "VolumeRestoreCache",
+    "plane_restore_cache_from_payload",
+    "plane_restore_cache_to_payload",
+    "volume_restore_cache_from_payload",
+    "volume_restore_cache_to_payload",
 ]

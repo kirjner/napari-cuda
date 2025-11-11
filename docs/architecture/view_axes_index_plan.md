@@ -150,6 +150,20 @@ Current Status (2025-11-10)
   baselines (`notify.scene`, `notify.layers`, `notify.stream`, `notify.dims`,
   `notify.level`) remain identical even though reducers now dual-write the new
   blocks.
+- **Restore cache helpers:** `state_reducers.py` now exposes `load_*_restore_cache`,
+  `write_*_restore_cache`, and `_plane/_volume_cache_from_state`, and reducers
+  (bootstrap, dims, camera, level, plane/volume restore) already dual-write
+  cache payloads under the feature flag.
+  - Today those helpers clone the just-updated `PlaneState` / `VolumeState`
+    instances so cache writes share the same timestamp/intent metadata as the
+    legacy `viewport.*` entries. Once `{view, axes, index, lod, camera}`
+    blocks become authoritative (Phase 2/3), we will delete the legacy
+    dataclasses and update the helpers to build caches straight from the new
+    block payloads instead.
+  - Next step: teach `reduce_view_update` / toggle handlers to copy the
+    target mode’s cache into `{lod,index,camera}` so toggles are truly
+    single-pass, then rename the cache types to `PlaneRestoreCacheBlock` /
+    `VolumeRestoreCacheBlock`.
 
 Outstanding Phase 1 work:
 1. Add explicit unit tests that compare each block to the corresponding

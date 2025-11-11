@@ -24,6 +24,12 @@
   - No `getattr`/`hasattr`, `tuple(...)`, `float(...)`, or “just in case” `None` checks when the caller already guarantees shape. Use direct assignment. If a value is wrong, let it explode.
   - No `# type: ignore` band-aids in core modules; design the types (TypedDicts, dataclasses) so the compiler knows what we’re doing. If mypy complains and the schema is correct, prefer removing the annotation over sprinkling ignores.
 - Logging: use `logger.exception(...)` at subsystem boundaries only; avoid chatty logging in hot paths.
+- Restore/cache schema hygiene (applies to all new ledger-backed scopes):
+  - Serialize to plain JSON-friendly payloads, deserialize immediately via TypedDict-aware helpers that return dataclasses; no inline `# type: ignore`, no `typing.cast`, and no "maybe" checks after the helper returns.
+  - Encode invariants once (shape, dimensionality, dtype) inside the helper and raise/assert there; all other call sites treat the dataclass values as truth.
+  - When writing cache data, keep the schema symmetric: tuples → lists on the way out, lists → tuples on the way in, performed centrally so call sites just assign fields.
+  - Feature-flagged reducers/handlers must branch at the highest level (e.g., `if ENABLE_VIEW_AXES_INDEX_BLOCKS:`) and use the typed helpers for the new path; the legacy path stays untouched for compatibility.
+  - Treat cache blocks as immutable snapshots: rebuild the entire dataclass from authoritative state changes and write it via `write_*_restore_cache`; never mutate cache payloads piecemeal.
 
 ## Testing Guidelines
 - Framework: `pytest` with config in `pyproject.toml` (strict markers, warnings-as-errors for napari).
@@ -62,6 +68,8 @@
 
 Implement ledger‑driven restore and block consumption under the feature flag:
 
+- Restore cache helpers (`load_*`, `write_*`, `_plane/_volume_cache_from_state`) now dual-write from bootstrap + every reducer when the flag is on; legacy writers still run for compatibility.
+- Next task: finalize the restore path by copying cache payloads into `{lod,index,camera}` in `reduce_view_update`, then rename the cache types to `PlaneRestoreCacheBlock` / `VolumeRestoreCacheBlock` ahead of Phase 2.
 - Persist per‑mode RestoreCaches on the ledger so view toggles are single‑pass:
   - `restore_cache.plane.state`: `{ level: int, index: tuple[int,...], pose: {rect,center,zoom} }`
   - `restore_cache.volume.state`: `{ level: int, index: tuple[int,...], pose: {center,angles,distance,fov} }`

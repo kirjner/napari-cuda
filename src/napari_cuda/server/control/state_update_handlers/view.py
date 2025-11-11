@@ -7,10 +7,13 @@ from dataclasses import replace
 from typing import Any, Mapping, Optional, TYPE_CHECKING
 
 from napari_cuda.server.control.state_reducers import (
+    load_plane_restore_cache,
+    load_volume_restore_cache,
     reduce_plane_restore,
     reduce_view_update,
     reduce_volume_restore,
 )
+from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
 from napari_cuda.server.scene import (
     PlaneState,
     RenderMode,
@@ -256,18 +259,55 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
     server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
 
     restored_volume_state: Optional[VolumeState] = None
-    if new_ndisplay >= 3:
-        restored_volume_state = _apply_volume_restore_from_ledger(
-            server,
-            timestamp=ctx.timestamp,
-            intent_id=ctx.intent_id,
-        )
-    if was_volume and new_ndisplay == 2:
-        _apply_plane_restore_from_ledger(
-            server,
-            timestamp=ctx.timestamp,
-            intent_id=ctx.intent_id,
-        )
+    plane_state_override: Optional[PlaneState] = None
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        ledger = server._state_ledger
+        if new_ndisplay >= 3:
+            cache = load_volume_restore_cache(ledger)
+            pose = cache.pose
+            assert pose.center is not None, "volume restore cache missing center"
+            assert pose.angles is not None, "volume restore cache missing angles"
+            assert pose.distance is not None, "volume restore cache missing distance"
+            assert pose.fov is not None, "volume restore cache missing fov"
+            vs = VolumeState()
+            vs.level = cache.level
+            vs.update_pose(
+                center=pose.center,
+                angles=pose.angles,
+                distance=pose.distance,
+                fov=pose.fov,
+            )
+            restored_volume_state = vs
+        if was_volume and new_ndisplay == 2:
+            cache = load_plane_restore_cache(ledger)
+            pose = cache.pose
+            assert pose.center is not None, "plane restore cache missing center"
+            assert pose.rect is not None, "plane restore cache missing rect"
+            assert pose.zoom is not None, "plane restore cache missing zoom"
+            ps = PlaneState()
+            ps.target_ndisplay = 2
+            ps.applied_level = cache.level
+            ps.applied_step = cache.index
+            ps.update_pose(
+                center=pose.center,
+                zoom=pose.zoom,
+                rect=pose.rect,
+            )
+            ps.camera_pose_dirty = False
+            plane_state_override = ps
+    else:
+        if new_ndisplay >= 3:
+            restored_volume_state = _apply_volume_restore_from_ledger(
+                server,
+                timestamp=ctx.timestamp,
+                intent_id=ctx.intent_id,
+            )
+        if was_volume and new_ndisplay == 2:
+            _apply_plane_restore_from_ledger(
+                server,
+                timestamp=ctx.timestamp,
+                intent_id=ctx.intent_id,
+            )
 
     await ctx.ack(applied_value=new_ndisplay, version=int(result.version))
 
@@ -286,7 +326,7 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
         snapshot = runtime.viewport_snapshot()
         if snapshot is None:
             return True
-        plane_state = snapshot.plane
+        plane_state = plane_state_override if plane_state_override is not None else snapshot.plane
         plane_state.target_ndisplay = int(new_ndisplay)
         volume_state = replace(restored_volume_state) if restored_volume_state is not None else snapshot.volume
         desired_mode = RenderMode.VOLUME if new_ndisplay >= 3 else RenderMode.PLANE
