@@ -11,10 +11,7 @@ from napari_cuda.protocol.messages import (
 )
 from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
-from napari_cuda.server.scene import (
-    snapshot_viewport_state,
-    snapshot_volume_state,
-)
+from napari_cuda.server.scene import snapshot_scene_blocks, snapshot_volume_state
 from napari_cuda.server.ledger import LedgerEntry
 
 # ---------------------------------------------------------------------------
@@ -38,7 +35,7 @@ def build_notify_scene_payload(
     payload.policies = _build_policies_block(ledger_snapshot)
     payload.metadata = _merge_scene_metadata(scene_snapshot.metadata, ledger_snapshot)
 
-    viewport_state = snapshot_viewport_state(ledger_snapshot)
+    viewport_state = snapshot_scene_blocks(ledger_snapshot)
     if viewport_state:
         metadata_block = payload.metadata or {}
         metadata_copy = dict(metadata_block)

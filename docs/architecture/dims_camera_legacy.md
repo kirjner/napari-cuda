@@ -24,7 +24,8 @@ Ledger State Today
   `src/napari_cuda/server/scene/blocks/` so we can validate the new schema
   without dropping the legacy fields.
 * `viewport.state` (`plane`/`volume` scopes) — serialized copies of the worker
-  `PlaneState` / `VolumeState` dataclasses (`state_reducers._store_plane_state`,
+  ``PlaneViewportCache`` / ``VolumeViewportCache`` dataclasses (formerly
+  ``PlaneState`` / ``VolumeState``; see `state_reducers._store_plane_state`,
   `_store_volume_state`). Reducers rely on these cached blobs to determine
   whether a level/ROI reload is pending.
 * `camera_plane` / `camera_volume` scopes — persisted by
@@ -136,7 +137,7 @@ Worker Consumption Path
      `volume.py` / `volume_ops.py`.
    * `ViewportPlanner` (`render_loop/planning/viewport_planner.py`) consumes
      snapshots to decide whether a new slice/level needs to load. It relies on
-     `PlaneState` (`request` vs `applied`), `snapshot.current_step`, and
+    ``PlaneViewportCache`` (`request` vs `applied`), `snapshot.current_step`, and
      `snapshot.ndisplay`.
    * `snapshot_drain.drain_render_state` applies dims changes, layer visual
      updates, and (prior to the orbit fix) camera overrides.
@@ -172,9 +173,9 @@ Bootstrap, Restore, and Runtime Helpers
   use `ViewerBootstrapInterface` to fetch multiscale metadata.
 * **Render mailbox** (`runtime/ipc/mailboxes/render_update.py`) coalesces
   `RenderUpdate` structs. Even though we now feed the worker fresh snapshots,
-  the mailbox still stores `mode`, `PlaneState`, and `VolumeState` copies for
-  viewport runners to inspect. Removing it entirely is part of the longer-term
-  plan.
+  the mailbox still stores `mode`, `PlaneViewportCache`, and
+  `VolumeViewportCache` copies for viewport runners to inspect. Removing it
+  entirely is part of the longer-term plan.
 
 Key Dependencies to Untangle
 ----------------------------
@@ -271,12 +272,13 @@ Track this list as you migrate so nothing lingers:
      `ActiveViewMirror` once ActiveView derives from the new scopes.
 3. **Viewport caches and render-only state**
    - `src/napari_cuda/server/scene/viewport.py`: `PlanePose`, `PlaneRequest`,
-     `PlaneResult`, `PlaneState`, `PoseEvent`, `ViewportState`, `VolumePose`,
-     `VolumeState` (ActiveViewState remains; RenderMode becomes a simple
-     string-valued enum once the new `view` block lands).
-   - Reducer helpers in `state_reducers.py` that serialize `PlaneState` /
-     `VolumeState` blobs (`_record_viewport_state`, `_store_plane_state`,
-     `_store_volume_state`, `viewport.state.*`, `view_cache.*`).
+     `PlaneResult`, `PlaneViewportCache`, `PoseEvent`, `ViewportState`,
+     `VolumePose`, `VolumeViewportCache` (ActiveViewState remains; RenderMode
+     becomes a simple string-valued enum once the new `view` block lands).
+   - Reducer helpers in `state_reducers.py` that serialize
+     `PlaneViewportCache` / `VolumeViewportCache` blobs
+     (`_record_viewport_state`, `_store_plane_state`, `_store_volume_state`,
+     `viewport.state.*`, `view_cache.*`).
 4. **Bootstrap helpers that mutate camera/level outside the ledger**
    - `src/napari_cuda/server/runtime/bootstrap/setup_camera.py`:
      `_coarsest_level_index`, `_frame_volume_camera`,

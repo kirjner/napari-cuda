@@ -6,9 +6,9 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from napari_cuda.server.scene.viewport import (
-    PlaneState,
+    PlaneViewportCache,
     RenderMode,
-    VolumeState,
+    VolumeViewportCache,
 )
 
 
@@ -25,8 +25,8 @@ class LevelSwitchIntent:
     zoom_ratio: float | None = None
     lock_level: int | None = None
     mode: RenderMode = RenderMode.PLANE
-    plane_state: PlaneState | None = None
-    volume_state: VolumeState | None = None
+    plane_state: PlaneViewportCache | None = None
+    volume_state: VolumeViewportCache | None = None
     level_shape: tuple[int, ...] | None = None
 
 

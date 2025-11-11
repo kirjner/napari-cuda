@@ -9,9 +9,9 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
 from napari_cuda.server.scene.viewport import (
-    PlaneState,
+    PlaneViewportCache,
     RenderMode,
-    VolumeState,
+    VolumeViewportCache,
 )
 
 
@@ -19,8 +19,8 @@ def apply_viewport_state_snapshot(
     snapshot_iface: RenderApplyInterface,
     *,
     mode: Optional[RenderMode],
-    plane_state: Optional[PlaneState],
-    volume_state: Optional[VolumeState],
+    plane_state: Optional[PlaneViewportCache],
+    volume_state: Optional[VolumeViewportCache],
 ) -> None:
     """Apply a mailbox-only viewport update (no scene snapshot)."""
 

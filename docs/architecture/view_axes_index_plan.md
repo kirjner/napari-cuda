@@ -64,8 +64,8 @@ sequenceDiagram
 ```
 
 Key points:
-- `RenderUpdateMailbox`, `ViewportPlanner`, `PlaneState`/`VolumeState`, and the
-  apply shims disappear.
+- `RenderUpdateMailbox`, `ViewportPlanner`, `PlaneViewportCache`/`VolumeViewportCache`,
+  and the apply shims disappear.
 - Only `WorkerIntentMailbox` remains (level intents, thumbnail captures).
 - Ledger scopes are read directly each tick; per-block signatures prevent
   redundant reapply.
@@ -102,7 +102,7 @@ Temporary patching:
    - Keep the legacy planner/mailbox path behind a fallback flag for staged rollout.
 
 ### Phase 3 — Legacy removal
-1. Delete `ViewportPlanner`, `PlaneState`, `VolumeState`, `RenderUpdateMailbox`,
+1. Delete `ViewportPlanner`, `PlaneViewportCache`, `VolumeViewportCache`, `RenderUpdateMailbox`,
    bootstrap camera helpers, and all planner/apply shims (as listed in
    `docs/architecture/dims_camera_legacy.md`).
 2. Remove `dims_spec` writes and legacy notify fields; collapse `scene/blocks`
@@ -154,30 +154,36 @@ Current Status (2025-11-10)
   `write_*_restore_cache`, and `_plane/_volume_cache_from_state`, and reducers
   (bootstrap, dims, camera, level, plane/volume restore) already dual-write
   cache payloads under the feature flag.
-  - Today those helpers clone the just-updated `PlaneState` / `VolumeState`
+  - Today those helpers clone the just-updated `PlaneViewportCache` /
+    `VolumeViewportCache`
     instances so cache writes share the same timestamp/intent metadata as the
     legacy `viewport.*` entries. Once `{view, axes, index, lod, camera}`
     blocks become authoritative (Phase 2/3), we will delete the legacy
     dataclasses and update the helpers to build caches straight from the new
     block payloads instead.
-  - Next step: teach `reduce_view_update` / toggle handlers to copy the
-    target mode’s cache into `{lod,index,camera}` so toggles are truly
-    single-pass, then rename the cache types to `PlaneRestoreCacheBlock` /
-    `VolumeRestoreCacheBlock`.
+  - `reduce_view_update` / toggle handlers copy the target mode’s cache into
+    `{lod,index,camera}` so toggles are single-pass, and the cache dataclasses
+    are named `PlaneRestoreCacheBlock` / `VolumeRestoreCacheBlock` to keep
+    terminology aligned with the other scene blocks.
+  - Next focus: flip the consumers (`snapshot_scene_blocks`, notify builders,
+    worker apply paths) to read the block scopes under the flag while legacy
+    keys stay live for compatibility.
 
 Outstanding Phase 1 work:
 1. Add explicit unit tests that compare each block to the corresponding
    `DimsSpec` / cached pose fields (axes metadata, current index, margins, camera
    pose).
-2. Teach `snapshot_viewport_state` / `build_notify_scene_payload` to read the new
+2. Teach `snapshot_scene_blocks` / `build_notify_scene_payload` to read the new
    ledger keys when the flag is set, while legacy scopes remain in place for the
-   off-path.
-3. Rename the worker-side caches to **PlaneViewportCache** / **VolumeViewportCache**
-   (formerly `PlaneState` / `VolumeState`) to make it explicit that these structs
-   live only in-memory on the worker for restore/autoframe toggles. They do not
-   need dedicated ledger scopes—the ledger remains the source of the currently
-   requested state (view/axes/index/lod/camera blocks), while the worker keeps
-   the per-mode “last applied” state internally.
+   off-path. Once the block path is default, rename this helper to reflect that
+   it snapshots scene blocks directly (e.g., `snapshot_scene_blocks`), move
+   `viewport_state` metadata to the block payloads, and delete the legacy
+   reconstruction path.
+3. Treat the renamed worker-side caches (**PlaneViewportCache** /
+   **VolumeViewportCache**) as worker-only snapshots for restore/autoframe
+   toggles. They do not need dedicated ledger scopes once block consumers are
+   authoritative, so plan the removal of their ledger mirrors after the
+   consumer flip is complete.
 4. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
    the protocol docs so consumers know where to look once the flag flips.
 

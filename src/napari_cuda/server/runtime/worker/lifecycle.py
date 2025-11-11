@@ -312,6 +312,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 )
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
+                thumbnail_state = frame_state
                 frame_state = pull_render_snapshot(server)
                 # Post-frame: capture thumbnail on worker and hand off via mailbox
                 viewer = worker.viewer_model()
@@ -341,17 +342,18 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         if thumb is not None:
                             arr = np.asarray(thumb)
                             layer_state = None
-                            if frame_state.layer_values:
-                                if target_layer_id is not None and target_layer_id in frame_state.layer_values:
-                                    layer_state = frame_state.layer_values[target_layer_id]
+                            layer_values = thumbnail_state.layer_values if thumbnail_state.layer_values else {}
+                            if layer_values:
+                                if target_layer_id is not None and target_layer_id in layer_values:
+                                    layer_state = layer_values[target_layer_id]
                                 else:
-                                    values = list(frame_state.layer_values.values())
+                                    values = list(layer_values.values())
                                     if values:
                                         layer_state = values[0]
                             if layer_state is not None:
                                 # Build inputs-only token from the same frame_state we just rendered
                                 lid = str(target_layer_id or "layer-0")
-                                token = layer_inputs_signature(frame_state, lid).value
+                                token = layer_inputs_signature(thumbnail_state, lid).value
                                 payload = ThumbnailCapture(
                                     layer_id=lid,
                                     array=arr,

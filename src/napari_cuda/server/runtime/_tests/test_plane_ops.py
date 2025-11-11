@@ -4,7 +4,7 @@ import pytest
 from vispy.geometry import Rect
 
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.scene.viewport import PlaneState
+from napari_cuda.server.scene.viewport import PlaneViewportCache
 from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
     apply_pose_to_camera,
     assign_pose_from_snapshot,
@@ -16,7 +16,7 @@ from napari_cuda.server.scene import (
 
 
 def test_assign_pose_from_snapshot_prefers_snapshot() -> None:
-    state = PlaneState()
+    state = PlaneViewportCache()
     state.update_pose(rect=(0.0, 0.0, 100.0, 100.0), center=(50.0, 50.0), zoom=1.5)
 
     snapshot = RenderLedgerSnapshot(
@@ -36,7 +36,7 @@ def test_assign_pose_from_snapshot_prefers_snapshot() -> None:
 
 
 def test_assign_pose_from_snapshot_falls_back_to_cached_pose() -> None:
-    state = PlaneState()
+    state = PlaneViewportCache()
     state.update_pose(rect=(0.0, 0.0, 115.0, 215.0), center=(57.0, 107.0), zoom=0.75)
 
     snapshot = RenderLedgerSnapshot()
@@ -49,7 +49,7 @@ def test_assign_pose_from_snapshot_falls_back_to_cached_pose() -> None:
 
 
 def test_mark_slice_applied_updates_state() -> None:
-    state = PlaneState()
+    state = PlaneViewportCache()
     roi = SliceROI(2, 6, 4, 12)
 
     mark_slice_applied(
@@ -67,7 +67,7 @@ def test_mark_slice_applied_updates_state() -> None:
 
 
 def test_assign_pose_missing_rect_raises() -> None:
-    state = PlaneState()
+    state = PlaneViewportCache()
     state.clear_pose()
     snapshot = RenderLedgerSnapshot()
 
@@ -76,7 +76,7 @@ def test_assign_pose_missing_rect_raises() -> None:
 
 
 def test_apply_pose_to_camera_sets_panzoom_fields() -> None:
-    state = PlaneState()
+    state = PlaneViewportCache()
     state.update_pose(rect=(1.0, 2.0, 3.0, 4.0), center=(10.0, 20.0), zoom=1.5)
     snapshot = RenderLedgerSnapshot(
         plane_rect=(5.0, 6.0, 7.0, 8.0),

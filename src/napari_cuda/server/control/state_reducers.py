@@ -29,7 +29,7 @@ from napari_cuda.server.control.transactions import (
     apply_view_toggle_transaction,
     apply_volume_restore_transaction,
 )
-from napari_cuda.server.scene import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.scene import PlaneViewportCache, RenderMode, VolumeViewportCache
 from napari_cuda.server.ledger import (
     LedgerEntry,
     PropertyKey,
@@ -45,20 +45,20 @@ from napari_cuda.server.scene.blocks import (
     IndexBlock,
     LodBlock,
     PlaneCameraBlock,
-    PlaneRestoreCache,
+    PlaneRestoreCacheBlock,
     PlaneRestoreCachePose,
     ViewBlock,
     VolumeCameraBlock,
-    VolumeRestoreCache,
+    VolumeRestoreCacheBlock,
     VolumeRestoreCachePose,
     axes_to_payload,
     camera_block_to_payload,
     index_block_to_payload,
     lod_block_to_payload,
-    plane_restore_cache_from_payload,
-    plane_restore_cache_to_payload,
-    volume_restore_cache_from_payload,
-    volume_restore_cache_to_payload,
+    plane_restore_cache_block_from_payload,
+    plane_restore_cache_block_to_payload,
+    volume_restore_cache_block_from_payload,
+    volume_restore_cache_block_to_payload,
     view_block_to_payload,
 )
 from napari_cuda.shared.dims_spec import (
@@ -164,31 +164,31 @@ def _current_ndisplay(ledger: ServerStateLedger) -> int:
     return 2
 
 
-def _load_plane_state(ledger: ServerStateLedger) -> PlaneState:
+def _load_plane_state(ledger: ServerStateLedger) -> PlaneViewportCache:
     entry = ledger.get("viewport", "plane", "state")
     if entry is not None and isinstance(entry.value, Mapping):
         payload = dict(entry.value)
         try:
-            return PlaneState(**payload)
+            return PlaneViewportCache(**payload)
         except Exception:
             logger.debug("failed to deserialize plane state payload", exc_info=True)
-    return PlaneState()
+    return PlaneViewportCache()
 
 
-def _load_volume_state(ledger: ServerStateLedger) -> VolumeState:
+def _load_volume_state(ledger: ServerStateLedger) -> VolumeViewportCache:
     entry = ledger.get("viewport", "volume", "state")
     if entry is not None and isinstance(entry.value, Mapping):
         payload = dict(entry.value)
         try:
-            return VolumeState(**payload)
+            return VolumeViewportCache(**payload)
         except Exception:
             logger.debug("failed to deserialize volume state payload", exc_info=True)
-    return VolumeState()
+    return VolumeViewportCache()
 
 
 def _store_plane_state(
     ledger: ServerStateLedger,
-    plane_state: PlaneState,
+    plane_state: PlaneViewportCache,
     *,
     origin: str,
     timestamp: float,
@@ -206,7 +206,7 @@ def _store_plane_state(
 
 def _store_volume_state(
     ledger: ServerStateLedger,
-    volume_state: VolumeState,
+    volume_state: VolumeViewportCache,
     *,
     origin: str,
     timestamp: float,
@@ -222,13 +222,13 @@ def _store_volume_state(
     ledger.batch_record_confirmed(entries, origin=origin, timestamp=timestamp)
 
 
-def _plane_cache_from_state(plane_state: PlaneState) -> PlaneRestoreCache:
+def _plane_cache_from_state(plane_state: PlaneViewportCache) -> PlaneRestoreCacheBlock:
     pose = plane_state.pose
     assert pose is not None, "plane state missing pose"
     index = plane_state.applied_step
     assert index is not None, "plane state missing applied_step"
     resolved_index = tuple(int(v) for v in index)
-    return PlaneRestoreCache(
+    return PlaneRestoreCacheBlock(
         level=plane_state.applied_level,
         index=resolved_index,
         pose=PlaneRestoreCachePose(rect=pose.rect, center=pose.center, zoom=pose.zoom),
@@ -236,14 +236,14 @@ def _plane_cache_from_state(plane_state: PlaneState) -> PlaneRestoreCache:
 
 
 def _volume_cache_from_state(
-    volume_state: VolumeState,
+    volume_state: VolumeViewportCache,
     *,
     index: Sequence[int] | None = None,
-) -> VolumeRestoreCache:
+) -> VolumeRestoreCacheBlock:
     pose = volume_state.pose
     assert pose is not None, "volume state missing pose"
     resolved_index = tuple(int(v) for v in index) if index is not None else tuple()
-    return VolumeRestoreCache(
+    return VolumeRestoreCacheBlock(
         level=volume_state.level,
         index=resolved_index,
         pose=VolumeRestoreCachePose(
@@ -255,7 +255,7 @@ def _volume_cache_from_state(
     )
 
 
-def _view_axes_index_entries(spec: DimsSpec) -> list[tuple[str, str, str, object]]:
+def _view_axes_entries(spec: DimsSpec) -> list[tuple[str, str, str, object]]:
     if not ENABLE_VIEW_AXES_INDEX_BLOCKS:
         return []
     view_block = ViewBlock(
@@ -285,21 +285,28 @@ def _view_axes_index_entries(spec: DimsSpec) -> list[tuple[str, str, str, object
             )
         )
     axes_block = AxesBlock(axes=tuple(axes))
-    index_block = IndexBlock(value=spec.current_step)
-    lod_block = LodBlock(level=spec.current_level, roi=None, policy=None)
     return [
         ("view", "main", "state", view_block_to_payload(view_block)),
         ("axes", "main", "state", axes_to_payload(axes_block)),
-        ("index", "main", "cursor", index_block_to_payload(index_block)),
-        ("lod", "main", "state", lod_block_to_payload(lod_block)),
     ]
+
+
+def _view_axes_index_entries(spec: DimsSpec) -> list[tuple[str, str, str, object]]:
+    if not ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        return []
+    entries = _view_axes_entries(spec)
+    index_block = IndexBlock(value=spec.current_step)
+    lod_block = LodBlock(level=spec.current_level, roi=None, policy=None)
+    entries.append(("index", "main", "cursor", index_block_to_payload(index_block)))
+    entries.append(("lod", "main", "state", lod_block_to_payload(lod_block)))
+    return entries
 
 
 def _camera_block_payload(
     ledger: ServerStateLedger,
     *,
-    plane_state: PlaneState | None = None,
-    volume_state: VolumeState | None = None,
+    plane_state: PlaneViewportCache | None = None,
+    volume_state: VolumeViewportCache | None = None,
 ) -> dict[str, object] | None:
     if not ENABLE_VIEW_AXES_INDEX_BLOCKS:
         return None
@@ -333,13 +340,13 @@ def _get_dims_spec(ledger: ServerStateLedger) -> DimsSpec:
 
 def write_plane_restore_cache(
     ledger: ServerStateLedger,
-    cache: PlaneRestoreCache,
+    cache: PlaneRestoreCacheBlock,
     *,
     origin: str,
     timestamp: float,
     metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    payload = plane_restore_cache_to_payload(cache)
+    payload = plane_restore_cache_block_to_payload(cache)
     entry: tuple[Any, ...]
     if metadata:
         entry = ("restore_cache", "plane", "state", payload, dict(metadata))
@@ -350,13 +357,13 @@ def write_plane_restore_cache(
 
 def write_volume_restore_cache(
     ledger: ServerStateLedger,
-    cache: VolumeRestoreCache,
+    cache: VolumeRestoreCacheBlock,
     *,
     origin: str,
     timestamp: float,
     metadata: Optional[Mapping[str, Any]] = None,
 ) -> None:
-    payload = volume_restore_cache_to_payload(cache)
+    payload = volume_restore_cache_block_to_payload(cache)
     entry: tuple[Any, ...]
     if metadata:
         entry = ("restore_cache", "volume", "state", payload, dict(metadata))
@@ -369,29 +376,29 @@ def load_plane_restore_cache(ledger: ServerStateLedger):
     entry = ledger.get("restore_cache", "plane", "state")
     assert entry is not None and isinstance(entry.value, Mapping), "plane restore cache missing"
     payload = dict(entry.value)
-    return plane_restore_cache_from_payload(payload)
+    return plane_restore_cache_block_from_payload(payload)
 
 
 def load_volume_restore_cache(ledger: ServerStateLedger):
     entry = ledger.get("restore_cache", "volume", "state")
     assert entry is not None and isinstance(entry.value, Mapping), "volume restore cache missing"
     payload = dict(entry.value)
-    return volume_restore_cache_from_payload(payload)
+    return volume_restore_cache_block_from_payload(payload)
 
-def _plain_plane_state(state: PlaneState | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
+def _plain_plane_state(state: PlaneViewportCache | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
     if state is None:
         return None
-    if isinstance(state, PlaneState):
+    if isinstance(state, PlaneViewportCache):
         return asdict(state)
     if isinstance(state, Mapping):
         return dict(state)
     raise TypeError(f"unsupported plane state payload: {type(state)!r}")
 
 
-def _plain_volume_state(state: VolumeState | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
+def _plain_volume_state(state: VolumeViewportCache | Mapping[str, Any] | None) -> Optional[dict[str, Any]]:
     if state is None:
         return None
-    if isinstance(state, VolumeState):
+    if isinstance(state, VolumeViewportCache):
         return asdict(state)
     if isinstance(state, Mapping):
         return dict(state)
@@ -999,9 +1006,9 @@ def reduce_bootstrap_state(
     )
 
     plane_entry = ledger.get("viewport", "plane", "state")
-    plane_state = PlaneState()
+    plane_state = PlaneViewportCache()
     if plane_entry is not None and isinstance(plane_entry.value, Mapping):
-        plane_state = PlaneState(**dict(plane_entry.value))
+        plane_state = PlaneViewportCache(**dict(plane_entry.value))
     plane_state.target_ndisplay = 2
     plane_state.target_level = resolved_current_level
     plane_state.target_step = resolved_step
@@ -1019,9 +1026,9 @@ def reduce_bootstrap_state(
         metadata=None,
     )
     volume_entry = ledger.get("viewport", "volume", "state")
-    volume_state = VolumeState()
+    volume_state = VolumeViewportCache()
     if volume_entry is not None and isinstance(volume_entry.value, Mapping):
-        volume_state = VolumeState(**dict(volume_entry.value))
+        volume_state = VolumeViewportCache(**dict(volume_entry.value))
     volume_state.level = resolved_current_level
     _store_volume_state(
         ledger,
@@ -1301,24 +1308,30 @@ def reduce_view_update(
                 ndisplay=2,
             )
             active_level = cache.level
-            extra_entries = _view_axes_index_entries(new_spec)
+            extra_entries = _view_axes_entries(new_spec)
+            index_block = IndexBlock(value=cache.index)
+            lod_block = LodBlock(level=cache.level, roi=None, policy=None)
+            extra_entries.append(("index", "main", "cursor", index_block_to_payload(index_block)))
+            extra_entries.append(("lod", "main", "state", lod_block_to_payload(lod_block)))
             plane_center = plane_pose.center
             plane_rect = plane_pose.rect
             plane_zoom = plane_pose.zoom
+            plane_block = PlaneCameraBlock(rect=plane_rect, center=plane_center, zoom=plane_zoom)
             extra_entries.append(("camera_plane", "main", "center", plane_center))
             extra_entries.append(("camera_plane", "main", "zoom", plane_zoom))
             extra_entries.append(("camera_plane", "main", "rect", plane_rect))
             volume_state = _load_volume_state(ledger)
             volume_pose = volume_state.pose
+            volume_block = VolumeCameraBlock(
+                center=volume_pose.center,
+                angles=volume_pose.angles,
+                distance=volume_pose.distance,
+                fov=volume_pose.fov,
+            )
             camera_block_payload = camera_block_to_payload(
                 CameraBlock(
-                    plane=PlaneCameraBlock(rect=plane_rect, center=plane_center, zoom=plane_zoom),
-                    volume=VolumeCameraBlock(
-                        center=volume_pose.center,
-                        angles=volume_pose.angles,
-                        distance=volume_pose.distance,
-                        fov=volume_pose.fov,
-                    ),
+                    plane=plane_block,
+                    volume=volume_block,
                 )
             )
             extra_entries.append(("camera", "main", "state", camera_block_payload))
@@ -1337,30 +1350,36 @@ def reduce_view_update(
                 ndisplay=3,
             )
             active_level = cache.level
-            extra_entries = _view_axes_index_entries(new_spec)
+            extra_entries = _view_axes_entries(new_spec)
+            index_block = IndexBlock(value=cache.index)
+            lod_block = LodBlock(level=cache.level, roi=None, policy=None)
+            extra_entries.append(("index", "main", "cursor", index_block_to_payload(index_block)))
+            extra_entries.append(("lod", "main", "state", lod_block_to_payload(lod_block)))
             volume_center = volume_pose.center
             volume_angles = volume_pose.angles
             volume_distance = volume_pose.distance
             volume_fov = volume_pose.fov
+            volume_block = VolumeCameraBlock(
+                center=volume_center,
+                angles=volume_angles,
+                distance=volume_distance,
+                fov=volume_fov,
+            )
             extra_entries.append(("camera_volume", "main", "center", volume_center))
             extra_entries.append(("camera_volume", "main", "angles", volume_angles))
             extra_entries.append(("camera_volume", "main", "distance", volume_distance))
             extra_entries.append(("camera_volume", "main", "fov", volume_fov))
             plane_state = _load_plane_state(ledger)
             plane_pose = plane_state.pose
+            plane_block = PlaneCameraBlock(
+                rect=plane_pose.rect,
+                center=plane_pose.center,
+                zoom=plane_pose.zoom,
+            )
             camera_block_payload = camera_block_to_payload(
                 CameraBlock(
-                    plane=PlaneCameraBlock(
-                        rect=plane_pose.rect,
-                        center=plane_pose.center,
-                        zoom=plane_pose.zoom,
-                    ),
-                    volume=VolumeCameraBlock(
-                        center=volume_center,
-                        angles=volume_angles,
-                        distance=volume_distance,
-                        fov=volume_fov,
-                    ),
+                    plane=plane_block,
+                    volume=volume_block,
                 )
             )
             extra_entries.append(("camera", "main", "state", camera_block_payload))
@@ -1427,10 +1446,10 @@ def reduce_plane_restore(
     zoom_value = float(zoom)
 
     plane_entry = ledger.get("viewport", "plane", "state")
-    base_plane = PlaneState()
+    base_plane = PlaneViewportCache()
     if plane_entry is not None and isinstance(plane_entry.value, Mapping):
         payload_value = dict(plane_entry.value)
-        base_plane = PlaneState(**payload_value)
+        base_plane = PlaneViewportCache(**payload_value)
 
     base_plane.target_level = level_idx
     base_plane.target_ndisplay = 2
@@ -1556,10 +1575,10 @@ def reduce_volume_restore(
     level_idx = int(level)
 
     volume_entry = ledger.get("viewport", "volume", "state")
-    base_volume = VolumeState()
+    base_volume = VolumeViewportCache()
     if volume_entry is not None and isinstance(volume_entry.value, Mapping):
         payload_value = dict(volume_entry.value)
-        base_volume = VolumeState(**payload_value)
+        base_volume = VolumeViewportCache(**payload_value)
 
     base_volume.level = level_idx
     base_volume.update_pose(
@@ -1622,8 +1641,8 @@ def reduce_level_update(
     timestamp: Optional[float] = None,
     origin: str = "control.multiscale",
     mode: RenderMode | str | None = None,
-    plane_state: PlaneState | Mapping[str, Any] | None = None,
-    volume_state: VolumeState | Mapping[str, Any] | None = None,
+    plane_state: PlaneViewportCache | Mapping[str, Any] | None = None,
+    volume_state: VolumeViewportCache | Mapping[str, Any] | None = None,
 ) -> ServerLedgerUpdate:
     ts = _now(timestamp)
     intent_metadata = _metadata_from_intent(intent_id)
@@ -1765,7 +1784,7 @@ def reduce_level_update(
 
     plane_payload = _plain_plane_state(plane_state)
     if update_plane_state and plane_payload is not None:
-        plane_model = PlaneState(**plane_payload)
+        plane_model = PlaneViewportCache(**plane_payload)
         # Worker intents may carry stale slice indices; overwrite them with the
         # controller-resolved level/step so plane restores match dims state.
         sanitized_step = tuple(int(v) for v in step_tuple) if step_tuple is not None else None
@@ -1795,7 +1814,7 @@ def reduce_level_update(
             )
 
     if update_volume_state and volume_payload is not None:
-        volume_model = VolumeState(**volume_payload)
+        volume_model = VolumeViewportCache(**volume_payload)
         _store_volume_state(
             ledger,
             volume_model,
@@ -1881,8 +1900,8 @@ def reduce_camera_update(
 
     ledger_updates: list[tuple] = []
     ack: dict[str, Any] = {}
-    plane_model: PlaneState | None = None
-    volume_model: VolumeState | None = None
+    plane_model: PlaneViewportCache | None = None
+    volume_model: VolumeViewportCache | None = None
     spec = _get_dims_spec(ledger)
     spec_step = tuple(int(v) for v in spec.current_step)
 

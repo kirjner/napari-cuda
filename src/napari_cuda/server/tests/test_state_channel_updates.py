@@ -45,11 +45,15 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumePlan,
 )
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
+from napari_cuda.server.control import state_reducers as reducers
 from napari_cuda.server.control.state_reducers import (
     reduce_bootstrap_state,
+    reduce_camera_update,
     reduce_layer_property,
     reduce_level_update,
     reduce_plane_restore,
+    reduce_volume_restore,
+    reduce_view_update,
 )
 from napari_cuda.server.control.topics.notify.baseline import orchestrate_connect
 from napari_cuda.server.control.topics.notify.dims import broadcast_dims_state
@@ -58,10 +62,10 @@ from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.camera import CameraCommandQueue
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 from napari_cuda.server.scene.viewport import (
-    PlaneState,
+    PlaneViewportCache,
     RenderMode,
     ViewportState,
-    VolumeState,
+    VolumeViewportCache,
 )
 from napari_cuda.server.scene import (
     LayerVisualState,
@@ -72,6 +76,8 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
+import napari_cuda.server.scene.builders as scene_builders
+from napari_cuda.server.scene import blocks as scene_blocks
 from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
@@ -305,7 +311,6 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     _record_dims_to_ledger(server, baseline_dims, origin="bootstrap")
     server._refresh_scene_snapshot()
     server._dims_mirror.start()
-
     async def _layer_broadcast(
         layer_id: str,
         state: LayerVisualState,
@@ -463,6 +468,12 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     server._enqueue_camera_delta = _enqueue_camera_delta
 
     return server, scheduled, captured
+
+
+def _set_scene_block_flag(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
+    monkeypatch.setattr(reducers, "ENABLE_VIEW_AXES_INDEX_BLOCKS", enabled, raising=False)
+    monkeypatch.setattr(scene_blocks, "ENABLE_VIEW_AXES_INDEX_BLOCKS", enabled, raising=False)
+    monkeypatch.setattr(scene_builders, "ENABLE_VIEW_AXES_INDEX_BLOCKS", enabled, raising=False)
 
 
 def _drain_scheduled(tasks: list[Coroutine[Any, Any, None]]) -> None:
@@ -1440,6 +1451,83 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
         loop.close()
 
 
+def _scene_payload_for_block_flag(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> dict[str, Any]:
+    server, scheduled, _captured = _make_server()
+    try:
+        _set_scene_block_flag(monkeypatch, enabled)
+        ledger = server._state_ledger
+        plane_state = PlaneViewportCache()
+        plane_state.target_level = 0
+        plane_state.target_ndisplay = 2
+        plane_state.target_step = (1, 0, 0)
+        plane_state.applied_level = 0
+        plane_state.applied_step = (1, 0, 0)
+        plane_state.update_pose(rect=(0.0, 0.0, 50.0, 50.0), center=(10.0, 10.0), zoom=1.5)
+
+        volume_state = VolumeViewportCache(level=0)
+        volume_state.update_pose(center=(0.0, 0.0, 0.0), angles=(0.0, 0.0, 0.0), distance=10.0, fov=45.0)
+
+        reduce_level_update(
+            ledger,
+            level=0,
+            level_shape=(64, 64, 64),
+            origin="parity.level",
+            mode=RenderMode.PLANE,
+            plane_state=plane_state,
+            volume_state=volume_state,
+        )
+
+        reduce_volume_restore(
+            ledger,
+            level=0,
+            center=(0.0, 0.0, 0.0),
+            angles=(0.0, 0.0, 0.0),
+            distance=18.0,
+            fov=40.0,
+            origin="parity.volume",
+        )
+
+        reduce_view_update(
+            ledger,
+            ndisplay=3,
+            displayed=(0, 1, 2),
+            intent_id="parity.view",
+            origin="parity.view",
+        )
+
+        reduce_camera_update(
+            ledger,
+            center=(5.0, 6.0, 0.0),
+            zoom=2.0,
+            angles=(25.0, 15.0, 5.0),
+            distance=18.0,
+            fov=40.0,
+            rect=(0.0, 0.0, 60.0, 60.0),
+            origin="parity.camera",
+        )
+
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+        server._update_scene_manager()
+
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+        server._refresh_scene_snapshot()
+        snapshot = server._scene_snapshot
+        assert snapshot is not None
+        payload = build_notify_scene_payload(
+            scene_snapshot=snapshot,
+            ledger_snapshot=ledger.snapshot(),
+            viewer_settings={"fps_target": 60.0},
+        )
+        return payload.to_dict()
+    finally:
+        while scheduled:
+            asyncio.run(scheduled.pop(0))
+
+
 def test_send_state_baseline_replays_store(monkeypatch) -> None:
     loop = asyncio.new_event_loop()
     try:
@@ -1510,14 +1598,14 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
     server, scheduled, _captured = _make_server()
     try:
         ledger = server._state_ledger
-        plane_state = PlaneState()
+        plane_state = PlaneViewportCache()
         plane_state.target_level = 0
         plane_state.target_ndisplay = 2
         plane_state.target_step = (2, 0, 0)
         plane_state.applied_level = 0
         plane_state.applied_step = (2, 0, 0)
         plane_state.update_pose(rect=(0.0, 0.0, 20.0, 20.0), center=(10.0, 10.0), zoom=2.0)
-        volume_state = VolumeState(level=0)
+        volume_state = VolumeViewportCache(level=0)
         volume_state.update_pose(center=(0.0, 0.0, 0.0))
 
         reduce_level_update(
@@ -1552,6 +1640,12 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
     finally:
         while scheduled:
             asyncio.run(scheduled.pop(0))
+
+
+def test_notify_scene_payload_block_flag_parity(monkeypatch: pytest.MonkeyPatch) -> None:
+    payload_off = _scene_payload_for_block_flag(monkeypatch, enabled=False)
+    payload_on = _scene_payload_for_block_flag(monkeypatch, enabled=True)
+    assert payload_off == payload_on
 
 
 def test_reduce_plane_restore_updates_viewport_state() -> None:

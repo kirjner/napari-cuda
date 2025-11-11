@@ -15,10 +15,10 @@ from napari_cuda.server.control.state_reducers import (
 )
 from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
 from napari_cuda.server.scene import (
-    PlaneState,
+    PlaneViewportCache,
     RenderMode,
     RenderUpdate,
-    VolumeState,
+    VolumeViewportCache,
     snapshot_render_state,
 )
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
@@ -43,7 +43,7 @@ def _apply_plane_restore_from_ledger(
         logger.warning("plane_restore skipped due to missing viewport plane state")
         return False
 
-    plane_state = PlaneState(**dict(plane_entry.value))  # type: ignore[arg-type]
+    plane_state = PlaneViewportCache(**dict(plane_entry.value))  # type: ignore[arg-type]
 
     level_value = plane_state.applied_level or plane_state.target_level
     step_value: Optional[tuple[int, ...]] = None
@@ -125,7 +125,7 @@ def _apply_volume_restore_from_ledger(
     *,
     timestamp: float | None,
     intent_id: str,
-) -> Optional[VolumeState]:
+) -> Optional[VolumeViewportCache]:
     ledger = server._state_ledger
     with server._state_lock:
         volume_entry = ledger.get("viewport", "volume", "state")
@@ -138,7 +138,7 @@ def _apply_volume_restore_from_ledger(
         logger.warning("volume_restore skipped due to missing viewport volume state")
         return None
 
-    volume_state = VolumeState(**dict(volume_entry.value))  # type: ignore[arg-type]
+    volume_state = VolumeViewportCache(**dict(volume_entry.value))  # type: ignore[arg-type]
 
     level_value: Optional[int] = volume_state.level
 
@@ -258,8 +258,8 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
     server.mark_stream_config_dirty()
     server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
 
-    restored_volume_state: Optional[VolumeState] = None
-    plane_state_override: Optional[PlaneState] = None
+    restored_volume_state: Optional[VolumeViewportCache] = None
+    plane_state_override: Optional[PlaneViewportCache] = None
     if ENABLE_VIEW_AXES_INDEX_BLOCKS:
         ledger = server._state_ledger
         if new_ndisplay >= 3:
@@ -269,7 +269,7 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
             assert pose.angles is not None, "volume restore cache missing angles"
             assert pose.distance is not None, "volume restore cache missing distance"
             assert pose.fov is not None, "volume restore cache missing fov"
-            vs = VolumeState()
+            vs = VolumeViewportCache()
             vs.level = cache.level
             vs.update_pose(
                 center=pose.center,
@@ -284,7 +284,7 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
             assert pose.center is not None, "plane restore cache missing center"
             assert pose.rect is not None, "plane restore cache missing rect"
             assert pose.zoom is not None, "plane restore cache missing zoom"
-            ps = PlaneState()
+            ps = PlaneViewportCache()
             ps.target_ndisplay = 2
             ps.applied_level = cache.level
             ps.applied_step = cache.index

@@ -8,10 +8,10 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Optional
 
 from napari_cuda.server.scene import (
-    PlaneState,
+    PlaneViewportCache,
     RenderMode,
     RenderUpdate,
-    VolumeState,
+    VolumeViewportCache,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -26,8 +26,8 @@ class ViewportSnapshot:
     """Copy of the worker viewport state for control consumers."""
 
     mode: RenderMode
-    plane: PlaneState
-    volume: VolumeState
+    plane: PlaneViewportCache
+    volume: VolumeViewportCache
 
 
 class RuntimeHandle:

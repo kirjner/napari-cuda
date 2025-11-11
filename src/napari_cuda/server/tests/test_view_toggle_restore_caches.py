@@ -71,21 +71,23 @@ def test_view_toggle_consumes_restore_caches(monkeypatch: pytest.MonkeyPatch) ->
     assert int(spec.current_level) == 2
     assert tuple(spec.current_step) == (5, 3, 2)
 
+    cache = reducers.load_volume_restore_cache(ledger)
+
     cam_entry = ledger.get("camera", "main", "state")
     assert cam_entry is not None and cam_entry.value is not None
     cam_block = cam_entry.value
-    assert tuple(cam_block["volume"]["center"]) == (1.0, 2.0, 3.0)
-    assert tuple(cam_block["volume"]["angles"]) == (30.0, 10.0, 5.0)
-    assert float(cam_block["volume"]["distance"]) == 15.0
-    assert float(cam_block["volume"]["fov"]) == 45.0
+    assert tuple(cam_block["volume"]["center"]) == cache.pose.center
+    assert tuple(cam_block["volume"]["angles"]) == cache.pose.angles
+    assert float(cam_block["volume"]["distance"]) == cache.pose.distance
+    assert float(cam_block["volume"]["fov"]) == cache.pose.fov
 
     lod_entry = ledger.get("lod", "main", "state")
     assert lod_entry is not None and lod_entry.value is not None
-    assert int(lod_entry.value["level"]) == 2
+    assert int(lod_entry.value["level"]) == cache.level
 
     index_entry = ledger.get("index", "main", "cursor")
     assert index_entry is not None and index_entry.value is not None
-    assert tuple(index_entry.value["value"]) == tuple(int(v) for v in spec.current_step)
+    assert tuple(index_entry.value["value"]) == cache.index
 
     # Toggle back to plane: expect dims/lod/index/camera to match plane cache
     reducers.reduce_view_update(ledger, ndisplay=2, origin="test.toggle.to_plane")
@@ -94,9 +96,19 @@ def test_view_toggle_consumes_restore_caches(monkeypatch: pytest.MonkeyPatch) ->
     assert int(spec.current_level) == 1
     assert tuple(spec.current_step) == (5, 3, 2)
 
+    cache = reducers.load_plane_restore_cache(ledger)
+
     cam_entry = ledger.get("camera", "main", "state")
     assert cam_entry is not None and cam_entry.value is not None
     cam_block = cam_entry.value
-    assert tuple(cam_block["plane"]["center"]) == (12.0, 24.0)
-    assert float(cam_block["plane"]["zoom"]) == 2.5
-    assert tuple(cam_block["plane"]["rect"]) == (0.0, 0.0, 100.0, 80.0)
+    assert tuple(cam_block["plane"]["center"]) == cache.pose.center
+    assert float(cam_block["plane"]["zoom"]) == cache.pose.zoom
+    assert tuple(cam_block["plane"]["rect"]) == cache.pose.rect
+
+    lod_entry = ledger.get("lod", "main", "state")
+    assert lod_entry is not None and lod_entry.value is not None
+    assert int(lod_entry.value["level"]) == cache.level
+
+    index_entry = ledger.get("index", "main", "cursor")
+    assert index_entry is not None and index_entry.value is not None
+    assert tuple(index_entry.value["value"]) == cache.index

@@ -61,7 +61,7 @@
   2. **Consumer flip** — teach notify builders, snapshots, and worker apply
      code to consume the new blocks with per-block signatures.
   3. **Legacy removal** — delete `ViewportPlanner`, `RenderUpdateMailbox`,
-     `PlaneState`/`VolumeState`, and redundant notify/multiscale fields once
+     `PlaneViewportCache`/`VolumeViewportCache`, and redundant notify/multiscale fields once
      the new scopes are authoritative everywhere.
 
 ## IMMEDIATE NEXT GOAL
@@ -69,11 +69,15 @@
 Implement ledger‑driven restore and block consumption under the feature flag:
 
 - Restore cache helpers (`load_*`, `write_*`, `_plane/_volume_cache_from_state`) now dual-write from bootstrap + every reducer when the flag is on; legacy writers still run for compatibility.
-- Next task: finalize the restore path by copying cache payloads into `{lod,index,camera}` in `reduce_view_update`, then rename the cache types to `PlaneRestoreCacheBlock` / `VolumeRestoreCacheBlock` ahead of Phase 2.
-- Persist per‑mode RestoreCaches on the ledger so view toggles are single‑pass:
+- `reduce_view_update` now copies the restore cache payloads into `{lod,index,camera}` in a single transaction, and the cache dataclasses are `PlaneRestoreCacheBlock` / `VolumeRestoreCacheBlock` to match the rest of the scene block schema.
+- Persist per‑mode RestoreCaches on the ledger so view toggles are single-pass:
   - `restore_cache.plane.state`: `{ level: int, index: tuple[int,...], pose: {rect,center,zoom} }`
   - `restore_cache.volume.state`: `{ level: int, index: tuple[int,...], pose: {center,angles,distance,fov} }`
-  - Define TypedDicts/dataclasses in `src/napari_cuda/server/scene/blocks/restore.py` and dual‑write them from current reducer/worker paths.
-- Update view toggle handler (flag on): write `ViewBlock` then copy the target mode’s RestoreCache into authoritative blocks (`LodBlock.level`, `IndexBlock.value`, `CameraBlock.*`) in a single transaction.
+  - Define TypedDicts/dataclasses in `src/napari_cuda/server/scene/blocks/restore.py` and dual-write them from current reducer/worker paths.
+- View toggle transactions (flag on) write `ViewBlock` and copy the target mode’s RestoreCache into authoritative blocks (`LodBlock.level`, `IndexBlock.value`, `CameraBlock.*`) in a single pass.
+- Next step: begin the Phase 2 consumer flip—teach `snapshot_scene_blocks` (the block-focused successor to `snapshot_viewport_state`), notify builders, and worker apply paths to read the block scopes when the flag is enabled while legacy keys remain for compatibility.
+- Once block-backed consumers are proven, plan the Phase 3 rename where `viewport_state`
+  metadata is replaced entirely by the scene block payloads (view/index/lod/camera) so we can
+  delete the legacy `viewport.*` ledger scopes without changing downstream behavior.
 - Add parity tests to assert toggles set blocks from caches and notify payloads are unchanged; keep legacy scopes for compatibility until Phase 3.
 - Keep minimal worker‑side caches (PlaneViewportCache/VolumeViewportCache) only for real‑time deltas, ROI hysteresis, and per‑block signature diffing.

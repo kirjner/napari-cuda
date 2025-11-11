@@ -10,7 +10,7 @@ from .builders import (
     snapshot_multiscale_state,
     snapshot_render_state,
     snapshot_scene,
-    snapshot_viewport_state,
+    snapshot_scene_blocks,
     snapshot_volume_state,
 )
 from .defaults import default_volume_state
@@ -25,12 +25,12 @@ from .viewport import (
     PlanePose,
     PlaneRequest,
     PlaneResult,
-    PlaneState,
+    PlaneViewportCache,
     PoseEvent,
     RenderMode,
     ViewportState,
     VolumePose,
-    VolumeState,
+    VolumeViewportCache,
 )
 
 __all__ = [
@@ -41,14 +41,14 @@ __all__ = [
     "PlanePose",
     "PlaneRequest",
     "PlaneResult",
-    "PlaneState",
+    "PlaneViewportCache",
     "PoseEvent",
     "RenderLedgerSnapshot",
     "RenderMode",
     "RenderUpdate",
     "ViewportState",
     "VolumePose",
-    "VolumeState",
+    "VolumeViewportCache",
     "build_ledger_snapshot",
     "default_volume_state",
     "pull_render_snapshot",
@@ -56,6 +56,6 @@ __all__ = [
     "snapshot_multiscale_state",
     "snapshot_render_state",
     "snapshot_scene",
-    "snapshot_viewport_state",
+    "snapshot_scene_blocks",
     "snapshot_volume_state",
 ]

@@ -22,7 +22,7 @@ from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 
-from napari_cuda.server.scene.viewport import PlaneResult, PlaneState, PoseEvent
+from napari_cuda.server.scene.viewport import PlaneResult, PlaneViewportCache, PoseEvent
 from napari_cuda.server.runtime.lod.context import build_level_context
 
 
@@ -51,8 +51,8 @@ class ViewportOps:
 class ViewportPlanner:
     """Local decision surface for level and ROI application."""
 
-    def __init__(self, plane_state: Optional[PlaneState] = None) -> None:
-        self._plane = plane_state if plane_state is not None else PlaneState()
+    def __init__(self, plane_state: Optional[PlaneViewportCache] = None) -> None:
+        self._plane = plane_state if plane_state is not None else PlaneViewportCache()
         self._snapshot_pending: Optional[RenderLedgerSnapshot] = None
         self._level_reload_required: bool = False
         self._slice_reload_required: bool = False
@@ -60,7 +60,7 @@ class ViewportPlanner:
         self._pending_pose_event: Optional[PoseEvent] = None
 
     @property
-    def state(self) -> PlaneState:
+    def state(self) -> PlaneViewportCache:
         return self._plane
 
     def ingest_snapshot(self, snapshot: RenderLedgerSnapshot) -> None:

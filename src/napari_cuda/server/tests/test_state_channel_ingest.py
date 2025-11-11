@@ -12,7 +12,7 @@ from napari_cuda.protocol.messages import HelloClientInfo
 from napari_cuda.server.runtime.render_loop.applying import (
     apply as snapshot_mod,
 )
-from napari_cuda.server.scene.viewport import PlaneState
+from napari_cuda.server.scene.viewport import PlaneViewportCache
 from napari_cuda.server.tests._helpers.state_channel import StateServerHarness
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
@@ -73,7 +73,7 @@ def _plane_state_payload(
     center: tuple[float, float],
     zoom: float,
 ) -> dict[str, object]:
-    plane_state = PlaneState()
+    plane_state = PlaneViewportCache()
     plane_state.target_level = level
     plane_state.target_step = step
     plane_state.target_ndisplay = 2

@@ -11,7 +11,7 @@ from napari_cuda.server.scene.blocks import (
     lod_block_from_payload,
     view_block_from_payload,
 )
-from napari_cuda.server.scene.viewport import PlaneState, RenderMode, VolumeState
+from napari_cuda.server.scene.viewport import PlaneViewportCache, RenderMode, VolumeViewportCache
 from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
@@ -103,6 +103,16 @@ def test_view_axes_index_lod_blocks_track_dims_spec(monkeypatch: pytest.MonkeyPa
     )
     _assert_blocks_match_spec(ledger)
 
+    reducers.reduce_volume_restore(
+        ledger,
+        level=1,
+        center=(1.0, 2.0, 3.0),
+        angles=(45.0, 15.0, 5.0),
+        distance=20.0,
+        fov=60.0,
+        origin="test.seed.volume_cache",
+    )
+
     reducers.reduce_view_update(
         ledger,
         ndisplay=3,
@@ -132,8 +142,8 @@ def test_lod_block_updates_when_level_changes(monkeypatch: pytest.MonkeyPatch) -
         step=(1, 1, 1),
         level_shape=(32, 16, 8),
         origin="test.level",
-        plane_state=PlaneState(),
-        volume_state=VolumeState(),
+        plane_state=PlaneViewportCache(),
+        volume_state=VolumeViewportCache(),
     )
     lod_entry = ledger.get("lod", "main", "state")
     assert lod_entry is not None and lod_entry.value is not None

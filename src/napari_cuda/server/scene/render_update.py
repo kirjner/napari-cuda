@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from .models import RenderLedgerSnapshot
-from .viewport import PlaneState, RenderMode, VolumeState
+from .viewport import PlaneViewportCache, RenderMode, VolumeViewportCache
 
 
 @dataclass(frozen=True)
@@ -15,8 +15,8 @@ class RenderUpdate:
 
     scene_state: Optional[RenderLedgerSnapshot]
     mode: Optional[RenderMode] = None
-    plane_state: Optional[PlaneState] = None
-    volume_state: Optional[VolumeState] = None
+    plane_state: Optional[PlaneViewportCache] = None
+    volume_state: Optional[VolumeViewportCache] = None
     op_seq: Optional[int] = None
 
 

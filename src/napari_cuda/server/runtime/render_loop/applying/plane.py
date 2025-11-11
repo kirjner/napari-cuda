@@ -27,7 +27,7 @@ from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
     assign_pose_from_snapshot,
     mark_slice_applied,
 )
-from napari_cuda.server.scene.viewport import PlaneState, RenderMode
+from napari_cuda.server.scene.viewport import PlaneViewportCache, RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
 from napari_cuda.server.utils.signatures import SignatureToken
 from napari_cuda.shared.dims_spec import (
@@ -178,7 +178,7 @@ def apply_slice_snapshot(
 ) -> SliceApplyResult:
     """Apply plane metadata, camera pose, and ROI from the snapshot."""
 
-    plane_state: PlaneState = snapshot_iface.viewport_state.plane
+    plane_state: PlaneViewportCache = snapshot_iface.viewport_state.plane
     dims_spec = snapshot.dims_spec
     assert dims_spec is not None, "render snapshot missing dims_spec"
 
@@ -214,7 +214,7 @@ def apply_slice_camera_pose(
     if not isinstance(cam, PanZoomCamera):
         return
 
-    plane_state: PlaneState = snapshot_iface.viewport_state.plane
+    plane_state: PlaneViewportCache = snapshot_iface.viewport_state.plane
     rect_tuple, center_tuple, zoom_value = assign_pose_from_snapshot(plane_state, snapshot)
     apply_pose_to_camera(
         cam,
@@ -231,7 +231,7 @@ def apply_slice_level(
 ) -> SliceApplyResult:
     """Load the slice for ``applied`` and update worker metadata."""
 
-    plane_state: PlaneState = snapshot_iface.viewport_state.plane
+    plane_state: PlaneViewportCache = snapshot_iface.viewport_state.plane
     layer = snapshot_iface.napari_layer
     sy, sx = applied.scale_yx
 
@@ -349,7 +349,7 @@ def apply_slice_roi(
     )
 
     step_source: Optional[Sequence[int]] = step
-    plane_state: PlaneState = snapshot_iface.viewport_state.plane
+    plane_state: PlaneViewportCache = snapshot_iface.viewport_state.plane
     if step_source is None:
         if plane_state.target_step is not None:
             step_source = plane_state.target_step

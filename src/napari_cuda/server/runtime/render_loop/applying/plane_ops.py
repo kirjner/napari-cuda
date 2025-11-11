@@ -1,4 +1,4 @@
-"""Helpers for mutating :class:`PlaneState` during slice application."""
+"""Helpers for mutating :class:`PlaneViewportCache` during slice application."""
 
 from __future__ import annotations
 
@@ -13,11 +13,11 @@ from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 
-from napari_cuda.server.scene.viewport import PlaneState
+from napari_cuda.server.scene.viewport import PlaneViewportCache
 
 
 def assign_pose_from_snapshot(
-    state: PlaneState,
+    state: PlaneViewportCache,
     snapshot: RenderLedgerSnapshot,
 ) -> tuple[tuple[float, float, float, float], tuple[float, float], float]:
     """Merge snapshot pose data into the cached plane state."""
@@ -50,7 +50,7 @@ def assign_pose_from_snapshot(
 
 
 def mark_slice_applied(
-    state: PlaneState,
+    state: PlaneViewportCache,
     *,
     level: int,
     step: Sequence[int],

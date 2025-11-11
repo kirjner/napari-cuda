@@ -30,7 +30,7 @@ from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     step as ledger_step,
 )
 from napari_cuda.server.scene.viewport import (
-    PlaneState,
+    PlaneViewportCache,
     RenderMode,
 )
 from napari_cuda.shared.dims_spec import dims_spec_clamp_step

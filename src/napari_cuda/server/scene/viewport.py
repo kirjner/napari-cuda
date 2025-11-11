@@ -54,8 +54,8 @@ class PlaneResult:
 
 
 @dataclass
-class PlaneState:
-    """Controller targets, applied state, and reload flags for plane rendering."""
+class PlaneViewportCache:
+    """Worker-side cache of plane targets, applied state, and reload flags."""
 
     request: PlaneRequest = field(default_factory=PlaneRequest)
     applied: PlaneResult = field(default_factory=PlaneResult)
@@ -186,8 +186,8 @@ class VolumePose:
 
 
 @dataclass
-class VolumeState:
-    """Applied state for volume rendering."""
+class VolumeViewportCache:
+    """Worker-side cache of applied volume pose and metadata."""
 
     level: int = 0
     scale: Optional[tuple[float, float, float]] = None
@@ -222,10 +222,10 @@ class VolumeState:
 
 @dataclass
 class ViewportState:
-    """Aggregated plane/volume state for the render worker."""
+    """Aggregated plane/volume caches for the render worker."""
 
-    plane: PlaneState = field(default_factory=PlaneState)
-    volume: VolumeState = field(default_factory=VolumeState)
+    plane: PlaneViewportCache = field(default_factory=PlaneViewportCache)
+    volume: VolumeViewportCache = field(default_factory=VolumeViewportCache)
     mode: RenderMode = RenderMode.PLANE
     op_seq: int = -1
 
@@ -234,12 +234,12 @@ __all__ = [
     "PlanePose",
     "PlaneRequest",
     "PlaneResult",
-    "PlaneState",
+    "PlaneViewportCache",
     "PoseEvent",
     "RenderMode",
     "ViewportState",
     "VolumePose",
-    "VolumeState",
+    "VolumeViewportCache",
 ]
 
 # ---------------------------------------------------------------------------

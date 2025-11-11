@@ -1,4 +1,4 @@
-"""Helpers for mutating :class:`VolumeState` during snapshot application."""
+"""Helpers for mutating :class:`VolumeViewportCache` during snapshot application."""
 
 from __future__ import annotations
 
@@ -6,11 +6,11 @@ from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
 
-from napari_cuda.server.scene.viewport import VolumeState
+from napari_cuda.server.scene.viewport import VolumeViewportCache
 
 
 def assign_pose_from_snapshot(
-    state: VolumeState,
+    state: VolumeViewportCache,
     snapshot: RenderLedgerSnapshot,
 ) -> tuple[
     tuple[float, float, float],
@@ -76,7 +76,7 @@ def assign_pose_from_snapshot(
 
 
 def update_level(
-    state: VolumeState,
+    state: VolumeViewportCache,
     level: int,
 ) -> None:
     """Update the level metadata stored by the volume state."""
@@ -85,7 +85,7 @@ def update_level(
 
 
 def update_scale(
-    state: VolumeState,
+    state: VolumeViewportCache,
     scale: tuple[float, float, float],
 ) -> None:
     """Persist the volume scale tuple on the state."""

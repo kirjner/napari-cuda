@@ -28,6 +28,24 @@ from napari_cuda.server.scene.models import (
 )
 from napari_cuda.server.ledger import LedgerEntry, ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode
+from napari_cuda.server.scene.blocks import (
+    ENABLE_VIEW_AXES_INDEX_BLOCKS,
+    AxesBlock,
+    axes_to_payload,
+    CameraBlock,
+    camera_block_to_payload,
+    IndexBlock,
+    index_block_to_payload,
+    LodBlock,
+    lod_block_to_payload,
+    ViewBlock,
+    view_block_to_payload,
+    axes_from_payload,
+    camera_block_from_payload,
+    index_block_from_payload,
+    lod_block_from_payload,
+    view_block_from_payload,
+)
 from napari_cuda.shared.dims_spec import (
     dims_block_from_spec,
     dims_spec_from_payload,
@@ -71,9 +89,18 @@ __all__ = [
     "snapshot_multiscale_state",
     "snapshot_render_state",
     "snapshot_scene",
-    "snapshot_viewport_state",
+    "snapshot_scene_blocks",
     "snapshot_volume_state",
 ]
+
+
+@dataclass(frozen=True)
+class _SceneBlockSnapshot:
+    view: ViewBlock
+    axes: AxesBlock | None
+    index: IndexBlock | None
+    lod: LodBlock | None
+    camera: CameraBlock | None
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +165,43 @@ def snapshot_multiscale_state(
         [int(dim) for dim in shape] for shape in spec.level_shapes
     ]
     return state
+
+
+def _scene_blocks_from_snapshot(
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
+) -> _SceneBlockSnapshot | None:
+    view_entry = snapshot.get(("view", "main", "state"))
+    if view_entry is None or view_entry.value is None:
+        return None
+    view_block = view_block_from_payload(view_entry.value)
+
+    axes_block: AxesBlock | None = None
+    axes_entry = snapshot.get(("axes", "main", "state"))
+    if axes_entry is not None and axes_entry.value is not None:
+        axes_block = axes_from_payload(axes_entry.value)
+
+    index_block: IndexBlock | None = None
+    index_entry = snapshot.get(("index", "main", "cursor"))
+    if index_entry is not None and index_entry.value is not None:
+        index_block = index_block_from_payload(index_entry.value)
+
+    lod_block: LodBlock | None = None
+    lod_entry = snapshot.get(("lod", "main", "state"))
+    if lod_entry is not None and lod_entry.value is not None:
+        lod_block = lod_block_from_payload(lod_entry.value)
+
+    camera_block: CameraBlock | None = None
+    camera_entry = snapshot.get(("camera", "main", "state"))
+    if camera_entry is not None and camera_entry.value is not None:
+        camera_block = camera_block_from_payload(camera_entry.value)
+
+    return _SceneBlockSnapshot(
+        view=view_block,
+        axes=axes_block,
+        index=index_block,
+        lod=lod_block,
+        camera=camera_block,
+    )
 
 
 def snapshot_render_state(
@@ -262,11 +326,32 @@ def snapshot_volume_state(
     return mapping
 
 
-def snapshot_viewport_state(
+def snapshot_scene_blocks(
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
 ) -> dict[str, Any]:
-    """Extract viewport mode and plane/volume payloads from the ledger snapshot."""
+    """Extract block-scoped viewport data from the ledger snapshot."""
 
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        block_snapshot = _scene_blocks_from_snapshot(snapshot)
+        if block_snapshot is not None:
+            payload: dict[str, Any] = {
+                "mode": block_snapshot.view.mode.upper(),
+                "view": view_block_to_payload(block_snapshot.view),
+            }
+            if block_snapshot.axes is not None:
+                payload["axes"] = axes_to_payload(block_snapshot.axes)
+            if block_snapshot.index is not None:
+                payload["index"] = index_block_to_payload(block_snapshot.index)
+            if block_snapshot.lod is not None:
+                payload["lod"] = lod_block_to_payload(block_snapshot.lod)
+            if block_snapshot.camera is not None:
+                payload["camera"] = camera_block_to_payload(block_snapshot.camera)
+            return payload
+
+    return _legacy_viewport_state(snapshot)
+
+
+def _legacy_viewport_state(snapshot: Mapping[tuple[str, str, str], LedgerEntry]) -> dict[str, Any]:
     payload: dict[str, Any] = {}
 
     active_view = _active_view_state(snapshot)

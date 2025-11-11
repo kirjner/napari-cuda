@@ -12,11 +12,11 @@ from typing import Any, Optional
 
 from napari_cuda.server.scene import (
     LayerVisualState,
-    PlaneState,
+    PlaneViewportCache,
     RenderLedgerSnapshot,
     RenderMode,
     RenderUpdate,
-    VolumeState,
+    VolumeViewportCache,
 )
 from napari_cuda.server.utils.signatures import SignatureToken, scene_content_signature
 
@@ -39,8 +39,8 @@ class RenderUpdateMailbox:
         self._scene_state: Optional[RenderLedgerSnapshot] = None
         self._scene_op_seq: Optional[int] = None
         self._mode: Optional[RenderMode] = None
-        self._plane_state: Optional[PlaneState] = None
-        self._volume_state: Optional[VolumeState] = None
+        self._plane_state: Optional[PlaneViewportCache] = None
+        self._volume_state: Optional[VolumeViewportCache] = None
         self._zoom_hint: Optional[RenderZoomHint] = None
         self._camera_ops: list = []
         self._last_signature: Optional[SignatureToken] = None
@@ -64,8 +64,8 @@ class RenderUpdateMailbox:
         self,
         *,
         mode: Optional[RenderMode],
-        plane_state: Optional[PlaneState],
-        volume_state: Optional[VolumeState],
+        plane_state: Optional[PlaneViewportCache],
+        volume_state: Optional[VolumeViewportCache],
     ) -> None:
         with self._lock:
             self._mode = mode

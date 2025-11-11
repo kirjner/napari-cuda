@@ -227,8 +227,8 @@ def reduce_level_update(
     timestamp: float | None = None,
     origin: str = 'control.multiscale',
     mode: RenderMode | str | None = None,
-    plane_state: PlaneState | Mapping[str, object] | None = None,
-    volume_state: VolumeState | Mapping[str, object] | None = None,
+    plane_state: PlaneViewportCache | Mapping[str, object] | None = None,
+    volume_state: VolumeViewportCache | Mapping[str, object] | None = None,
     preserve_step: bool = False,
 ) -> ServerLedgerUpdate: ...
 

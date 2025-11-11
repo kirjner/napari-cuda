@@ -15,7 +15,7 @@ class PlaneRestoreCachePose:
 
 
 @dataclass(frozen=True)
-class PlaneRestoreCache:
+class PlaneRestoreCacheBlock:
     level: int
     index: tuple[int, ...]
     pose: PlaneRestoreCachePose
@@ -27,13 +27,13 @@ class PlaneRestoreCachePosePayload(TypedDict):
     zoom: float | None
 
 
-class PlaneRestoreCachePayload(TypedDict):
+class PlaneRestoreCacheBlockPayload(TypedDict):
     level: int
     index: Sequence[int]
     pose: PlaneRestoreCachePosePayload
 
 
-def plane_restore_cache_to_payload(state: PlaneRestoreCache) -> PlaneRestoreCachePayload:
+def plane_restore_cache_block_to_payload(state: PlaneRestoreCacheBlock) -> PlaneRestoreCacheBlockPayload:
     return {
         "level": int(state.level),
         "index": tuple(int(v) for v in state.index),
@@ -45,7 +45,9 @@ def plane_restore_cache_to_payload(state: PlaneRestoreCache) -> PlaneRestoreCach
     }
 
 
-def plane_restore_cache_from_payload(data: dict[str, Any] | PlaneRestoreCachePayload) -> PlaneRestoreCache:
+def plane_restore_cache_block_from_payload(
+    data: dict[str, Any] | PlaneRestoreCacheBlockPayload,
+) -> PlaneRestoreCacheBlock:
     level_value = data["level"]
     assert isinstance(level_value, int), "plane restore level missing"
 
@@ -65,7 +67,7 @@ def plane_restore_cache_from_payload(data: dict[str, Any] | PlaneRestoreCachePay
     for component in index_value:
         assert isinstance(component, int), "plane restore index entries must be integers"
 
-    return PlaneRestoreCache(
+    return PlaneRestoreCacheBlock(
         level=level_value,
         index=tuple(index_value),
         pose=PlaneRestoreCachePose(
@@ -88,7 +90,7 @@ class VolumeRestoreCachePose:
 
 
 @dataclass(frozen=True)
-class VolumeRestoreCache:
+class VolumeRestoreCacheBlock:
     level: int
     index: tuple[int, ...]
     pose: VolumeRestoreCachePose
@@ -101,13 +103,13 @@ class VolumeRestoreCachePosePayload(TypedDict):
     fov: float | None
 
 
-class VolumeRestoreCachePayload(TypedDict):
+class VolumeRestoreCacheBlockPayload(TypedDict):
     level: int
     index: Sequence[int]
     pose: VolumeRestoreCachePosePayload
 
 
-def volume_restore_cache_to_payload(state: VolumeRestoreCache) -> VolumeRestoreCachePayload:
+def volume_restore_cache_block_to_payload(state: VolumeRestoreCacheBlock) -> VolumeRestoreCacheBlockPayload:
     return {
         "level": int(state.level),
         "index": tuple(int(v) for v in state.index),
@@ -120,7 +122,9 @@ def volume_restore_cache_to_payload(state: VolumeRestoreCache) -> VolumeRestoreC
     }
 
 
-def volume_restore_cache_from_payload(data: dict[str, Any] | VolumeRestoreCachePayload) -> VolumeRestoreCache:
+def volume_restore_cache_block_from_payload(
+    data: dict[str, Any] | VolumeRestoreCacheBlockPayload,
+) -> VolumeRestoreCacheBlock:
     level_value = data["level"]
     assert isinstance(level_value, int), "volume restore level missing"
 
@@ -142,7 +146,7 @@ def volume_restore_cache_from_payload(data: dict[str, Any] | VolumeRestoreCacheP
     for component in index_value:
         assert isinstance(component, int), "volume restore index entries must be integers"
 
-    return VolumeRestoreCache(
+    return VolumeRestoreCacheBlock(
         level=level_value,
         index=tuple(index_value),
         pose=VolumeRestoreCachePose(
@@ -156,17 +160,17 @@ def volume_restore_cache_from_payload(data: dict[str, Any] | VolumeRestoreCacheP
 
 __all__ = [
     "PlaneRestoreCachePose",
-    "PlaneRestoreCache",
+    "PlaneRestoreCacheBlock",
     "PlaneRestoreCachePosePayload",
-    "PlaneRestoreCachePayload",
-    "plane_restore_cache_to_payload",
-    "plane_restore_cache_from_payload",
+    "PlaneRestoreCacheBlockPayload",
+    "plane_restore_cache_block_to_payload",
+    "plane_restore_cache_block_from_payload",
     "VolumeRestoreCachePose",
-    "VolumeRestoreCache",
+    "VolumeRestoreCacheBlock",
     "VolumeRestoreCachePosePayload",
-    "VolumeRestoreCachePayload",
-    "volume_restore_cache_to_payload",
-    "volume_restore_cache_from_payload",
+    "VolumeRestoreCacheBlockPayload",
+    "volume_restore_cache_block_to_payload",
+    "volume_restore_cache_block_from_payload",
 ]
 
 

@@ -21,7 +21,7 @@ Current State Snapshot
   the old tuples.
 * Viewport persistence: `_record_viewport_state` and `_store_*` continue
   to emit `viewport/**` and `view_cache/**` rows even though the same
-  pose data lives inside `PlaneState` / `VolumeState`.
+  pose data lives inside `PlaneViewportCache` / `VolumeViewportCache`.
 * Client runtime: `NapariDimsMirror`, emitters, and control fixtures
   maintain tuple-heavy `dims_meta` caches and helper shims despite storing
   the canonical spec.
@@ -69,8 +69,9 @@ Workstreams & Sequencing
 
 ### 2. Viewport & Pose Simplification
 * Remove `_record_viewport_state`, `view_cache/**`, and `viewport/**`
-  ledger writes; persist pose information only inside `PlaneState /
-  VolumeState` or the spec if absolutely necessary.
+  ledger writes; persist pose information only inside
+  `PlaneViewportCache` / `VolumeViewportCache` or the spec if absolutely
+  necessary.
 * Update restore handlers, scene snapshot builders, worker bootstrap,
   and tests to consume the streamlined pose sources.
 
