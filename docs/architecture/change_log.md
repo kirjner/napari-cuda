@@ -2,6 +2,32 @@
 
 Tracks intentional updates to the architecture spec and the authoritative modules. Add new entries (date-descending) with links to the implemented sections/files so future sessions can pick up immediately.
 
+## 2025-11-10 — View/Axes/Index/Lod/Camera docs refresh
+
+### Docs
+- Updated every active architecture doc to distinguish the legacy
+  `dims_spec + ActiveView` stack from the upcoming `view / axes / index / lod / camera`
+  ledger design.
+- Standardised terminology: the new schema calls the multi-dimensional cursor
+  `index`; legacy payloads/scopes that still emit `current_step` are explicitly
+  marked as transitional.
+- Added forward-looking sections covering dual-write expectations, notify payload
+  changes, and worker/runtime implications across:
+  - docs/architecture/system_design_spec.md (§3, §4, §8-10, §13)
+  - docs/architecture/per_function_contracts.md (§1-3, §7-8)
+  - docs/architecture/roadmap.md (Protocol + schema workstream)
+  - docs/architecture/layer_parity_plan.md (Target End State + Workstreams)
+  - docs/architecture/level_apply_activeview_contracts.md (Gaps + Steps)
+  - docs/architecture/cut_down_guides/* (dims/index + render snapshots + notify)
+- Added `docs/architecture/view_axes_index_plan.md` capturing call-stack diagrams and
+  phased issue breakdowns for the migration.
+- Clarified that all new ledger scopes and payloads must adopt the `index`
+  terminology from day one; the docs now act as the cohesive reference for the
+  migration plan before implementation starts.
+
+### Code
+- No code changes in this entry; documentation-only refresh to unblock design work.
+
 ## 2025-11-09 — ActiveView authority + notify.level pipeline
 
 ### Docs

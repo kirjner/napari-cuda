@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from napari_cuda.server.state_ledger import LedgerEntry
+from napari_cuda.server.ledger import LedgerEntry
 from napari_cuda.shared.dims_spec import (
     dims_spec_from_payload as axes_spec_from_payload,
     dims_spec_to_payload as axes_spec_to_payload,

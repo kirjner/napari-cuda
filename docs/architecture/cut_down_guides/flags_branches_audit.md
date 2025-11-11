@@ -19,3 +19,6 @@ Control Handlers
 Trim Targets (proposed)
 - Remove synthetic intents and pose-overwrite helpers; rely on ActiveView + pose caches.
 - Avoid duplicated fields in notify unless needed for backward compat; enforce equality with embedded spec when present.
+- Gate the new `view / axes / index / lod / camera` ledger scopes behind a
+  single feature flag while dual-writing so old clients keep working; remove the
+  flag (and legacy `current_step` naming) once notify/snapshot consumers migrate.

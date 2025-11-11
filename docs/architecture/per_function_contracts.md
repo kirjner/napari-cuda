@@ -5,13 +5,20 @@ Conventions
 - Postconditions: state changes and outputs guaranteed on success.
 - Side effects: ledger writes, notify broadcasts, render enqueues.
 - Error handling: no try/except in reducers/txns; handlers catch and map to protocol errors with logging.
+- Schema alignment: as we roll out the `view / axes / index / lod / camera`
+  ledger design, reducers must dual-write the new scopes while they continue to
+  serve legacy `dims_spec` + `current_step` consumers. This doc flags those
+  transitional writes explicitly.
 
 1) Control: State Update Handlers (state_update_handlers)
 
 - handle_dims_update(ctx)
-  - Preconditions: target axis provided; key in {'index','step','margin_left','margin_right'}; values typed (int for index/step; float for margins).
+  - Preconditions: target axis provided; key in {'index','step','margin_left','margin_right'}
+    (where 'step' is the legacy alias for index); values typed (int for
+    index; float for margins).
   - Postconditions: calls reduce_dims_update; acks with applied value and version; logs summary at INFO/DEBUG.
-  - Side effects: ledger writes (dims_spec/current_step), mirrors may broadcast notify.dims.
+  - Side effects: ledger writes (dims_spec/current_index — legacy scope
+    `current_step`), mirrors may broadcast notify.dims.
   - Errors: reject with state.invalid on type/unsupported key; state.error on reducer failure.
 
 - handle_view_ndisplay(ctx)
@@ -41,21 +48,23 @@ Conventions
 2) Control: Reducers (state_reducers)
 
 - reduce_dims_update(ledger, axis, prop, value|step_delta, intent_id?, timestamp?, origin)
-  - Preconditions: axis resolvable; types per prop; step clamped to level shape.
-  - Postconditions: versioned writes to dims_spec + current_step (and per-axis index); plane state mirrored in 2D; ActiveView updated only when level changes.
+  - Preconditions: axis resolvable; types per prop; index tuple (legacy "step")
+    clamped to level shape.
+  - Postconditions: versioned writes to dims_spec + current_index (legacy
+    key `current_step`) and per-axis index; plane state mirrored in 2D; ActiveView updated only when level changes.
   - Side effects: none beyond ledger writes.
 
 - reduce_view_update(ledger, ndisplay, order?, displayed?, intent_id?, timestamp?, origin)
   - Preconditions: ndisplay ∈ {2,3+}; order/displayed form consistent subsets.
   - Postconditions: versioned dims_spec with updated ndisplay/order/displayed; plane/volume states snapshot for restore; ActiveView written.
 
-- reduce_level_update(ledger, level, step?, level_shape?, shape?, applied?, intent_id?, timestamp?, origin, mode?, plane_state?, volume_state?, preserve_step=False)
-  - Preconditions: level resolvable; step up to ndim; shapes valid if provided.
-  - Postconditions: dims_spec current_level/current_step updated; level_shapes patch optional; ActiveView written with provided/derived mode.
+- reduce_level_update(ledger, level, index_tuple?, level_shape?, shape?, applied?, intent_id?, timestamp?, origin, mode?, plane_state?, volume_state?, preserve_step=False)
+  - Preconditions: level resolvable; index tuple (legacy step) up to ndim; shapes valid if provided.
+  - Postconditions: dims_spec current_level/current_index (legacy `current_step`) updated; level_shapes patch optional; ActiveView written with provided/derived mode.
 
 - reduce_plane_restore / reduce_volume_restore
   - Preconditions: pose components typed; level valid.
-  - Postconditions: respective camera_* scoped writes; (plane) dims_spec current_level/step updated; ActiveView written.
+  - Postconditions: respective camera_* scoped writes; (plane) dims_spec level/index updated; ActiveView written.
 
 - reduce_camera_update(ledger, center|zoom|angles|distance|fov|rect, ...)
   - Preconditions: at least one component provided.
@@ -68,8 +77,8 @@ Conventions
 3) Control: Transactions (control/transactions)
 
 - apply_dims_step_transaction(...)
-  - Preconditions: serialized dims_spec payload valid; step normalized.
-  - Postconditions: writes dims_spec/current_step and returns versioned entries.
+  - Preconditions: serialized dims_spec payload valid; index tuple (legacy step) normalized.
+  - Postconditions: writes dims_spec/current_index (legacy scope `current_step`) and returns versioned entries.
 
 - apply_view_toggle_transaction(...), apply_level_switch_transaction(...)
   - Postconditions: write dims_spec and any related keys; return versioned entries.
@@ -102,38 +111,22 @@ Conventions
   - Preconditions: server state lock acquired internally.
   - Postconditions: returns current RenderLedgerSnapshot; no mutation.
 
-6) Runtime Mailboxes & Drain (runtime/ipc, runtime/render_loop/planning)
+6) Worker Call Stack (final form)
 
-- RenderUpdateMailbox.set_scene_state(state)
-  - Preconditions: state op_seq ≥ current.
-  - Postconditions: stores latest snapshot; coalesces by op_seq and signature.
+- Worker tick (render loop):
+  1. Observe `scene.main.op_seq` bump via lightweight “poke” (no RenderUpdate mailbox).
+  2. Pull `{view, axes, index, lod, camera, layers}` scopes directly from the ledger.
+  3. Apply blocks selectively:
+     - `apply_dims_block(view, axes, index)` → set viewer dims, z-index, ROI hints.
+     - `apply_camera_block(camera)` → set plane/volume cameras, emit pose if requested.
+     - `apply_layers_block(layers)` → patch visuals only for changed props.
+  4. Emit intents back through reducers:
+     - `worker._emit_current_camera_pose` → `reduce_camera_update`.
+     - `WorkerIntentMailbox.enqueue_level_switch` → `reduce_level_update`.
+  5. Record per-block signatures locally to skip re-apply when unchanged.
+- No RenderUpdate mailbox, planner, or viewport caches remain—the ledger/tick pointer is the only coordination mechanism.
 
-- RenderUpdateMailbox.update_state_signature(state)
-  - Preconditions: state provided.
-  - Postconditions: returns True if scene signature changed; current impl hashes all blocks (lean target: per-block).
-
-- drain_scene_updates(worker)
-  - Preconditions: called from render thread.
-  - Postconditions: rejects stale snapshots; computes layer_changes; applies snapshot via apply_render_snapshot when signature/mode changed; updates viewport_state; evaluates level policy (2D only when not suppressed).
-  - Side effects: camera rect update to planner; marks level applied when indices match.
-
-7) Runtime Apply (runtime/render_loop/applying)
-
-- apply_render_snapshot(snapshot_iface, snapshot)
-  - Preconditions: snapshot valid; viewer attached.
-  - Postconditions: suppresses fit callbacks; applies dims; updates z-index; builds and applies viewport plan (ROI, level, camera pose), layer data.
-
-- apply_dims_from_snapshot(snapshot_iface, snapshot) [current] / apply_dims_block(spec) [target]
-  - Preconditions: dims_spec present.
-  - Postconditions: viewer.dims updated: axis_labels, ndim, order, displayed, ndisplay, current_step, margins.
-
-- apply_slice_camera_pose / apply_camera_block(plane, volume)
-  - Postconditions: set plane/volume cameras only; no dims mutation.
-
-- apply_slice_layer_data / apply_layers_block
-  - Postconditions: apply visuals for changed layers only.
-
-8) Notify Broadcasters (control/notify)
+7) Notify Broadcasters (control/notify)
 
 - broadcast_dims_state(server, payload, intent_id?, timestamp?)
   - Preconditions: NotifyDimsPayload contains embedded dims_spec and consistent top-level fields.
@@ -150,13 +143,12 @@ Conventions
   - Preconditions: NotifyLevelPayload contains current_level; payload is sourced exclusively from ActiveView.
   - Postconditions: sends resumable notify.level to clients; no dims/camera/ledger changes.
 
-9) Worker Lifecycle & Intents (runtime/worker)
-
 - start_worker(server, loop, state)
   - Preconditions: no live worker thread.
   - Postconditions: spawns EGL renderer thread; wires callbacks:
-    - level_intent_cb → WorkerIntentMailbox.enqueue_level_switch → server._handle_worker_level_intents (loopback);
-    - camera_pose_cb → server._apply_worker_camera_pose (applies pose via reducer).
+    - worker tick observes `scene.main.op_seq`, pulls new ledger scopes, and applies them block-by-block.
+    - level_intent_cb → WorkerIntentMailbox.enqueue_level_switch → server `_handle_worker_level_intents` (loopback through reducers).
+    - camera_pose_cb → server `_apply_worker_camera_pose` (reduce_camera_update).
   - Side effects: attaches ledger to worker; initializes scene; starts pixel encoding callbacks.
 
 - stop_worker(state)

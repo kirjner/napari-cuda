@@ -6,7 +6,7 @@ from collections.abc import Mapping
 
 from typing import Any, Optional
 
-from napari_cuda.server.state_ledger import (
+from napari_cuda.server.ledger import (
     LedgerEntry,
     PropertyKey,
     ServerStateLedger,

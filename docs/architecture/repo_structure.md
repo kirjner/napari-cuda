@@ -12,7 +12,7 @@ src/napari_cuda/server/
   control/            (state_update_handlers, reducers, mirrors, topics, transactions)
   runtime/            (bootstrap, ipc, render_loop/{applying,planning}, worker)
   scene/              (builders, viewport dataclasses)
-  state_ledger/       (__init__.py)
+  ledger.py
   data/, engine/, utils/, tests/
 ```
 
@@ -31,13 +31,12 @@ src/napari_cuda/server/
     txns/       (dims.py, view.py, level.py, camera.py, layer.py)
     notify/     (dims.py, camera.py, layers.py, scene.py, stream.py)
   runtime/
-    plan/       (viewport_planner.py, staging.py)
-    apply/      (dims.py, camera.py, layers.py, viewport.py, helpers.py)
-    ipc/        (mailboxes/{render_update.py,worker_intent.py})
-    worker/     (...)
+    intent/     (WorkerIntentMailbox — only remaining mailbox; carries level/thumbnail intents)
+    worker/     (EGL renderer)
+    apply/      (dims.py, camera.py, layers.py)  # direct ledger → apply blocks
     bootstrap/  (setup_viewer.py, snapshot_helpers.py)
   scene/
-    blocks.py   (DimsSpec, DimsSpecAxis, PlanePose, VolumePose, ActiveViewState)
+    blocks.py   (DimsSpec + compat only); future view/axes/index/lod/camera records live here.
     builders.py (snapshot_render_state, build_notify_* payloads)
   ledger.py     (ServerStateLedger)
   utils/
@@ -59,14 +58,19 @@ Import Guidance
 - Ledger: `from napari_cuda.server.ledger import ServerStateLedger`
 
 Lean Refactor Plan (Safe Moves)
-- Rename `state_ledger/__init__.py` → `ledger.py`; update imports.
+- (Done) `state_ledger/__init__.py` → `ledger.py`; keep this note until all callers settle.
 - Flatten `control/topics/` → `control/notify/` with modules named by message domains.
 - Move `runtime/render_loop/applying/*` → `runtime/apply/*`; `render_loop/planning/*` → `runtime/plan/*`.
 - Consolidate `state_update_handlers/*` → `control/handlers/*` (`camera.py`, `dims.py`, `view.py`, `layer.py`).
 - Combine scene dataclasses into `scene/blocks.py`; keep builders separate in `scene/builders.py`.
+- Introduce explicit modules for the new view/axes/index/lod/camera scopes when they
+  land so legacy `DimsSpec` types can be retired cleanly once consumers migrate.
+- Delete the legacy `runtime/render_loop/planning/*`, `render_loop/applying/*`,
+  `runtime/ipc/mailboxes/render_update.py`, and `scene/viewport.py` packages once
+  the worker consumes the factored ledger scopes directly (worker pulls ledger
+  → applies blocks → emits intents only via the worker intent mailbox).
 
 Style Enforcement
 - Add README.md per major package (control, runtime, scene) outlining roles and key entrypoints.
 - Lint imports with ruff (ban relative imports); verify public API via `__all__`.
 - Keep flags out of hot paths; configuration resolved at app startup.
-

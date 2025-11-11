@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from napari_cuda.server.scene import build_ledger_snapshot, snapshot_render_state
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,

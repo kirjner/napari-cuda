@@ -15,7 +15,7 @@ from napari_cuda.server.scene import (
     snapshot_viewport_state,
     snapshot_volume_state,
 )
-from napari_cuda.server.state_ledger import LedgerEntry
+from napari_cuda.server.ledger import LedgerEntry
 
 # ---------------------------------------------------------------------------
 # Greenfield payload adapters

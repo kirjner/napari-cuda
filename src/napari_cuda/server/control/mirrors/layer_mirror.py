@@ -8,7 +8,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from typing import Optional
 
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
-from napari_cuda.server.state_ledger import LedgerEvent, ServerStateLedger
+from napari_cuda.server.ledger import LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, layer_content_signature
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 

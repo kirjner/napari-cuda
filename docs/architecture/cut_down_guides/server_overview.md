@@ -20,7 +20,8 @@ Control Channel (State Updates)
 
 Reducers (src/napari_cuda/server/control/state_reducers.py)
 - Build canonical blocks and call scoped transactions:
-  - dims/view/level → write `('dims','main','dims_spec')` (+ current_step), snapshot plane/volume state in minimal form.
+  - dims/view/level → write `('dims','main','dims_spec')` (+ current_index —
+    legacy scope `'current_step'`), snapshot plane/volume state in minimal form.
   - camera → write camera_plane/* or camera_volume/* (pose only) on worker pose.
   - layer → write per-layer visuals.
 
@@ -32,12 +33,14 @@ Two Parallel Flows
 - Pixel channel (render): worker pulls `RenderLedgerSnapshot` from the ledger → mailbox → `drain_scene_updates` → apply/plan. No notify emission on this path.
 
 Runtime Pipeline
-- Worker loop drains render updates:
-  - `consume_render_snapshot(state)` enqueues a snapshot.
-  - `drain_scene_updates(worker)` computes signature deltas and calls `apply_render_snapshot` (dims + planner + camera + layers).
+- Worker loop per tick:
+  - Observe `scene.main.op_seq` bump, read `{view, axes, index, lod, camera, layers}` scopes directly from the ledger.
+  - Apply dims/camera/layers blocks selectively (per-block signatures).
+  - Emit camera poses + level intents through reducers (camera callbacks + worker intent mailbox).
 
-Lean Design Targets
-- One canonical dims spec; margins part of spec.
-- Camera ledger writes only on applied pose.
-- Per-block signatures → dims never reapplied on camera-only updates.
-- ActiveView (mode+level) written by reducers; notify.level sourced only from that key.
+Lean Design Targets (final)
+- Factored ledger scopes (`view / axes / index / lod / camera / layers`) replace
+  `dims_spec` for runtime consumers; legacy `dims_spec` remains only for compat.
+- Camera ledger writes only on applied pose; worker emits pose via reducers.
+- Per-block signatures → dims/camera/layers reapply only when necessary; no planner/mailbox.
+- ActiveView remains reducer-owned; notify.level and the worker both read the same ledger key.

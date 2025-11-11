@@ -8,7 +8,7 @@ from napari_cuda.server.app.dataset_lifecycle import (
     enter_idle_state,
 )
 from napari_cuda.server.scene import RenderLedgerSnapshot
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 
 
 class StubBroadcast:

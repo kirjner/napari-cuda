@@ -6,7 +6,7 @@ from napari_cuda.server.control.state_reducers import (
     reduce_plane_restore,
     reduce_view_update,
 )
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 
 
 def _bootstrap_minimal_ledger() -> ServerStateLedger:

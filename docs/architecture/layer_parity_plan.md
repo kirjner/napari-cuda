@@ -16,8 +16,9 @@ Current State Snapshot
   paths rely on `dims_spec` for axis/order/displayed metadata.
 * Ledger: reducers still write legacy mirrors (`view/main/ndisplay`,
   `multiscale/main/{level,level_shapes,levels}`,
-  `dims/main/current_step`) alongside the spec; bootstrap + level-switch
-  transactions expect those tuples.
+  `dims/main/current_step`). The new `view / axes / index / lod / camera`
+  scopes do not exist yet, so bootstrap + level-switch transactions expect
+  the old tuples.
 * Viewport persistence: `_record_viewport_state` and `_store_*` continue
   to emit `viewport/**` and `view_cache/**` rows even though the same
   pose data lives inside `PlaneState` / `VolumeState`.
@@ -34,16 +35,19 @@ Current State Snapshot
 Target End State
 ----------------
 
-1. `DimsSpec` stored in the ledger remains the authoritative dims record;
-   no auxiliary tuple metadata is written or broadcast alongside it.
-2. Client, server, and worker code path derive everything from spec via
-   shared helpers; tuple caches disappear.
-3. Notify protocol treats `dims_spec` as required; compat fields are
-   removed from schema, tests, and fixtures.
-4. Legacy mirrors collapse into thin broadcasters that forward the spec;
-   viewport metadata/cache rows are deleted (or replaced with spec-derived
-   pose state if still needed).
-5. Docs, helpers, and tests no longer reference tuple-era fields.
+1. Legacy tuple mirrors (`current_step`, `view/main/*`, `multiscale/main/*`)
+   disappear in favor of the factored `view / axes / index / lod / camera`
+   scopes; reducers dual-write until consumers migrate.
+2. Client, server, and worker code paths derive everything from the factored
+   scopes (or helpers on top of them); tuple caches disappear.
+3. Notify protocol emits the factored payload (index, axes metadata, lod info)
+   and only includes the legacy `dims_spec` for backward compatibility while
+   both stacks are in flight.
+4. Legacy mirrors collapse into thin broadcasters that forward the new scopes;
+   viewport metadata/cache rows are deleted (or replaced with spec-derived pose
+   state if still needed).
+5. Docs, helpers, and tests no longer reference tuple-era fields (`current_step`
+   naming is kept only to describe legacy behavior).
 
 -----------------------------------------------------------------------
 
@@ -51,13 +55,15 @@ Workstreams & Sequencing
 ------------------------
 
 ### 1. Server Ledger Cleanup
+* Introduce the `view / axes / index / lod / camera` scopes in the ledger
+  alongside `dims_spec`, dual-write them in the reducers/transactions above,
+  and add helpers so callers can consume the factored data immediately.
 * Rip out legacy tuple writes in `_dims_entries_from_payload`,
   `reduce_bootstrap_state`, `reduce_level_update`, `reduce_dims_update`,
-  `reduce_plane_restore`, and the related transaction helpers; rely on
-  `DimsSpec` plus the minimum multiscale metadata still required for
-  restore flows.
-* Collapse `_ledger_dims_payload` into a spec-first accessor (or inline
-  where it is now trivial) so reducers stop rehydrating tuples.
+  `reduce_plane_restore`, and related transaction helpers once every
+  consumer reads the new scopes.
+* Collapse `_ledger_dims_payload` into factored helpers (view/axes/index/lod)
+  so reducers stop rehydrating tuples.
 * Simplify or delete transaction helpers that become one-line
   `batch_record_confirmed` calls once redundant entries disappear.
 

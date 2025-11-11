@@ -7,7 +7,7 @@ from typing import Callable, Optional
 
 from napari_cuda.server.control.state_reducers import reduce_bootstrap_state
 from napari_cuda.server.scene import RenderLedgerSnapshot
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.server.engine.api import PixelChannelState, mark_stream_config_dirty
 
 

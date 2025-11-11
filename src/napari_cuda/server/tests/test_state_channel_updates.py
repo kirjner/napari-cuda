@@ -72,7 +72,7 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,

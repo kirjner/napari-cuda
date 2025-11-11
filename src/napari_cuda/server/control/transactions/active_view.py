@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from napari_cuda.server.state_ledger import (
+from napari_cuda.server.ledger import (
     LedgerEntry,
     PropertyKey,
     ServerStateLedger,

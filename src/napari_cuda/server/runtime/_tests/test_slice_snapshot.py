@@ -13,7 +13,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
 from napari_cuda.server.scene.viewport import ViewportState
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 
 
 class _FakeCamera:

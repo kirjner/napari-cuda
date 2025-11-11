@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from napari_cuda.server.state_ledger import LedgerEntry, ServerStateLedger
+from napari_cuda.server.ledger import LedgerEntry, ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     DimsSpec,
     dims_spec_from_payload,

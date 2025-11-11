@@ -5,7 +5,7 @@ from typing import Optional
 import numpy as np
 
 from napari_cuda.server.scene import snapshot_render_state, snapshot_scene
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,

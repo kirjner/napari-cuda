@@ -30,7 +30,7 @@ from napari_cuda.server.control.transactions import (
     apply_volume_restore_transaction,
 )
 from napari_cuda.server.scene import PlaneState, RenderMode, VolumeState
-from napari_cuda.server.state_ledger import (
+from napari_cuda.server.ledger import (
     LedgerEntry,
     PropertyKey,
     ServerStateLedger,

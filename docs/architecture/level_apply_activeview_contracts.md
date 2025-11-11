@@ -8,6 +8,10 @@ Constraints (must)
 - Apply-only-via-snapshot: Worker applies a level only when it arrives via a `RenderLedgerSnapshot` pulled from the ledger. Apply helpers do not re-decide or override snapshot level.
 - Decision sources (only): A level decision can originate from exactly one of: (A) worker intent mailbox (policy), (B) a restore, or (C) bootstrap. Each source writes the level to the ledger first; render then consumes a snapshot.
 - Derived ActiveView: `('viewport','active','state')` is derived from ledger state by a mirror. Reducers/transactions do not write ActiveView. Broadcasters build `notify.level` only from the ActiveView ledger key.
+- Upcoming schema alignment: the new `view / axes / index / lod / camera` ledger scopes
+  replace the monolithic dims spec as the authoritative source for level/index
+  decisions. This document assumes any new helpers derive from those scopes
+  while legacy reducers continue to dual-write `dims_spec` for compatibility.
 
 Current adherence
 - Policy → ledger → snapshot → render (2A, 1):

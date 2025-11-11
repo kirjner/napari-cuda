@@ -28,8 +28,16 @@ Non-goals
 
 3. Data Model (Canonical Blocks)
 3.1 DimsSpec (authoritative dims)
-- Fields per axis: index, label, role, displayed, order_position, current_step, per_level_steps, per_level_world (start, stop, step), margins (left/right in steps and world units).
-- Global fields: version, ndim, ndisplay, order, displayed, current_level, current_step, level_shapes, plane_mode, labels, levels (opaque metadata).
+*Naming note*: the view/axes/lod redesign renames our multi-dimensional cursor
+field to `current_index`. Legacy code and ledger scopes still emit
+`current_step`; until the implementation lands, this doc references
+`current_index` (legacy `current_step`) to make the transition explicit.
+- Fields per axis: index, label, role, displayed, order_position,
+  current_index (legacy `current_step`), per_level_steps, per_level_world
+  (start, stop, step), margins (left/right in steps and world units).
+- Global fields: version, ndim, ndisplay, order, displayed, current_level,
+  current_index (legacy `current_step`), level_shapes, plane_mode, labels,
+  levels (opaque metadata).
 - Schema lives in code (src/napari_cuda/shared/dims_spec.py). The ADD requires that any new dims attribute be added here first and flow end-to-end.
 
 Dataclasses (reference implementation):
@@ -50,7 +58,7 @@ class DimsSpecAxis:
     role: str
     displayed: bool
     order_position: int
-    current_step: int
+    current_index: int  # legacy field name `current_step`
     margin_left_steps: float
     margin_right_steps: float
     margin_left_world: float
@@ -66,7 +74,7 @@ class DimsSpec:
     order: Tuple[int, ...]
     displayed: Tuple[int, ...]
     current_level: int
-    current_step: Tuple[int, ...]
+    current_index: Tuple[int, ...]  # legacy payload key `current_step`
     level_shapes: Tuple[Tuple[int, ...], ...]
     plane_mode: bool
     axes: Tuple[DimsSpecAxis, ...]
@@ -80,7 +88,60 @@ def dims_spec_to_payload(spec: DimsSpec) -> dict[str, object]: ...
 def dims_spec_from_payload(data: Mapping[str, object]) -> DimsSpec: ...
 ```
 
-3.2 PlanePose / VolumePose (camera)
+3.2 View/Axes/Index/Lod Blocks (target schema)
+- Purpose: replace the monolithic DimsSpec for runtime consumption while
+  maintaining compatibility with legacy payloads during the migration window.
+- Scopes (ledger keys names TBD until code lands):
+  - `view.main.state`: `{mode: 'plane'|'volume', displayed_axes: tuple[int, ...], ndim: int}`
+  - `axes.main.state`: tuple of axis records with `{axis_id, label, role, world_extent, margins}`
+  - `index.main.cursor`: canonical multi-dimensional index tuple (what used to be `current_step`)
+  - `lod.main.state`: `{level: int, roi: tuple[int, ...] | None, policy: str | None}`
+  - `camera.main.state`: plane/volume pose metadata (mirrors `camera_plane`/`camera_volume` but unified)
+- Target dataclasses (illustrative):
+```
+@dataclass(frozen=True)
+class ViewState:
+    mode: Literal["plane", "volume"]
+    displayed_axes: Tuple[int, ...]
+    ndim: int
+
+@dataclass(frozen=True)
+class AxisState:
+    axis_id: int
+    label: str
+    role: str
+    world_extent: AxisExtent
+    margin_left_world: float
+    margin_right_world: float
+    displayed: bool
+
+@dataclass(frozen=True)
+class AxesState:
+    axes: Tuple[AxisState, ...]
+
+@dataclass(frozen=True)
+class IndexState:
+    value: Tuple[int, ...]
+
+@dataclass(frozen=True)
+class LodState:
+    level: int
+    roi: Tuple[int, ...] | None
+    policy: str | None
+```
+- Implementation plan:
+  1. Dual-write these payloads whenever reducers currently mutate `dims_spec`.
+  2. Worker call stack simplifies to:
+     - Control reducer writes new scopes + bumps `scene.main.op_seq`.
+     - Server pokes worker (tick) → worker reads `{view, axes, index, lod, camera, layer}` scopes directly from the ledger.
+     - Worker applies each block in place (dims, camera, layers) based on per-block signatures; no planner/mailbox/cache.
+     - Worker emits camera poses and level intents back through reducers (via `reduce_camera_update` / worker intent mailbox).
+  3. Update snapshot builders and notify serializers to read the new scopes first,
+     falling back to `dims_spec` for legacy consumers only.
+  4. Once worker/apply/mirrors rely solely on the new scopes, remove the legacy
+     `current_step` mirrors and shrink DimsSpec to archival/compat use only.
+
+3.3 PlanePose / VolumePose (camera)
 - Plane: rect (L,B,W,H), center (Y,X), zoom.
 - Volume: center (Z,Y,X), angles (az, el, roll), distance, fov.
 
@@ -113,7 +174,10 @@ class ActiveViewState:
 ```
 
 4. Ledger Model (Authoritative, Committed Only)
-- Dims: ("dims","main","dims_spec") holds the canonical DimsSpec payload; ("dims","main","current_step") mirrors step; per-axis index entries are optional.
+- Dims: ("dims","main","dims_spec") holds the canonical DimsSpec payload;
+  ("dims","main","current_index") mirrors the multi-dimensional index
+  (legacy scope `"current_step"` until the rename lands); per-axis index entries
+  are optional.
 - Camera: ("camera_plane","main", {center,zoom,rect}), ("camera_volume","main", {center,angles,distance,fov}).
 - Plane/Volume State: minimal state needed for restore; request/applied mirrors are deprecated once ActiveView exists.
 - ActiveView: ("viewport","active","state") published by reducers whenever mode/level changes. [Implemented]
@@ -308,7 +372,7 @@ def active_view_signature(active: ActiveViewState | None) -> SignatureToken: ...
 Modules: `src/napari_cuda/server/runtime/render_loop/applying/*`
 ```
 def apply_dims_block(snapshot_iface: RenderApplyInterface, spec: DimsSpec) -> None:
-    # Must set: axis_labels, ndim, order, displayed, ndisplay, current_step, margins.
+    # Must set: axis_labels, ndim, order, displayed, ndisplay, current_index (legacy current_step), margins.
     ...
 
 def apply_camera_block(
@@ -329,7 +393,7 @@ Module: `src/napari_cuda/protocol/messages.py`
 @dataclass
 class NotifyDimsPayload:
     step: tuple[int, ...]
-    current_step: tuple[int, ...] | None
+    current_index: tuple[int, ...] | None  # legacy payload field `current_step`
     levels: tuple[Mapping[str, object], ...]
     current_level: int
     mode: str  # 'plane' | 'volume'
@@ -400,16 +464,21 @@ Reducer Contracts (Pre/Postconditions & Side-effects)
 - reduce_dims_update
   - Preconditions:
     - `axis` resolves to an integer index in [0, ndim) of the current DimsSpec via labels/order (reject if not resolvable).
-    - If `prop == 'index'`: `value` or `step_delta` provided; computed target step is clamped into [0, level_shape[idx]).
+    - If `prop == 'index'`: `value` or `step_delta` provided; computed target
+      index is clamped into [0, level_shape[idx]).
     - If `prop in {'margin_left','margin_right'}`: `value` is a finite float ≥ 0.
   - Postconditions:
-    - Writes versioned ('dims','main','dims_spec') with updated current_step and, for margin updates, axis margin_* in world and steps (steps = world/step_size; step_size from per_level_world[level_idx].step > 0).
-    - Writes versioned ('dims','main','current_step') and optional per-axis index.
+    - Writes versioned ('dims','main','dims_spec') with updated current_index
+      (legacy `current_step`) and, for margin updates, axis margin_* in world and
+      steps (steps = world/step_size; step_size from per_level_world[level_idx].step > 0).
+    - Writes versioned ('dims','main','current_index') (legacy key
+      `'current_step'`) and optional per-axis index.
     - If ndisplay < 3: updates viewport/plane/state (targets/applied) and clears pose-dirty; does not move camera.
     - If level changed: records ActiveView {'mode':'plane','level':current_level}.
   - Invariants:
-    - order contains each axis index exactly once; displayed equals the last ndisplay of order; len(current_step) == len(axes).
-  - Logging: DEBUG axis label, prop, requested step, new spec version, origin.
+    - order contains each axis index exactly once; displayed equals the last
+      ndisplay of order; len(current_index) == len(axes).
+  - Logging: DEBUG axis label, prop, requested index, new spec version, origin.
 
 - reduce_view_update
   - Preconditions: ndisplay ∈ {2,3+}; order/displayed (if provided) are consistent permutations/subsets.
@@ -420,14 +489,18 @@ Reducer Contracts (Pre/Postconditions & Side-effects)
   - Logging: DEBUG with ndisplay/order/displayed/versions/origin.
 
 - reduce_level_update
-  - Preconditions: level resolves; if step provided, len(step) <= ndim.
+  - Preconditions: level resolves; if an index tuple (legacy step) is provided,
+    len(index) <= ndim.
   - Postconditions:
-    - Updates level_shapes if shape provided; clamps/remaps step as needed; writes versioned dims_spec with current_level/current_step.
+    - Updates level_shapes if shape provided; clamps/remaps the index tuple as
+      needed; writes versioned dims_spec with current_level/current_index (legacy
+      `current_step`).
     - Records ActiveView with provided/derived mode and level.
   - Logging: INFO/DEBUG summarizing level and mode.
 
 - reduce_plane_restore / reduce_volume_restore
-  - Postconditions: apply pose to state; write camera_* scoped keys via txn; (plane) update dims_spec level/step; record ActiveView.
+  - Postconditions: apply pose to state; write camera_* scoped keys via txn;
+    (plane) update dims_spec level/index; record ActiveView.
   - Guarantees: reducers do not emit camera deltas; broadcaster handles notify.
 
 - reduce_camera_update
@@ -448,7 +521,10 @@ Builder Contracts
 - Do not recompute derived values already stored (e.g., ActiveView) to avoid divergence.
 
 Signature Content (Stable, Minimal)
-- dims_content_signature(spec): tuple(current_step normalized length, current_level, ndisplay, order tuple, displayed tuple, axis labels tuple, level_shapes, per-axis margins (left/right world) rounded to tolerance).
+- dims_content_signature(spec): tuple(current_index (legacy current_step)
+  normalized length, current_level, ndisplay, order tuple, displayed tuple,
+  axis labels tuple, level_shapes, per-axis margins (left/right world) rounded
+  to tolerance).
 - camera_pose_signature(plane, volume): tuple(plane.center, plane.zoom, plane.rect, volume.center, volume.angles, volume.distance, volume.fov) with float rounding.
 - layers_signature: sorted tuple of (layer_id, canonical visual items).
 - active_view_signature: (mode, level) or None.
@@ -461,7 +537,7 @@ Runtime Apply (Deterministic) — Pseudocode Details
   1) labels → dims.axis_labels
   2) ndim from max(spec.ndim, len(level_shapes[current_level]), viewer.ndim)
   3) order/displayed/ndisplay with assertions; displayed must equal tail(order, ndisplay)
-  4) current_step normalized to ndim (pad/truncate)
+  4) current_index (legacy current_step) normalized to ndim (pad/truncate)
   5) margins → dims.margin_left/right (world units)
   6) snapshot_iface.set_current_level_index(current_level)
 - apply_camera_block(snapshot_iface, plane, volume): set plane/volume cameras; never touches dims.

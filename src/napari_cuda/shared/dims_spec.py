@@ -8,7 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, Sequence, Tuple
 
-from napari_cuda.server.state_ledger import LedgerEntry
+from napari_cuda.server.ledger import LedgerEntry
 
 
 _DIMS_SPEC_VERSION = 1

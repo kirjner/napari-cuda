@@ -89,7 +89,7 @@ from napari_cuda.server.scene.viewport import (
     ViewportState,
 )
 from napari_cuda.server.runtime.worker.resources import WorkerResources
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 
 logger = logging.getLogger(__name__)
 

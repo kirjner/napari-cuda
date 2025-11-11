@@ -15,3 +15,6 @@ Lean Rules
 - Summary-only logging for large values; never emit large arrays or full `dims_spec` blobs.
 - Use dedupe (`dedupe=True`) for idempotent writes to avoid version churn.
 - No ledger writes for hot-path camera deltas; only write on applied pose.
+- When introducing the `view / axes / index / lod / camera` scopes, wire them
+  through the same logging/dedupe helpers on day one so legacy `dims_spec`
+  logging can be removed entirely once consumers migrate.

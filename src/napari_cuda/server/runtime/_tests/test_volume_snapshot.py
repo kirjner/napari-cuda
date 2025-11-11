@@ -16,7 +16,7 @@ from napari_cuda.server.scene.viewport import ViewportState
 from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
 )
-from napari_cuda.server.state_ledger import ServerStateLedger
+from napari_cuda.server.ledger import ServerStateLedger
 
 
 class _FakeLayerLogger:

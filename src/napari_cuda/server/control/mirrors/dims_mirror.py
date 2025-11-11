@@ -9,7 +9,7 @@ from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyDimsPayload
 from napari_cuda.shared.dims_spec import DimsSpec, dims_spec_from_payload
-from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
+from napari_cuda.server.ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 from napari_cuda.server.utils.signatures import SignatureToken, dims_content_signature
 
 ScheduleFn = Callable[[Awaitable[None], str], None]

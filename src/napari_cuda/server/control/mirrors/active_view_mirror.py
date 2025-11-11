@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from napari_cuda.protocol.messages import NotifyLevelPayload
-from napari_cuda.server.state_ledger import LedgerEntry, LedgerEvent, ServerStateLedger
+from napari_cuda.server.ledger import LedgerEntry, LedgerEvent, ServerStateLedger
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[NotifyLevelPayload], Awaitable[None]]
