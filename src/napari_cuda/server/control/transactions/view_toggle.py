@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 
 from typing import Any, Optional
 
@@ -25,6 +25,7 @@ def apply_view_toggle_transaction(
     active_level: Optional[int] = None,
     origin: str,
     timestamp: float,
+    extra_entries: Iterable[tuple] | None = None,
 ) -> dict[PropertyKey, LedgerEntry]:
     """Record the ledger updates for a view toggle intent."""
     entries: list[tuple] = [
@@ -43,6 +44,8 @@ def apply_view_toggle_transaction(
                 {"mode": str(active_mode), "level": int(active_level)},
             )
         )
+    if extra_entries is not None:
+        entries.extend(extra_entries)
 
     return ledger.batch_record_confirmed(
         entries,

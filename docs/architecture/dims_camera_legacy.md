@@ -17,6 +17,12 @@ Ledger State Today
   (`src/napari_cuda/server/control/mirrors/active_view_mirror.py`). Holds
   `{"mode": "plane"|"volume", "level": int}`. Every view toggle is reflected
   here so mirrors can emit `notify.level`.
+* `view.main.state`, `axes.main.state`, `index.main.cursor`, `lod.main.state`,
+  `camera.main.state` — **new block scopes gated by**
+  `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX`. When the flag is set, reducers and
+  transactions dual-write these payloads using the dataclasses in
+  `src/napari_cuda/server/scene/blocks/` so we can validate the new schema
+  without dropping the legacy fields.
 * `viewport.state` (`plane`/`volume` scopes) — serialized copies of the worker
   `PlaneState` / `VolumeState` dataclasses (`state_reducers._store_plane_state`,
   `_store_volume_state`). Reducers rely on these cached blobs to determine
@@ -94,7 +100,9 @@ Mirrors and Notifications
 * `ActiveViewMirror`
   (`src/napari_cuda/server/control/mirrors/active_view_mirror.py`) listens to
   `viewport.active.state` and emits `notify.level` whenever the mode/level pair
-  changes.
+  changes. Baseline reconnects now seed a snapshot (or sequencer reset) so the
+  new `notify.level` resumable lane stays in sync with the dual-written block
+  ledger.
 
 Both mirrors re-read the ledger, so the legacy `dims_spec` + active view entries
 must remain coherent.

@@ -91,6 +91,12 @@ def dims_spec_from_payload(data: Mapping[str, object]) -> DimsSpec: ...
 3.2 View/Axes/Index/Lod Blocks (target schema)
 - Purpose: replace the monolithic DimsSpec for runtime consumption while
   maintaining compatibility with legacy payloads during the migration window.
+- Status (2025-11-10): reducers now dual-write these scopes under the
+  `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` flag (`scene/blocks/__init__.py`), so the
+  ledger always has typed `ViewBlock`, `AxesBlock`, `IndexBlock`, `LodBlock`, and
+  `CameraBlock` records whenever the flag is set. Control‑channel tests
+  (`test_state_channel_updates.py`) run with the flag on/off to guarantee notify
+  payload parity while we stage the consumer flip.
 - Scopes (ledger keys names TBD until code lands):
   - `view.main.state`: `{mode: 'plane'|'volume', displayed_axes: tuple[int, ...], ndim: int}`
   - `axes.main.state`: tuple of axis records with `{axis_id, label, role, world_extent, margins}`

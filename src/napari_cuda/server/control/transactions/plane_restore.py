@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from typing import Optional
 
 from napari_cuda.server.ledger import (
@@ -56,6 +56,7 @@ def apply_plane_restore_transaction(
     op_seq: Optional[int] = None,
     op_state: Optional[str] = None,
     op_kind: Optional[str] = None,
+    extra_entries: Iterable[tuple] | None = None,
 ) -> dict[PropertyKey, LedgerEntry]:
     """Batch ledger writes for a plane camera restore.
 
@@ -97,6 +98,8 @@ def apply_plane_restore_transaction(
             ("camera_plane", "main", "rect", rect_tuple),
         ]
     )
+    if extra_entries is not None:
+        batch_entries.extend(extra_entries)
 
     stored = ledger.batch_record_confirmed(
         batch_entries,

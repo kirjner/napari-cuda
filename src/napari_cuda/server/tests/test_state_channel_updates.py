@@ -179,6 +179,7 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
         "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+        "notify.level": FeatureToggle(enabled=True, version=1, resume=True),
         "notify.camera": FeatureToggle(enabled=True, version=1, resume=False),
         "call.command": FeatureToggle(
             enabled=True,
@@ -399,6 +400,7 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
             "notify.scene": ResumableRetention(),
             "notify.layers": ResumableRetention(min_deltas=512, max_deltas=2048, max_age_s=300.0),
             "notify.stream": ResumableRetention(min_deltas=1, max_deltas=32),
+            "notify.level": ResumableRetention(),
         }
     )
     server._ensure_keyframe_calls = 0
@@ -485,6 +487,13 @@ def _record_dims_to_ledger(
         "main",
         "dims_spec",
         dims_spec_to_payload(spec),
+        origin=origin,
+    )
+    server._state_ledger.record_confirmed(
+        "viewport",
+        "active",
+        "state",
+        {"mode": str(payload.mode), "level": int(payload.current_level)},
         origin=origin,
     )
 
@@ -1199,6 +1208,7 @@ def test_send_state_baseline_emits_notifications(monkeypatch) -> None:
             "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+            "notify.level": FeatureToggle(enabled=True, version=1, resume=True),
         }
         ws._napari_cuda_sequencers = {}
         ws._napari_cuda_resume_plan = {}
@@ -1277,6 +1287,7 @@ def test_layer_baseline_replay_without_deltas_sends_defaults(monkeypatch) -> Non
             "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
             "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+            "notify.level": FeatureToggle(enabled=True, version=1, resume=True),
         }
         ws._napari_cuda_sequencers = {}
         ws._napari_cuda_resume_plan = {
@@ -1451,6 +1462,7 @@ def test_send_state_baseline_replays_store(monkeypatch) -> None:
                 "notify.layers": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.stream": FeatureToggle(enabled=True, version=1, resume=True),
                 "notify.dims": FeatureToggle(enabled=True, version=1, resume=False),
+                "notify.level": FeatureToggle(enabled=True, version=1, resume=True),
             },
             _napari_cuda_sequencers={},
         )

@@ -17,7 +17,7 @@ from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control.control_payload_builder import (
     build_notify_scene_payload,
 )
-from napari_cuda.server.control.protocol.runtime import history_store
+from napari_cuda.server.control.protocol.runtime import history_store, state_sequencer
 from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
     ResumePlan,
@@ -25,6 +25,7 @@ from napari_cuda.server.control.resumable_history_store import (
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 from napari_cuda.protocol.messages import NotifyLevelPayload
+from napari_cuda.server.control.protocol.runtime import state_sequencer
 from .dims import broadcast_dims_state, send_dims_state
 from .layers import (
     send_layer_baseline,
@@ -312,14 +313,29 @@ async def _send_level_baseline(
     value_map = entry.value
     mode_value = str(value_map["mode"])
     level_value = int(value_map["level"])
+    payload = NotifyLevelPayload(current_level=level_value, mode=mode_value)
+    now = time.time()
+    store = history_store(server)
+    if store is not None:
+        snapshot = store.snapshot_envelope(
+            NOTIFY_LEVEL_TYPE,
+            payload=payload.to_dict(),
+            timestamp=now,
+        )
+        await send_level_snapshot(server, ws, snapshot)
+        logger.debug("connect: notify.level baseline sent (snapshot)")
+        return
+
+    sequencer = state_sequencer(ws, NOTIFY_LEVEL_TYPE)
+    sequencer.snapshot()
     await send_level(
         server,
         ws,
-        payload=NotifyLevelPayload(current_level=level_value, mode=mode_value),
+        payload=payload,
         intent_id=None,
-        timestamp=time.time(),
+        timestamp=now,
     )
-    logger.debug("connect: notify.level baseline sent")
+    logger.debug("connect: notify.level baseline sent (sequencer)")
 
 
 async def _send_dims_baseline(server: Any, ws: Any) -> None:

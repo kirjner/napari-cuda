@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Optional
 
 from napari_cuda.server.ledger import (
@@ -24,6 +24,7 @@ def apply_level_switch_transaction(
     op_seq: Optional[int] = None,
     op_state: Optional[str] = None,
     op_kind: Optional[str] = None,
+    extra_entries: Iterable[tuple] | None = None,
 ) -> dict[PropertyKey, LedgerEntry]:
     """Record the ledger updates for a level switch and return stored entries."""
 
@@ -50,6 +51,8 @@ def apply_level_switch_transaction(
     batch_entries.append(("dims", "main", "current_step", step_tuple))
 
     batch_entries.append(("dims", "main", "dims_spec", dict(dims_spec_payload)))
+    if extra_entries is not None:
+        batch_entries.extend(extra_entries)
 
     return ledger.batch_record_confirmed(
         batch_entries,

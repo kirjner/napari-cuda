@@ -121,3 +121,44 @@ For each phase, file issues with the following template:
 This doc plus `docs/architecture/dims_camera_legacy.md` should be kept in sync
 during implementation; mark items as completed and prune the legacy list as code
 lands.
+
+Current Status (2025-11-10)
+---------------------------
+
+- **Feature flag:** `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1` (see
+  `scene/blocks/__init__.py::ENABLE_VIEW_AXES_INDEX_BLOCKS`) now switches on the
+  Phase 1 dual-write path. Reducers (
+  `src/napari_cuda/server/control/state_reducers.py`) write:
+  - `view.main.state` (`ViewBlock`)
+  - `axes.main.state` (`AxesBlock`)
+  - `index.main.cursor` (`IndexBlock`, renamed from “step”)
+  - `lod.main.state` (`LodBlock`)
+  - `camera.main.state` (`CameraBlock`)
+  alongside the legacy `dims_spec`, `camera_plane`, `camera_volume`, and
+  `viewport.*` caches.
+- **Transactions:** All scene control transactions accept `extra_entries`, so
+  block payloads land in the same atomic ledger batch as the legacy keys. This
+  ensures notify/mirror code can start reading the new scopes without race
+  conditions.
+- **Baseline notify:** `orchestrate_connect` seeds `notify.level` directly from
+  `viewport.active.state`. When the resumable history store is configured, the
+  level baseline is recorded as a snapshot; otherwise we seed the per-client
+  sequencer before emitting the first delta. This keeps `notify.level` cursors in
+  sync with the new ledger scopes.
+- **Parity guardrails:** `uv run pytest -q src/napari_cuda/server/tests/test_state_channel_updates.py`
+  passes with the flag both unset/set. This suite asserts that control-channel
+  baselines (`notify.scene`, `notify.layers`, `notify.stream`, `notify.dims`,
+  `notify.level`) remain identical even though reducers now dual-write the new
+  blocks.
+
+Outstanding Phase 1 work:
+1. Add explicit unit tests that compare each block to the corresponding
+   `DimsSpec` / cached pose fields (axes metadata, current index, margins, camera
+   pose).
+2. Teach `snapshot_viewport_state` / `build_notify_scene_payload` to read the new
+   ledger keys first, with fallbacks for legacy scopes.
+3. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
+   the protocol docs so consumers know where to look once the flag flips.
+
+Only after those items land should we begin Phase 2 (wiring notify builders and
+the worker to consume the block ledger).

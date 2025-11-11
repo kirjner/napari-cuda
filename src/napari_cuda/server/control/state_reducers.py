@@ -36,6 +36,23 @@ from napari_cuda.server.ledger import (
     ServerStateLedger,
 )
 from napari_cuda.server.control.transactions.thumbnail import apply_thumbnail_capture
+from napari_cuda.server.scene.blocks import (
+    ENABLE_VIEW_AXES_INDEX_BLOCKS,
+    AxisBlock,
+    AxisExtentBlock,
+    AxesBlock,
+    CameraBlock,
+    IndexBlock,
+    LodBlock,
+    PlaneCameraBlock,
+    ViewBlock,
+    VolumeCameraBlock,
+    axes_to_payload,
+    camera_block_to_payload,
+    index_block_to_payload,
+    lod_block_to_payload,
+    view_block_to_payload,
+)
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,
@@ -199,6 +216,74 @@ def _store_volume_state(
             origin=origin,
             timestamp=timestamp,
         )
+
+
+def _view_axes_index_entries(spec: DimsSpec) -> list[tuple[str, str, str, object]]:
+    if not ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        return []
+    view_block = ViewBlock(
+        mode="plane" if spec.plane_mode else "volume",
+        displayed_axes=spec.displayed,
+        ndim=spec.ndim,
+    )
+    axes: list[AxisBlock] = []
+    level_idx = int(spec.current_level)
+    for axis in spec.axes:
+        per_level_world = axis.per_level_world
+        assert 0 <= level_idx < len(per_level_world), "axis missing per-level world extent"
+        extent = per_level_world[level_idx]
+        axes.append(
+            AxisBlock(
+                axis_id=axis.index,
+                label=axis.label,
+                role=axis.role,
+                displayed=axis.displayed,
+                world_extent=AxisExtentBlock(
+                    start=extent.start,
+                    stop=extent.stop,
+                    step=extent.step,
+                ),
+                margin_left_world=axis.margin_left_world,
+                margin_right_world=axis.margin_right_world,
+            )
+        )
+    axes_block = AxesBlock(axes=tuple(axes))
+    index_block = IndexBlock(value=spec.current_step)
+    lod_block = LodBlock(level=spec.current_level, roi=None, policy=None)
+    return [
+        ("view", "main", "state", view_block_to_payload(view_block)),
+        ("axes", "main", "state", axes_to_payload(axes_block)),
+        ("index", "main", "cursor", index_block_to_payload(index_block)),
+        ("lod", "main", "state", lod_block_to_payload(lod_block)),
+    ]
+
+
+def _camera_block_payload(
+    ledger: ServerStateLedger,
+    *,
+    plane_state: PlaneState | None = None,
+    volume_state: VolumeState | None = None,
+) -> dict[str, object] | None:
+    if not ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        return None
+    resolved_plane = plane_state or _load_plane_state(ledger)
+    resolved_volume = volume_state or _load_volume_state(ledger)
+    plane_pose = resolved_plane.pose
+    volume_pose = resolved_volume.pose
+    block = CameraBlock(
+        plane=PlaneCameraBlock(
+            rect=plane_pose.rect,
+            center=plane_pose.center,
+            zoom=plane_pose.zoom,
+        ),
+        volume=VolumeCameraBlock(
+            center=volume_pose.center,
+            angles=volume_pose.angles,
+            distance=volume_pose.distance,
+            fov=volume_pose.fov,
+        ),
+    )
+    return camera_block_to_payload(block)
 
 
 def _get_dims_spec(ledger: ServerStateLedger) -> DimsSpec:
@@ -768,6 +853,10 @@ def reduce_bootstrap_state(
             axis_index_value,
         )
     )
+    entries.extend(_view_axes_index_entries(dims_spec))
+    camera_payload = _camera_block_payload(ledger)
+    if camera_payload is not None:
+        entries.append(("camera", "main", "state", camera_payload))
 
     op_entry = ledger.get("scene", "main", "op_seq")
     next_op_seq = int(op_entry.value) + 1 if op_entry is not None and isinstance(op_entry.value, int) else 1
@@ -926,6 +1015,7 @@ def reduce_dims_update(
 
     next_op_seq = _next_scene_op_seq(ledger)
 
+    extra_entries = _view_axes_index_entries(new_spec)
     stored_entries = apply_dims_step_transaction(
         ledger=ledger,
         step=requested_step,
@@ -934,6 +1024,7 @@ def reduce_dims_update(
         timestamp=ts,
         op_seq=next_op_seq,
         op_kind="dims-update",
+        extra_entries=extra_entries,
     )
 
     spec_entry = stored_entries.get(("dims", "main", "dims_spec"))
@@ -1061,6 +1152,7 @@ def reduce_view_update(
         active_level=active_level,
         origin=origin,
         timestamp=ts,
+        extra_entries=_view_axes_index_entries(new_spec),
     )
 
     spec_entry = stored_entries.get(("dims", "main", "dims_spec"))
@@ -1132,6 +1224,11 @@ def reduce_plane_restore(
 
     next_op_seq = _next_scene_op_seq(ledger)
 
+    camera_payload = _camera_block_payload(ledger, plane_state=base_plane)
+    extra_entries: list[tuple[str, str, str, object]] = []
+    if camera_payload is not None:
+        extra_entries.append(("camera", "main", "state", camera_payload))
+
     stored = apply_plane_restore_transaction(
         ledger=ledger,
         level=level_idx,
@@ -1143,6 +1240,7 @@ def reduce_plane_restore(
         timestamp=ts,
         op_seq=next_op_seq,
         op_kind="plane-restore",
+        extra_entries=extra_entries if extra_entries else None,
     )
 
     _store_plane_state(
@@ -1189,6 +1287,7 @@ def reduce_plane_restore(
         timestamp=ts,
         op_seq=_next_scene_op_seq(ledger),
         op_kind="plane-restore",
+        extra_entries=_view_axes_index_entries(new_spec),
     )
 
     return stored
@@ -1237,6 +1336,11 @@ def reduce_volume_restore(
 
     next_op_seq = _next_scene_op_seq(ledger)
 
+    camera_payload = _camera_block_payload(ledger, volume_state=base_volume)
+    extra_entries: list[tuple[str, str, str, object]] = []
+    if camera_payload is not None:
+        extra_entries.append(("camera", "main", "state", camera_payload))
+
     stored = apply_volume_restore_transaction(
         ledger=ledger,
         level=level_idx,
@@ -1248,6 +1352,7 @@ def reduce_volume_restore(
         timestamp=ts,
         op_seq=next_op_seq,
         op_kind="volume-restore",
+        extra_entries=extra_entries if extra_entries else None,
     )
 
     _store_volume_state(
@@ -1316,6 +1421,19 @@ def reduce_level_update(
 
     spec = _get_dims_spec(ledger)
     current_step = spec.current_step
+
+    plane_payload = _plain_plane_state(plane_state)
+    if plane_payload is not None and step_tuple is None:
+        request = plane_payload.get("request")
+        applied_req = plane_payload.get("applied")
+        candidate = None
+        if isinstance(applied_req, Mapping):
+            candidate = applied_req.get("step")
+        if candidate is None and isinstance(request, Mapping):
+            candidate = request.get("step")
+        if candidate is not None:
+            step_tuple = tuple(int(v) for v in candidate)
+
     if step_tuple is None:
         step_tuple = current_step
 
@@ -1391,6 +1509,7 @@ def reduce_level_update(
         timestamp=ts,
         op_seq=next_op_seq,
         op_kind="level-update",
+        extra_entries=_view_axes_index_entries(new_spec),
     )
 
     plane_payload = _plain_plane_state(plane_state)
@@ -1414,7 +1533,7 @@ def reduce_level_update(
             metadata=_metadata_from_intent(intent_id),
         )
 
-    if volume_payload is not None and mode_value == "volume":
+    if volume_payload is not None:
         volume_model = VolumeState(**volume_payload)
         _store_volume_state(
             ledger,
@@ -1491,6 +1610,8 @@ def reduce_camera_update(
 
     ledger_updates: list[tuple] = []
     ack: dict[str, Any] = {}
+    plane_model: PlaneState | None = None
+    volume_model: VolumeState | None = None
 
     def _append_entry(scope: str, key: str, value: Any) -> None:
         if include_metadata:
@@ -1503,23 +1624,23 @@ def reduce_camera_update(
         use_volume_path = True
 
     if not use_volume_path:
-        plane_state = _load_plane_state(ledger)
+        plane_model = _load_plane_state(ledger)
         spec = _get_dims_spec(ledger)
-        plane_state.target_ndisplay = 2
-        plane_state.target_level = int(spec.current_level)
-        plane_state.applied_level = int(spec.current_level)
-        plane_state.target_step = spec.current_step
-        plane_state.applied_step = spec.current_step
+        plane_model.target_ndisplay = 2
+        plane_model.target_level = int(spec.current_level)
+        plane_model.applied_level = int(spec.current_level)
+        plane_model.target_step = spec.current_step
+        plane_model.applied_step = spec.current_step
         if center is not None:
             if len(center) < 2:
                 raise ValueError("plane camera center requires at least two components")
             plane_center = (float(center[0]), float(center[1]))
-            plane_state.update_pose(center=plane_center)
+            plane_model.update_pose(center=plane_center)
             ack["center"] = [plane_center[0], plane_center[1]]
             _append_entry("camera_plane", "center", plane_center)
         if zoom is not None:
             zoom_value = float(zoom)
-            plane_state.update_pose(zoom=zoom_value)
+            plane_model.update_pose(zoom=zoom_value)
             ack["zoom"] = zoom_value
             _append_entry("camera_plane", "zoom", zoom_value)
         if rect is not None:
@@ -1531,21 +1652,21 @@ def reduce_camera_update(
                 float(rect[2]),
                 float(rect[3]),
             )
-            plane_state.update_pose(rect=rect_tuple)
+            plane_model.update_pose(rect=rect_tuple)
             ack["rect"] = [rect_tuple[0], rect_tuple[1], rect_tuple[2], rect_tuple[3]]
             _append_entry("camera_plane", "rect", rect_tuple)
-        plane_state.camera_pose_dirty = False
-        plane_state.applied_roi = None
-        plane_state.applied_roi_signature = None
+        plane_model.camera_pose_dirty = False
+        plane_model.applied_roi = None
+        plane_model.applied_roi_signature = None
         _store_plane_state(
             ledger,
-            plane_state,
+            plane_model,
             origin=origin,
             timestamp=ts,
             metadata=metadata,
         )
     else:
-        volume_state = _load_volume_state(ledger)
+        volume_model = _load_volume_state(ledger)
         pose_updates: dict[str, object] = {}
         if center is not None:
             if len(center) < 3:
@@ -1561,7 +1682,7 @@ def reduce_camera_update(
             if len(angles) < 2:
                 raise ValueError("volume camera angles require at least two components")
             roll_val = float(angles[2]) if len(angles) >= 3 else (
-                float(volume_state.pose.angles[2]) if volume_state.pose.angles is not None and len(volume_state.pose.angles) >= 3 else 0.0
+                float(volume_model.pose.angles[2]) if volume_model.pose.angles is not None and len(volume_model.pose.angles) >= 3 else 0.0
             )
             pose_updates["angles"] = (float(angles[0]), float(angles[1]), roll_val)
             ack["angles"] = [float(angles[0]), float(angles[1]), float(pose_updates["angles"][2])]
@@ -1575,14 +1696,21 @@ def reduce_camera_update(
             ack["fov"] = float(fov)
             _append_entry("camera_volume", "fov", float(fov))
         if pose_updates:
-            volume_state.update_pose(**pose_updates)
+            volume_model.update_pose(**pose_updates)
             _store_volume_state(
                 ledger,
-                volume_state,
+                volume_model,
                 origin=origin,
                 timestamp=ts,
                 metadata=metadata,
             )
+
+    camera_payload = _camera_block_payload(ledger, plane_state=plane_model, volume_state=volume_model)
+    if camera_payload is not None:
+        if include_metadata:
+            ledger_updates.append(("camera", "main", "state", camera_payload, metadata_dict))
+        else:
+            ledger_updates.append(("camera", "main", "state", camera_payload))
 
     if not ledger_updates:
         raise ValueError("camera reducer failed to build scoped ledger updates")
