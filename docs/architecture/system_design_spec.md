@@ -100,13 +100,13 @@ def dims_spec_from_payload(data: Mapping[str, object]) -> DimsSpec: ...
 - Target dataclasses (illustrative):
 ```
 @dataclass(frozen=True)
-class ViewState:
+class ViewBlock:
     mode: Literal["plane", "volume"]
     displayed_axes: Tuple[int, ...]
     ndim: int
 
 @dataclass(frozen=True)
-class AxisState:
+class AxisBlock:
     axis_id: int
     label: str
     role: str
@@ -116,15 +116,15 @@ class AxisState:
     displayed: bool
 
 @dataclass(frozen=True)
-class AxesState:
-    axes: Tuple[AxisState, ...]
+class AxesBlock:
+    axes: Tuple[AxisBlock, ...]
 
 @dataclass(frozen=True)
-class IndexState:
+class IndexBlock:
     value: Tuple[int, ...]
 
 @dataclass(frozen=True)
-class LodState:
+class LodBlock:
     level: int
     roi: Tuple[int, ...] | None
     policy: str | None

@@ -16,20 +16,14 @@
 - Lint/format: `make pre` or `pre-commit run -a` (ruff & format).
 - Build dist: `make dist` or `python -m build`.
 
-## Coding Style & Naming Conventions
-- Python ≥ 3.10, 4-space indentation, UTF-8.
-- Ruff enforces lint/format; run `pre-commit run -a` before pushing.
-- Imports: absolute only (relative imports are banned by config).
-- Naming: modules/functions `snake_case`, classes `PascalCase`, constants `UPPER_CASE`.
-- Docstrings use double quotes; keep public APIs typed.
-
-## Error Handling & Assertions
-- Prefer assertions for internal invariants within our code paths (e.g., required collaborators present, non-null results after initialization).
-- Keep defensive guards at subsystem boundaries only (e.g., WebSocket I/O, PyAV/FFmpeg decode, VT shim map/release) to avoid crashes from external/runtime variability.
-- Avoid broad `except Exception` blocks in the hot path; catch specific exceptions where feasible.
-- Normalize env var parsing via small helpers; do not sprinkle `try/except` per usage.
-- Resource lifecycles (e.g., VT pixel buffers) must be released in `finally` blocks when consumed.
-- Always log exceptions: use `logger.exception(...)` at subsystem boundaries; use `logger.debug(..., exc_info=True)` for hot-path recoverable cases.
+## Coding Style & Invariants
+- Python ≥ 3.10, 4-space indentation, UTF-8; ruff-enforced formatting.
+- Absolute imports only. Modules/functions `snake_case`, classes `PascalCase`, constants `UPPER_CASE`.
+- No defensive programming in core paths:
+  - No `try/except` unless crossing subsystem boundaries (I/O, external libs). Inside our code we assert invariants instead.
+  - No `getattr`/`hasattr`, `tuple(...)`, `float(...)`, or “just in case” `None` checks when the caller already guarantees shape. Use direct assignment. If a value is wrong, let it explode.
+  - No `# type: ignore` band-aids in core modules; design the types (TypedDicts, dataclasses) so the compiler knows what we’re doing. If mypy complains and the schema is correct, prefer removing the annotation over sprinkling ignores.
+- Logging: use `logger.exception(...)` at subsystem boundaries only; avoid chatty logging in hot paths.
 
 ## Testing Guidelines
 - Framework: `pytest` with config in `pyproject.toml` (strict markers, warnings-as-errors for napari).
@@ -45,3 +39,21 @@
 ## Security & Configuration Tips
 - Copy env: `cp .env.example .env`. On headless GPU hosts: set `QT_QPA_PLATFORM=offscreen` and `PYOPENGL_PLATFORM=egl`; configure `CUDA_VISIBLE_DEVICES` as needed.
 - Prefer `uv` for all commands to ensure consistent environments.
+
+## Current Focus (2025-11-10)
+- Migrating the legacy `dims_spec + planner/mailbox` pipeline to the factored
+  `view / axes / index / lod / camera / layers` ledger design.
+- Reference plan: `docs/architecture/view_axes_index_plan.md` (call-stack
+  diagrams + phased issue breakdown). Use it as the source of truth for scope
+  and sequencing.
+- Phase 0 progress:
+  - Ledger module moved to `src/napari_cuda/server/ledger.py` (single module;
+    update imports here going forward).
+- Upcoming phases:
+  1. **Scene blocks scaffolding** — add `scene/blocks/` dataclasses +
+     serializers for the new scopes; dual-write from reducers behind a flag.
+  2. **Consumer flip** — teach notify builders, snapshots, and worker apply
+     code to consume the new blocks with per-block signatures.
+  3. **Legacy removal** — delete `ViewportPlanner`, `RenderUpdateMailbox`,
+     `PlaneState`/`VolumeState`, and redundant notify/multiscale fields once
+     the new scopes are authoritative everywhere.
