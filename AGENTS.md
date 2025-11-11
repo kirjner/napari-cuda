@@ -57,3 +57,15 @@
   3. **Legacy removal** — delete `ViewportPlanner`, `RenderUpdateMailbox`,
      `PlaneState`/`VolumeState`, and redundant notify/multiscale fields once
      the new scopes are authoritative everywhere.
+
+## IMMEDIATE NEXT GOAL
+
+Implement ledger‑driven restore and block consumption under the feature flag:
+
+- Persist per‑mode RestoreCaches on the ledger so view toggles are single‑pass:
+  - `restore_cache.plane.state`: `{ level: int, index: tuple[int,...], pose: {rect,center,zoom} }`
+  - `restore_cache.volume.state`: `{ level: int, index: tuple[int,...], pose: {center,angles,distance,fov} }`
+  - Define TypedDicts/dataclasses in `src/napari_cuda/server/scene/blocks/restore.py` and dual‑write them from current reducer/worker paths.
+- Update view toggle handler (flag on): write `ViewBlock` then copy the target mode’s RestoreCache into authoritative blocks (`LodBlock.level`, `IndexBlock.value`, `CameraBlock.*`) in a single transaction.
+- Add parity tests to assert toggles set blocks from caches and notify payloads are unchanged; keep legacy scopes for compatibility until Phase 3.
+- Keep minimal worker‑side caches (PlaneViewportCache/VolumeViewportCache) only for real‑time deltas, ROI hysteresis, and per‑block signature diffing.

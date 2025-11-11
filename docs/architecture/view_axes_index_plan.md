@@ -156,9 +156,41 @@ Outstanding Phase 1 work:
    `DimsSpec` / cached pose fields (axes metadata, current index, margins, camera
    pose).
 2. Teach `snapshot_viewport_state` / `build_notify_scene_payload` to read the new
-   ledger keys first, with fallbacks for legacy scopes.
-3. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
+   ledger keys when the flag is set, while legacy scopes remain in place for the
+   off-path.
+3. Rename the worker-side caches to **PlaneViewportCache** / **VolumeViewportCache**
+   (formerly `PlaneState` / `VolumeState`) to make it explicit that these structs
+   live only in-memory on the worker for restore/autoframe toggles. They do not
+   need dedicated ledger scopes—the ledger remains the source of the currently
+   requested state (view/axes/index/lod/camera blocks), while the worker keeps
+   the per-mode “last applied” state internally.
+4. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
    the protocol docs so consumers know where to look once the flag flips.
 
 Only after those items land should we begin Phase 2 (wiring notify builders and
 the worker to consume the block ledger).
+
+Restore Flow (Current → Target)
+-------------------------------
+
+Current (legacy planner/mailbox)
+- Control: `reduce_view_update` toggles mode; handlers read `viewport.plane/volume.state`
+  and call `reduce_*_restore` with cached pose/level/index.
+- Worker: applies snapshots, emits intents back for applied camera (`origin="worker.state.camera"`)
+  and level decisions (`origin="worker.state.level"`).
+- Ledger: becomes authoritative only after those reducers run; notify/render consume ledger then.
+
+Target (ledger‑driven, single‑pass on toggle)
+- Persist per‑mode restore caches on the ledger so toggles don’t need a second pass:
+  - `restore_cache.plane.state` → `{ level: int, index: tuple[int,...], pose: {rect,center,zoom}, optional: roi_signature, zoom_hint }`
+  - `restore_cache.volume.state` → `{ level: int, index: tuple[int,...], pose: {center,angles,distance,fov}, optional: roi_signature }`
+- Control (flag on): `reduce_view_update` writes `ViewBlock` and then copies the target mode’s
+  restore cache into the authoritative blocks (`LodBlock.level`, `IndexBlock.value`, `CameraBlock.*`) in one transaction.
+- Worker: still maintains minimal in‑memory caches for real‑time deltas, ROI hysteresis, and signature diffing,
+  but no longer needs to “confirm” restore for toggles. It can continue to emit camera/level intents as telemetry.
+- Notify/render: read the authoritative blocks immediately after the toggle and render atomically.
+
+Notes
+- If the restore caches are not persisted on the ledger, toggles become a two‑pass handshake
+  (request → worker apply → worker intent back → control writes authoritative blocks). Persisting the caches
+  avoids this roundtrip and keeps toggles single‑pass.

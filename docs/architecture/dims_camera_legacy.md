@@ -184,9 +184,12 @@ Key Dependencies to Untangle
    (`render_loop/applying/*`), the `ViewportPlanner`, and notification payloads.
 2. **ActiveView coupling** — worker, mirrors, and ledger all rely on
   `viewport.active.state` to answer “plane vs volume” and “current level”.
-3. **Plane/volume cached state** — reducers stash `PlaneState`/`VolumeState`
-   copies in the ledger so subsequent intents know whether a level/ROI reload is
-   pending.
+3. **Plane/volume cached state** — reducers stash the worker’s
+   **PlaneViewportCache** / **VolumeViewportCache** (formerly `PlaneState` /
+   `VolumeState`) in the ledger today so subsequent intents know whether a
+   level/ROI reload is pending. Once the worker consumes the block ledger
+   directly, these caches become purely in-memory on the worker and the ledger
+   entries go away.
 4. **Render snapshot shape** — everything downstream expects a
   `RenderLedgerSnapshot`. Changing the ledger schema implies updating that
   dataclass or replacing it entirely.
@@ -220,6 +223,28 @@ Migration Implications
 Use this catalog as the authoritative list of files to touch as we introduce the
 new schema. Every item above references the exact module that currently depends
 on the legacy dims/camera model.
+
+Restore Control Flow — Current vs Target
+---------------------------------------
+
+Current (planner/mailbox era)
+- Reducer toggles view (mode/ndisplay). Handlers consult `viewport.plane/volume.state` and
+  call `reduce_plane_restore` / `reduce_volume_restore` to commit pose/level/index.
+- Worker applies snapshots, then sends intents:
+  - `reduce_level_update(..., origin="worker.state.level")` for policy‑selected levels
+  - `reduce_camera_update(..., origin="worker.state.camera")` for applied camera deltas
+- Ledger becomes authoritative only after these reducers run; notify/render consume ledger state then.
+
+Target (ledger‑driven toggles; planner/mailbox removed)
+- Persist per‑mode restore caches on the ledger so toggles can be single‑pass:
+  - `restore_cache.plane.state`: `{ level, index, pose(rect,center,zoom), optional roi_signature, zoom_hint }`
+  - `restore_cache.volume.state`: `{ level, index, pose(center,angles,distance,fov), optional roi_signature }`
+- On a mode toggle, control writes `ViewBlock` and copies the target cache into authoritative blocks:
+  `LodBlock.level`, `IndexBlock.value`, `CameraBlock.{plane|volume}` in a single transaction (with `scene.main.op_seq`).
+- Worker still maintains minimal in‑memory **PlaneViewportCache** / **VolumeViewportCache** for real‑time deltas,
+  ROI hysteresis, and per‑block signature diffing, but toggles no longer require a second pass.
+- If restore caches are not persisted, toggles fall back to a two‑pass handshake: request only → worker apply →
+  worker intent back → control writes authoritative blocks. Persisting the caches avoids this roundtrip.
 
 Legacy Surface Scheduled For Removal
 ------------------------------------
@@ -275,6 +300,15 @@ Track this list as you migrate so nothing lingers:
      `RenderUpdateMailbox`, `RenderZoomHint` (and the `set_scene_state`,
      `set_viewport_state`, `drain`, `record/consume_zoom_hint`,
      `append/drain_camera_ops`, `update_state_signature` methods).
+      *Future replacement:* once this entire planner/mailbox stack is removed,
+      the worker watches `scene.main.op_seq`, snapshots the block ledger on each
+      poke, and compares `{view, axes, index, lod, camera}` against its in-memory
+      PlaneViewportCache / VolumeViewportCache (renamed from `PlaneState` /
+      `VolumeState`). Plane↔volume toggles become: reducer writes the desired mode,
+      per-mode level/index, and pose into the blocks → worker sees the blocks
+      change → worker applies the appropriate mode using the cached pose for the
+      inactive mode. No server-side planner bookkeeping is required; restore
+      flows are entirely block-driven.
 6. **Worker apply façade built on Plane/Volume caches**
    - `src/napari_cuda/server/runtime/render_loop/applying/interface.py`:
      `RenderApplyInterface` (all viewport, camera, ROI, ledger, layer, and
