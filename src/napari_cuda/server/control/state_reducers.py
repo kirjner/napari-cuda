@@ -1881,6 +1881,7 @@ def reduce_camera_update(
     timestamp: Optional[float] = None,
     origin: str = "control.camera",
     metadata: Mapping[str, Any] = MappingProxyType({}),
+    bump_op_seq: bool = True,
 ) -> tuple[dict[str, Any], int]:
     if (
         center is None
@@ -1893,7 +1894,7 @@ def reduce_camera_update(
         raise ValueError("camera reducer requires at least one property")
 
     ts = _now(timestamp)
-    next_op_seq = _next_scene_op_seq(ledger)
+    next_op_seq = _next_scene_op_seq(ledger) if bump_op_seq else None
 
     metadata_dict = dict(metadata)
     include_metadata = bool(metadata_dict)

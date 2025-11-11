@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import (
     TYPE_CHECKING,
     Any,
+    Mapping,
     Optional,
 )
 
@@ -115,9 +116,11 @@ from napari_cuda.server.runtime.worker import (
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
     LayerVisualState,
+    PlaneViewportCache,
     RenderLedgerSnapshot,
     RenderMode,
     RenderUpdate,
+    VolumeViewportCache,
     pull_render_snapshot,
     snapshot_layer_controls,
     snapshot_multiscale_state,
@@ -126,6 +129,7 @@ from napari_cuda.server.scene import (
     snapshot_volume_state,
 )
 from napari_cuda.server.ledger import ServerStateLedger
+from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
 from napari_cuda.server.utils.websocket import safe_send
 from napari_cuda.server.control.state_reducers import reduce_thumbnail_capture
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
@@ -434,6 +438,9 @@ class EGLHeadlessServer:
         target = pose.target or "main"
         seq = int(pose.command_seq)
 
+        plane_cache: PlaneViewportCache | None = None
+        volume_cache: VolumeViewportCache | None = None
+
         with self._state_lock:
             if self._log_cam_debug:
                 logger.debug(
@@ -457,9 +464,23 @@ class EGLHeadlessServer:
                 rect=pose.rect,
                 origin="worker.state.camera",
                 metadata={"pose_seq": seq},
+                bump_op_seq=False,
             )
+            plane_cache = self._load_plane_cache()
+            volume_cache = self._load_volume_cache()
 
         # reducer call persists the pose for both plane and volume scopes
+
+        worker = self._worker
+        if worker is not None and plane_cache is not None and volume_cache is not None:
+            worker.enqueue_update(
+                RenderUpdate(
+                    scene_state=None,
+                    mode=None,
+                    plane_state=plane_cache,
+                    volume_state=volume_cache,
+                )
+            )
 
         self._schedule_coro(
             broadcast_camera_update(
@@ -696,6 +717,18 @@ class EGLHeadlessServer:
         except Exception:
             # Fail silent; we don't want logging issues to break the server
             pass
+
+    def _load_plane_cache(self) -> PlaneViewportCache:
+        entry = self._state_ledger.get("viewport", "plane", "state")
+        if entry is not None and isinstance(entry.value, Mapping):
+            return PlaneViewportCache(**dict(entry.value))
+        return PlaneViewportCache()
+
+    def _load_volume_cache(self) -> VolumeViewportCache:
+        entry = self._state_ledger.get("viewport", "volume", "state")
+        if entry is not None and isinstance(entry.value, Mapping):
+            return VolumeViewportCache(**dict(entry.value))
+        return VolumeViewportCache()
 
     def _refresh_scene_snapshot(self, render_state: Optional[RenderLedgerSnapshot] = None) -> None:
         worker = self._worker
@@ -1023,6 +1056,10 @@ class EGLHeadlessServer:
         )
         # Apply module-only debug after basicConfig so our handler takes precedence
         self._maybe_enable_debug_logger()
+        logger.info(
+            "ENABLE_VIEW_AXES_INDEX_BLOCKS=%s",
+            "on" if ENABLE_VIEW_AXES_INDEX_BLOCKS else "off",
+        )
         # Observe-only: resolve and log ServerConfig with visibility
         try:
             _cfg: ServerConfig = self._ctx.cfg
@@ -1126,62 +1163,6 @@ class EGLHeadlessServer:
             self._pixel_channel,
             config=self._pixel_config,
             metrics=self.metrics,
-        )
-
-    def _apply_worker_camera_pose(
-        self,
-        pose: CameraPoseApplied,
-    ) -> None:
-        target = pose.target or "main"
-        seq = int(pose.command_seq)
-
-        with self._state_lock:
-            if self._log_cam_debug:
-                logger.debug(
-                    "camera pose applied target=%s seq=%d center=%s zoom=%s angles=%s distance=%s fov=%s rect=%s",
-                    target,
-                    seq,
-                    pose.center,
-                    pose.zoom,
-                pose.angles,
-                pose.distance,
-                pose.fov,
-                pose.rect,
-            )
-            ack_state, _ = reduce_camera_update(
-                self._state_ledger,
-                center=pose.center,
-                zoom=pose.zoom,
-                angles=pose.angles,
-                distance=pose.distance,
-                fov=pose.fov,
-                rect=pose.rect,
-                origin="worker.state.camera",
-                metadata={"pose_seq": seq},
-            )
-
-        # Close any open op after camera commit so dims+level+camera are atomic for mirrors
-        op_state = self._state_ledger.get("scene", "main", "op_state")
-        if op_state is not None:
-            val = str(op_state.value)
-            if val == "open":
-                self._state_ledger.record_confirmed(
-                    "scene",
-                    "main",
-                    "op_state",
-                    "applied",
-                    origin="worker.state.camera",
-                )
-
-        self._schedule_coro(
-            broadcast_camera_update(
-                self,
-                mode="pose",
-                state=ack_state,
-                intent_id=None,
-                origin="worker.state.camera",
-            ),
-            "worker-camera-pose",
         )
 
     def _scene_snapshot_json(self) -> Optional[str]:

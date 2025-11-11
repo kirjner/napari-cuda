@@ -228,6 +228,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             consume_render_snapshot(worker, initial_snapshot)
             drain_scene_updates(worker)
             frame_state = pull_render_snapshot(server)
+            last_snapshot_op_seq = int(frame_state.op_seq) if isinstance(frame_state.op_seq, int) else 0
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
@@ -305,11 +306,14 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     bool(has_camera_deltas),
                     server._animate,
                 )
-                consume_render_snapshot(worker, frame_state)
-                server._ack_scene_op_if_open(
-                    frame_state=frame_state,
-                    origin="worker.render.apply",
-                )
+                current_op_seq = int(frame_state.op_seq) if isinstance(frame_state.op_seq, int) else 0
+                if current_op_seq != last_snapshot_op_seq:
+                    consume_render_snapshot(worker, frame_state)
+                    server._ack_scene_op_if_open(
+                        frame_state=frame_state,
+                        origin="worker.render.apply",
+                    )
+                    last_snapshot_op_seq = current_op_seq
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
                 thumbnail_state = frame_state

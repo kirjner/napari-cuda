@@ -75,6 +75,7 @@ Implement ledger‑driven restore and block consumption under the feature flag:
   - `restore_cache.volume.state`: `{ level: int, index: tuple[int,...], pose: {center,angles,distance,fov} }`
   - Define TypedDicts/dataclasses in `src/napari_cuda/server/scene/blocks/restore.py` and dual-write them from current reducer/worker paths.
 - View toggle transactions (flag on) write `ViewBlock` and copy the target mode’s RestoreCache into authoritative blocks (`LodBlock.level`, `IndexBlock.value`, `CameraBlock.*`) in a single pass.
+- Worker-issued camera poses now refresh the viewport caches without bumping `scene.op_seq`; next step is to flip `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1` in dev runs and confirm the block-backed camera consumers stay jitter-free before cutting over permanently.
 - Next step: begin the Phase 2 consumer flip—teach `snapshot_scene_blocks` (the block-focused successor to `snapshot_viewport_state`), notify builders, and worker apply paths to read the block scopes when the flag is enabled while legacy keys remain for compatibility.
 - Once block-backed consumers are proven, plan the Phase 3 rename where `viewport_state`
   metadata is replaced entirely by the scene block payloads (view/index/lod/camera) so we can
