@@ -66,22 +66,14 @@
 
 ## IMMEDIATE NEXT GOAL
 
-Phase 3 cleanup: remove the remaining legacy viewport/camera scopes now that the worker
-and state-channel paths consume the block ledger directly (tests already seed blocks +
-restore caches via reducers; remaining work is render-loop + worker apply only).
+Phase 3 cleanup (render-loop convergence):
 
-- `_op_seq_watcher_apply_snapshot` now re-pulls and reapplies a *fresh* ledger snapshot
-  whenever block signatures change. This fixes the camera-orbit jitter seen when
-  `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1` (worker poses no longer replay stale snapshots)
-  and keeps `{view, axes, index, lod, camera}` authoritative during Phase 3.
-  - Follow-up: collapse the render loop to a single authoritative snapshot per tick (or
-    operate directly on `SceneBlockSnapshot`) so the watcher no longer double-pulls the ledger.
-
-- Reducers/transactions no longer write `viewport.*` or `camera_plane/camera_volume` scopes;
-  they emit `{view, axes, index, lod, camera}` plus restore caches only.
-
-Next steps:
-- Update docs/tests to reflect the block-only ledger (restore caches + `camera.main.state`).
-- Flip `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` on by default once tests/apply paths are fully
-  block-native, then delete the dead branches.
-- Finish the render-loop cleanup noted above.
+- Worker/runtime must operate on a single authoritative `SceneBlockSnapshot` per tick.
+  - Reuse the snapshot pulled for apply/telemetry instead of double-pulling.
+  - Collapse `_apply_snapshot` and `apply_render_snapshot` into a single `RenderInterface`
+    that consumes `{view, axes, index, lod, camera}` + restore caches directly.
+- Once the block-native path is stable, delete `_plane_cache_from_snapshot` /
+  `_volume_cache_from_snapshot`, flip `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` on by default,
+  and remove the planner/mailbox remnants.
+- Keep docs/tests in sync with the block-only ledger (restore caches + `camera.main.state`
+  as the only pose source).

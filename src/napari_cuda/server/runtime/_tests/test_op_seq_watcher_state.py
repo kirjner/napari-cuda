@@ -125,13 +125,59 @@ def test_op_seq_watcher_uses_existing_block_snapshot(monkeypatch: pytest.MonkeyP
         "napari_cuda.server.runtime.worker.lifecycle.fetch_scene_blocks",
         _fail_fetch,
     )
-
     result = _op_seq_watcher_apply_snapshot(
         server=SimpleNamespace(),
         worker=worker,  # type: ignore[arg-type]
         snapshot=snapshot,
         current_op_seq=1,
+        blocks=blocks,
     )
 
     assert result is snapshot
     assert consumed == [snapshot]
+
+
+def test_op_seq_watcher_accepts_cached_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    blocks = _sample_scene_blocks()
+    snapshot = RenderLedgerSnapshot(op_seq=1, block_snapshot=None)
+    worker = SimpleNamespace(_ledger=object(), _op_seq_watcher_state=None)
+
+    def _fail_fetch(_ledger) -> SceneBlockSnapshot:
+        raise AssertionError("fetch_scene_blocks must not run when cached blocks are provided")
+
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.worker.lifecycle.fetch_scene_blocks",
+        _fail_fetch,
+    )
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.worker.lifecycle.consume_render_snapshot",
+        lambda *args, **kwargs: None,
+    )
+
+    result = _op_seq_watcher_apply_snapshot(
+        server=SimpleNamespace(),
+        worker=worker,  # type: ignore[arg-type]
+        snapshot=snapshot,
+        current_op_seq=2,
+        blocks=blocks,
+    )
+
+    assert result is snapshot
+
+
+def test_op_seq_watcher_requires_blocks_when_flag_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    snapshot = RenderLedgerSnapshot(op_seq=3, block_snapshot=None)
+    worker = SimpleNamespace(_ledger=object(), _op_seq_watcher_state=None)
+
+    monkeypatch.setattr(
+        "napari_cuda.server.runtime.worker.lifecycle.ENABLE_VIEW_AXES_INDEX_BLOCKS",
+        True,
+    )
+
+    with pytest.raises(AssertionError):
+        _op_seq_watcher_apply_snapshot(
+            server=SimpleNamespace(),
+            worker=worker,  # type: ignore[arg-type]
+            snapshot=snapshot,
+            current_op_seq=3,
+        )

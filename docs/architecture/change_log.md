@@ -2,6 +2,26 @@
 
 Tracks intentional updates to the architecture spec and the authoritative modules. Add new entries (date-descending) with links to the implemented sections/files so future sessions can pick up immediately.
 
+# 2025-11-12 — SceneBlockSnapshot now authoritative
+
+### Runtime
+- `SceneBlockSnapshot` carries `{view, axes, index, lod, camera}` plus plane/volume restore caches;
+  every `RenderLedgerSnapshot` attaches the typed block bundle. Worker op-seq watcher and apply paths
+  now reuse that bundle instead of fetching/scattering pose data from legacy scopes.
+- Block snapshots hydrate the worker’s plane/volume caches; legacy `_plane_cache_from_snapshot` /
+  `_volume_cache_from_snapshot` remain only as fallbacks when a restore cache is incomplete during bootstrap.
+- `apply_render_snapshot` accepts the block bundle, making it possible to delete `_apply_snapshot` and
+  `RenderLedgerSnapshot` once the single-snapshot-per-tick path lands.
+
+### Next steps
+- Collapse `_apply_snapshot` + `apply_render_snapshot` into a single `RenderInterface` that consumes the block bundle directly.
+- Remove `_plane_cache_from_snapshot`/`_volume_cache_from_snapshot` and flip
+  `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` on by default once the consolidated apply path is stable.
+- Delete `RenderLedgerSnapshot` and the staging module after the interfaces converge; update docs/tests to
+  treat `SceneBlockSnapshot` as the only runtime payload.
+- Replace `LayerVisualState` with a typed `LayerBlock` so layer deltas travel alongside the other scene blocks
+  and the legacy snapshot data model can be removed entirely.
+
 # 2025-11-12 — Remove legacy viewport/camera ledger scopes
 
 ### Runtime & Control
