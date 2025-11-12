@@ -231,6 +231,7 @@ def setup_worker_runtime(
     worker._camera_queue = camera_queue  # type: ignore[attr-defined]
     worker._state_lock = threading.RLock()  # type: ignore[attr-defined]
     worker._render_mailbox = RenderUpdateMailbox()  # type: ignore[attr-defined]
+    worker._op_seq_watcher_state = None  # type: ignore[attr-defined]
     worker._last_ensure_log = None  # type: ignore[attr-defined]
     worker._last_ensure_log_ts = 0.0  # type: ignore[attr-defined]
     worker._render_tick_required = False  # type: ignore[attr-defined]

@@ -239,3 +239,35 @@ def test_render_snapshot_prefers_camera_block_when_enabled(monkeypatch: pytest.M
     assert snapshot.volume_angles == block.volume.angles
     assert snapshot.volume_distance == block.volume.distance
     assert snapshot.volume_fov == block.volume.fov
+
+
+def test_fetch_scene_blocks_returns_typed_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable_block_writes(monkeypatch)
+    ledger = _bootstrap_ledger()
+
+    camera_block = CameraBlock(
+        plane=PlaneCameraBlock(
+            rect=(0.0, 0.0, 10.0, 20.0),
+            center=(5.0, 6.0),
+            zoom=1.5,
+        ),
+        volume=VolumeCameraBlock(
+            center=(1.0, 2.0, 3.0),
+            angles=(30.0, 15.0, 5.0),
+            distance=25.0,
+            fov=45.0,
+        ),
+    )
+    ledger.record_confirmed(
+        "camera",
+        "main",
+        "state",
+        camera_block_to_payload(camera_block),
+        origin="test.fetch.camera",
+    )
+
+    blocks = scene_builders.fetch_scene_blocks(ledger)
+    assert blocks.view.mode in {"plane", "volume"}
+    assert isinstance(blocks.camera, CameraBlock)
+    assert tuple(blocks.camera.plane.center or ()) == camera_block.plane.center
+    assert tuple(blocks.camera.volume.center or ()) == camera_block.volume.center

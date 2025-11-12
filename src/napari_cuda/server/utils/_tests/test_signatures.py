@@ -3,14 +3,31 @@ from __future__ import annotations
 from dataclasses import replace
 
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
+from napari_cuda.server.scene.blocks import (
+    AxisBlock,
+    AxisExtentBlock,
+    AxesBlock,
+    CameraBlock,
+    IndexBlock,
+    LodBlock,
+    PlaneCameraBlock,
+    ViewBlock,
+    VolumeCameraBlock,
+)
 from napari_cuda.shared.dims_spec import AxisExtent, DimsSpec, DimsSpecAxis
 from napari_cuda.server.utils.signatures import (
     SignatureToken,
+    axes_block_signature,
+    camera_block_signature,
     dims_content_signature,
+    index_block_signature,
     layer_content_signature,
     layer_inputs_signature,
+    layers_block_signature,
+    lod_block_signature,
     scene_content_signature,
     snapshot_versions,
+    view_block_signature,
 )
 
 
@@ -171,3 +188,68 @@ def test_snapshot_versions_apply_updates_mapping() -> None:
     assert cache[("multiscale", "main", "level")] == 5
     assert cache[("camera_plane", "main", "zoom")] == 6
     assert cache[("camera_volume", "main", "fov")] == 7
+
+
+def test_layers_block_signature_sorts_layer_ids() -> None:
+    layers_a = {
+        "layer-b": LayerVisualState(layer_id="layer-b", visible=True),
+        "layer-a": LayerVisualState(layer_id="layer-a", opacity=0.5),
+    }
+    layers_b = {
+        "layer-a": LayerVisualState(layer_id="layer-a", opacity=0.5),
+        "layer-b": LayerVisualState(layer_id="layer-b", visible=True),
+    }
+    token_a = layers_block_signature(layers_a)
+    token_b = layers_block_signature(layers_b)
+    assert token_a.value == token_b.value
+
+
+def test_view_block_signature_changes_when_axes_change() -> None:
+    block = ViewBlock(mode="plane", displayed_axes=(0, 1), ndim=2)
+    token = view_block_signature(block)
+    updated = view_block_signature(ViewBlock(mode="volume", displayed_axes=(0, 1, 2), ndim=3))
+    assert updated.changed(token)
+
+
+def test_axes_block_signature_includes_extent_metadata() -> None:
+    axes = AxesBlock(
+        axes=(
+            AxisBlock(
+                axis_id=0,
+                label="z",
+                role="depth",
+                displayed=True,
+                world_extent=AxisExtentBlock(start=0.0, stop=10.0, step=1.0),
+                margin_left_world=0.0,
+                margin_right_world=0.0,
+            ),
+        )
+    )
+    token = axes_block_signature(axes)
+    replay = axes_block_signature(axes)
+    assert token.value == replay.value
+
+
+def test_index_and_lod_block_signatures_cover_core_fields() -> None:
+    index_token = index_block_signature(IndexBlock(value=(1, 2, 3)))
+    new_index_token = index_block_signature(IndexBlock(value=(1, 2, 4)))
+    assert new_index_token.changed(index_token)
+
+    lod_token = lod_block_signature(LodBlock(level=1, roi=(1, 2), policy="roi"))
+    no_roi_token = lod_block_signature(LodBlock(level=1, roi=None, policy="roi"))
+    assert no_roi_token.changed(lod_token)
+
+
+def test_camera_block_signature_changes_for_plane_pose() -> None:
+    block = CameraBlock(
+        plane=PlaneCameraBlock(rect=(0.0, 0.0, 5.0, 6.0), center=(1.0, 2.0), zoom=1.5),
+        volume=VolumeCameraBlock(center=(0.0, 0.0, 0.0), angles=(0.0, 0.0, 0.0), distance=10.0, fov=45.0),
+    )
+    token = camera_block_signature(block)
+    updated = camera_block_signature(
+        CameraBlock(
+            plane=PlaneCameraBlock(rect=(0.0, 0.0, 5.0, 6.0), center=(2.0, 3.0), zoom=1.5),
+            volume=block.volume,
+        )
+    )
+    assert updated.changed(token)

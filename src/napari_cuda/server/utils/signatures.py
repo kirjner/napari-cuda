@@ -6,6 +6,13 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Mapping, MutableMapping, Optional, Tuple
 
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
+from napari_cuda.server.scene.blocks import (
+    AxesBlock,
+    CameraBlock,
+    IndexBlock,
+    LodBlock,
+    ViewBlock,
+)
 
 SignatureTuple = Tuple[Any, ...]
 VersionKey = Tuple[str, str, str]
@@ -84,6 +91,20 @@ def layer_content_signature(state: LayerVisualState) -> SignatureToken:
     keys = tuple(sorted(state.keys()))
     items = tuple((str(key), _canon(state.get(key))) for key in keys)
     return SignatureToken(items)
+
+
+def layers_block_signature(
+    layers: Mapping[str, LayerVisualState] | None,
+) -> SignatureToken:
+    """Signature describing the rendered layer set."""
+
+    if not layers:
+        return SignatureToken(("layers", ()))
+    entries = tuple(
+        (str(layer_id), layer_content_signature(state).value)
+        for layer_id, state in sorted(layers.items())
+    )
+    return SignatureToken(("layers", entries))
 
 
 # ---------------------------------------------------------------------------
@@ -311,13 +332,109 @@ def _normalize_visual_value(value: Any) -> Any:
     return value
 
 
+# ---------------------------------------------------------------------------
+# Block signatures
+
+
+def view_block_signature(block: ViewBlock) -> SignatureToken:
+    return SignatureToken(
+        (
+            "view",
+            str(block.mode),
+            tuple(int(axis) for axis in block.displayed_axes),
+            int(block.ndim),
+        )
+    )
+
+
+def axes_block_signature(block: AxesBlock | None) -> SignatureToken:
+    if block is None:
+        return SignatureToken(("axes", ()))
+    axes_entries: list[tuple[Any, ...]] = []
+    for axis in block.axes:
+        extent = axis.world_extent
+        axes_entries.append(
+            (
+                int(axis.axis_id),
+                str(axis.label),
+                str(axis.role),
+                bool(axis.displayed),
+                (extent.start, extent.stop, extent.step),
+                axis.margin_left_world,
+                axis.margin_right_world,
+            )
+        )
+    axes_tuple = tuple(axes_entries)
+    return SignatureToken(("axes", axes_tuple))
+
+
+def index_block_signature(block: IndexBlock | None) -> SignatureToken:
+    if block is None:
+        return SignatureToken(("index", ()))
+    return SignatureToken(("index", tuple(int(v) for v in block.value)))
+
+
+def lod_block_signature(block: LodBlock | None) -> SignatureToken:
+    if block is None:
+        return SignatureToken(("lod", None))
+    roi_tuple = None
+    if block.roi is not None:
+        roi_tuple = tuple(int(v) for v in block.roi)
+    policy_value = None
+    if block.policy is not None:
+        policy_value = str(block.policy)
+    token = ("lod", int(block.level), roi_tuple, policy_value)
+    return SignatureToken(token)
+
+
+def camera_block_signature(block: CameraBlock) -> SignatureToken:
+    plane = block.plane
+    volume = block.volume
+    plane_rect = None
+    if plane.rect is not None:
+        plane_rect = tuple(float(value) for value in plane.rect)
+    plane_center = None
+    if plane.center is not None:
+        plane_center = tuple(float(value) for value in plane.center)
+    plane_zoom = None
+    if plane.zoom is not None:
+        plane_zoom = float(plane.zoom)
+
+    volume_center = None
+    if volume.center is not None:
+        volume_center = tuple(float(value) for value in volume.center)
+    volume_angles = None
+    if volume.angles is not None:
+        volume_angles = tuple(float(value) for value in volume.angles)
+    volume_distance = None
+    if volume.distance is not None:
+        volume_distance = float(volume.distance)
+    volume_fov = None
+    if volume.fov is not None:
+        volume_fov = float(volume.fov)
+
+    return SignatureToken(
+        (
+            "camera",
+            (plane_rect, plane_center, plane_zoom),
+            (volume_center, volume_angles, volume_distance, volume_fov),
+        )
+    )
+
+
 __all__ = [
     "SignatureToken",
     "VersionGate",
     "scene_content_signature",
     "layer_inputs_signature",
     "layer_content_signature",
+    "layers_block_signature",
     "dims_content_signature",
     "dims_content_signature_from_payload",
     "snapshot_versions",
+    "view_block_signature",
+    "axes_block_signature",
+    "index_block_signature",
+    "lod_block_signature",
+    "camera_block_signature",
 ]

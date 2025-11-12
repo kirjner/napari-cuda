@@ -83,24 +83,27 @@ __all__ = [
     "CONTROL_KEYS",
     "CameraDeltaCommand",
     "build_ledger_snapshot",
+    "SceneBlockSnapshot",
+    "fetch_scene_blocks",
     "default_volume_state",
     "pull_render_snapshot",
     "snapshot_layer_controls",
     "snapshot_multiscale_state",
     "snapshot_render_state",
     "snapshot_scene",
+    "scene_blocks_from_snapshot",
     "snapshot_scene_blocks",
     "snapshot_volume_state",
 ]
 
 
 @dataclass(frozen=True)
-class _SceneBlockSnapshot:
+class SceneBlockSnapshot:
     view: ViewBlock
     axes: AxesBlock | None
     index: IndexBlock | None
     lod: LodBlock | None
-    camera: CameraBlock | None
+    camera: CameraBlock
 
 
 # ---------------------------------------------------------------------------
@@ -167,9 +170,9 @@ def snapshot_multiscale_state(
     return state
 
 
-def _scene_blocks_from_snapshot(
+def scene_blocks_from_snapshot(
     snapshot: Mapping[tuple[str, str, str], LedgerEntry],
-) -> _SceneBlockSnapshot | None:
+) -> SceneBlockSnapshot | None:
     view_entry = snapshot.get(("view", "main", "state"))
     if view_entry is None or view_entry.value is None:
         return None
@@ -194,13 +197,43 @@ def _scene_blocks_from_snapshot(
     assert camera_entry is not None and camera_entry.value is not None, "camera block missing under feature flag"
     camera_block = camera_block_from_payload(camera_entry.value)
 
-    return _SceneBlockSnapshot(
+    return SceneBlockSnapshot(
         view=view_block,
         axes=axes_block,
         index=index_block,
         lod=lod_block,
         camera=camera_block,
     )
+
+
+def fetch_scene_blocks(ledger: ServerStateLedger) -> SceneBlockSnapshot:
+    """Fetch the typed block snapshot directly from the ledger."""
+
+    snapshot_map: dict[tuple[str, str, str], LedgerEntry] = {}
+
+    def _require(scope: str, target: str, key: str) -> LedgerEntry:
+        entry = ledger.get(scope, target, key)
+        assert entry is not None and entry.value is not None, f"{scope}.{target}.{key} missing from ledger"
+        snapshot_map[(scope, target, key)] = entry
+        return entry
+
+    _require("view", "main", "state")
+    # Optional blocks (axes/index/lod) may be absent when feature flag is off; add if present.
+    axes_entry = ledger.get("axes", "main", "state")
+    if axes_entry is not None and axes_entry.value is not None:
+        snapshot_map[("axes", "main", "state")] = axes_entry
+    index_entry = ledger.get("index", "main", "cursor")
+    if index_entry is not None and index_entry.value is not None:
+        snapshot_map[("index", "main", "cursor")] = index_entry
+    lod_entry = ledger.get("lod", "main", "state")
+    if lod_entry is not None and lod_entry.value is not None:
+        snapshot_map[("lod", "main", "state")] = lod_entry
+
+    _require("camera", "main", "state")
+
+    blocks = scene_blocks_from_snapshot(snapshot_map)
+    assert blocks is not None, "scene blocks snapshot missing required payloads"
+    return blocks
 
 
 def snapshot_render_state(
@@ -331,20 +364,22 @@ def snapshot_scene_blocks(
     """Extract block-scoped viewport data from the ledger snapshot."""
 
     if ENABLE_VIEW_AXES_INDEX_BLOCKS:
-        block_snapshot = _scene_blocks_from_snapshot(snapshot)
+        block_snapshot = scene_blocks_from_snapshot(snapshot)
         assert block_snapshot is not None, "scene blocks snapshot missing under feature flag"
         payload: dict[str, Any] = {
             "mode": block_snapshot.view.mode.upper(),
             "view": view_block_to_payload(block_snapshot.view),
         }
-        if block_snapshot.axes is not None:
-            payload["axes"] = axes_to_payload(block_snapshot.axes)
-        if block_snapshot.index is not None:
-            payload["index"] = index_block_to_payload(block_snapshot.index)
-        if block_snapshot.lod is not None:
-            payload["lod"] = lod_block_to_payload(block_snapshot.lod)
-        if block_snapshot.camera is not None:
-            payload["camera"] = camera_block_to_payload(block_snapshot.camera)
+        payload["axes"] = (
+            axes_to_payload(block_snapshot.axes) if block_snapshot.axes is not None else None
+        )
+        payload["index"] = (
+            index_block_to_payload(block_snapshot.index) if block_snapshot.index is not None else None
+        )
+        payload["lod"] = (
+            lod_block_to_payload(block_snapshot.lod) if block_snapshot.lod is not None else None
+        )
+        payload["camera"] = camera_block_to_payload(block_snapshot.camera) if block_snapshot.camera is not None else None
         return payload
 
     return _legacy_viewport_state(snapshot)
@@ -774,19 +809,49 @@ def build_ledger_snapshot(
     assert dims_spec is not None, "dims spec ledger entry missing payload"
     validate_ledger_against_dims_spec(dims_spec, snapshot)
     active_view = _active_view_state(snapshot)
-    blocks_snapshot: _SceneBlockSnapshot | None = None
+    blocks_snapshot: SceneBlockSnapshot | None = None
     if ENABLE_VIEW_AXES_INDEX_BLOCKS:
-        blocks_snapshot = _scene_blocks_from_snapshot(snapshot)
+        blocks_snapshot = scene_blocks_from_snapshot(snapshot)
         assert blocks_snapshot is not None, "scene blocks snapshot missing under feature flag"
 
-    plane_center_tuple = _ledger_value(snapshot, "camera_plane", "main", "center")
-    plane_zoom_float = _ledger_value(snapshot, "camera_plane", "main", "zoom")
-    plane_rect_tuple = _ledger_value(snapshot, "camera_plane", "main", "rect")
+    plane_center_tuple = None
+    plane_zoom_float = None
+    plane_rect_tuple = None
 
-    volume_center_tuple = _ledger_value(snapshot, "camera_volume", "main", "center")
-    volume_angles_tuple = _ledger_value(snapshot, "camera_volume", "main", "angles")
-    volume_distance_float = _ledger_value(snapshot, "camera_volume", "main", "distance")
-    volume_fov_float = _ledger_value(snapshot, "camera_volume", "main", "fov")
+    volume_center_tuple = None
+    volume_angles_tuple = None
+    volume_distance_float = None
+    volume_fov_float = None
+
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        assert blocks_snapshot is not None, "scene blocks snapshot missing under feature flag"
+        camera_block = blocks_snapshot.camera
+        assert camera_block is not None, "scene blocks snapshot missing camera block"
+        plane_block = camera_block.plane
+        volume_block = camera_block.volume
+        if plane_block.center is not None:
+            plane_center_tuple = tuple(float(v) for v in plane_block.center)
+        if plane_block.zoom is not None:
+            plane_zoom_float = plane_block.zoom
+        if plane_block.rect is not None:
+            plane_rect_tuple = tuple(float(v) for v in plane_block.rect)
+        if volume_block.center is not None:
+            volume_center_tuple = tuple(float(v) for v in volume_block.center)
+        if volume_block.angles is not None:
+            volume_angles_tuple = tuple(float(v) for v in volume_block.angles)
+        if volume_block.distance is not None:
+            volume_distance_float = volume_block.distance
+        if volume_block.fov is not None:
+            volume_fov_float = volume_block.fov
+    else:
+        plane_center_tuple = _ledger_value(snapshot, "camera_plane", "main", "center")
+        plane_zoom_float = _ledger_value(snapshot, "camera_plane", "main", "zoom")
+        plane_rect_tuple = _ledger_value(snapshot, "camera_plane", "main", "rect")
+
+        volume_center_tuple = _ledger_value(snapshot, "camera_volume", "main", "center")
+        volume_angles_tuple = _ledger_value(snapshot, "camera_volume", "main", "angles")
+        volume_distance_float = _ledger_value(snapshot, "camera_volume", "main", "distance")
+        volume_fov_float = _ledger_value(snapshot, "camera_volume", "main", "fov")
 
     current_step = tuple(int(v) for v in dims_spec.current_step)
     if ENABLE_VIEW_AXES_INDEX_BLOCKS:
@@ -815,27 +880,6 @@ def build_ledger_snapshot(
     volume_clim = _ledger_value(snapshot, "volume", "main", "contrast_limits")
     volume_opacity = _ledger_value(snapshot, "volume", "main", "opacity")
     volume_sample_step = _ledger_value(snapshot, "volume", "main", "sample_step")
-    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
-        assert blocks_snapshot is not None, "scene blocks snapshot missing under feature flag"
-        camera_block = blocks_snapshot.camera
-        assert camera_block is not None, "scene blocks snapshot missing camera block"
-        plane_block = camera_block.plane
-        volume_block = camera_block.volume
-        if plane_block.center is not None:
-            plane_center_tuple = tuple(float(v) for v in plane_block.center)
-        if plane_block.zoom is not None:
-            plane_zoom_float = plane_block.zoom
-        if plane_block.rect is not None:
-            plane_rect_tuple = tuple(float(v) for v in plane_block.rect)
-        if volume_block.center is not None:
-            volume_center_tuple = tuple(float(v) for v in volume_block.center)
-        if volume_block.angles is not None:
-            volume_angles_tuple = tuple(float(v) for v in volume_block.angles)
-        if volume_block.distance is not None:
-            volume_distance_float = volume_block.distance
-        if volume_block.fov is not None:
-            volume_fov_float = volume_block.fov
-
     layer_raw_values: dict[str, dict[str, Any]] = {}
     layer_versions_raw: dict[str, dict[str, int]] = {}
     for (scope, target, key), entry in snapshot.items():

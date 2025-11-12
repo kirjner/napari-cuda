@@ -6,7 +6,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 
 from napari_cuda.server.engine.api import (
@@ -22,9 +22,19 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import (
 )
 from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
+from napari_cuda.server.runtime.render_loop.applying.apply import apply_render_snapshot
+from napari_cuda.server.runtime.render_loop.applying.drain import drain_render_state
+from napari_cuda.server.runtime.render_loop.applying.interface import RenderApplyInterface
+from napari_cuda.server.runtime.render_loop.planning.interface import RenderPlanInterface
 from napari_cuda.server.runtime.render_loop.planning.staging import (
     consume_render_snapshot,
     drain_scene_updates,
+    extract_layer_changes,
+    record_snapshot_versions,
+    _plane_cache_from_snapshot,
+    _plane_pose_complete,
+    _volume_cache_from_snapshot,
+    _volume_pose_complete,
 )
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import (
@@ -33,7 +43,18 @@ from napari_cuda.server.scene import (
 )
 import numpy as np
 from napari_cuda.server.runtime.ipc.mailboxes.worker_intent import ThumbnailCapture
-from napari_cuda.server.utils.signatures import layer_inputs_signature
+from napari_cuda.server.scene.builders import fetch_scene_blocks, SceneBlockSnapshot
+from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
+from napari_cuda.server.utils.signatures import (
+    SignatureToken,
+    axes_block_signature,
+    camera_block_signature,
+    index_block_signature,
+    layer_inputs_signature,
+    layers_block_signature,
+    lod_block_signature,
+    view_block_signature,
+)
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
 from .egl import EGLRendererWorker
@@ -225,8 +246,15 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 initial_snapshot = pull_render_snapshot(server)
             else:
                 server._bootstrap_snapshot = None  # type: ignore[attr-defined]
-            consume_render_snapshot(worker, initial_snapshot)
-            drain_scene_updates(worker)
+            use_op_seq_watcher = ENABLE_VIEW_AXES_INDEX_BLOCKS
+            if use_op_seq_watcher:
+                watcher_state = _OpSeqWatcherState()
+                worker._op_seq_watcher_state = watcher_state  # type: ignore[attr-defined]
+                _apply_snapshot_without_mailbox(worker, initial_snapshot)
+                _prime_op_seq_watcher(worker, initial_snapshot, watcher_state)
+            else:
+                consume_render_snapshot(worker, initial_snapshot)
+                drain_scene_updates(worker)
             frame_state = pull_render_snapshot(server)
             last_snapshot_op_seq = int(frame_state.op_seq) if isinstance(frame_state.op_seq, int) else 0
 
@@ -307,7 +335,15 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     server._animate,
                 )
                 current_op_seq = int(frame_state.op_seq) if isinstance(frame_state.op_seq, int) else 0
-                if current_op_seq != last_snapshot_op_seq:
+                if use_op_seq_watcher:
+                    applied = _op_seq_watcher_apply_snapshot(worker, frame_state, current_op_seq)
+                    if applied:
+                        server._ack_scene_op_if_open(
+                            frame_state=frame_state,
+                            origin="worker.render.apply",
+                        )
+                        last_snapshot_op_seq = current_op_seq
+                elif current_op_seq != last_snapshot_op_seq:
                     consume_render_snapshot(worker, frame_state)
                     server._ack_scene_op_if_open(
                         frame_state=frame_state,
@@ -425,3 +461,178 @@ def stop_worker(state: WorkerLifecycleState) -> None:
         thread.join(timeout=3.0)
     state.thread = None
     state.worker = None
+
+
+def _op_seq_watcher_apply_snapshot(
+    worker: EGLRendererWorker,
+    snapshot: RenderLedgerSnapshot,
+    current_op_seq: int,
+) -> bool:
+    watcher_state: _OpSeqWatcherState | None = getattr(worker, "_op_seq_watcher_state", None)
+    if watcher_state is None:
+        watcher_state = _OpSeqWatcherState()
+        worker._op_seq_watcher_state = watcher_state  # type: ignore[attr-defined]
+
+    ledger = getattr(worker, "_ledger", None)
+    assert ledger is not None, "worker ledger must be attached before rendering"
+    blocks: SceneBlockSnapshot = fetch_scene_blocks(ledger)
+    signatures = {
+        "view": view_block_signature(blocks.view),
+        "axes": axes_block_signature(blocks.axes),
+        "index": index_block_signature(blocks.index),
+        "lod": lod_block_signature(blocks.lod),
+        "camera": camera_block_signature(blocks.camera),
+        "layers": layers_block_signature(snapshot.layer_values),
+    }
+
+    changed = watcher_state.observe(
+        current_op_seq,
+        view=signatures["view"],
+        axes=signatures["axes"],
+        index=signatures["index"],
+        lod=signatures["lod"],
+        camera=signatures["camera"],
+        layers=signatures["layers"],
+    )
+    if not changed:
+        return False
+
+    _apply_snapshot_without_mailbox(worker, snapshot)
+    return True
+
+
+def _prime_op_seq_watcher(
+    worker: EGLRendererWorker,
+    snapshot: RenderLedgerSnapshot,
+    watcher_state: _OpSeqWatcherState,
+) -> None:
+    ledger = getattr(worker, "_ledger", None)
+    if ledger is None:
+        return
+    blocks: SceneBlockSnapshot = fetch_scene_blocks(ledger)
+    watcher_state.observe(
+        int(snapshot.op_seq) if isinstance(snapshot.op_seq, int) else 0,
+        view=view_block_signature(blocks.view),
+        axes=axes_block_signature(blocks.axes),
+        index=index_block_signature(blocks.index),
+        lod=lod_block_signature(blocks.lod),
+        camera=camera_block_signature(blocks.camera),
+        layers=layers_block_signature(snapshot.layer_values),
+    )
+
+
+def _apply_snapshot_without_mailbox(worker: EGLRendererWorker, snapshot: RenderLedgerSnapshot) -> None:
+    tick_iface = RenderPlanInterface(worker)
+    apply_iface = RenderApplyInterface(worker)
+
+    snapshot_op_seq = int(snapshot.op_seq) if isinstance(snapshot.op_seq, int) else 0
+    if snapshot_op_seq < int(tick_iface.viewport_state.op_seq):
+        logger.debug(
+            "op-seq watcher snapshot skipped: stale op_seq snapshot=%d latest=%d",
+            snapshot_op_seq,
+            int(tick_iface.viewport_state.op_seq),
+        )
+        return
+    tick_iface.viewport_state.op_seq = snapshot_op_seq
+
+    applied_versions = tick_iface.applied_versions
+    record_snapshot_versions(applied_versions, snapshot)
+    layer_changes = extract_layer_changes(applied_versions, snapshot)
+
+    state_for_apply = snapshot
+    if layer_changes:
+        state_for_apply = replace(snapshot, layer_values=layer_changes)
+    elif snapshot.layer_values is not None:
+        state_for_apply = replace(snapshot, layer_values=None)
+
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _plane_pose_complete(snapshot):
+        plane_state = _plane_cache_from_snapshot(snapshot)
+        tick_iface.viewport_state.plane = plane_state
+        if tick_iface.viewport_runner is not None:
+            tick_iface.viewport_runner._plane = plane_state  # type: ignore[attr-defined]
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _volume_pose_complete(snapshot):
+        tick_iface.viewport_state.volume = _volume_cache_from_snapshot(snapshot)
+
+    previous_mode = tick_iface.viewport_state.mode
+    next_mode = previous_mode
+    if snapshot.dims_mode is not None:
+        next_mode = RenderMode.VOLUME if snapshot.dims_mode.lower() == "volume" else RenderMode.PLANE
+
+    apply_render_snapshot(apply_iface, state_for_apply)
+
+    tick_iface.viewport_state.mode = next_mode
+    if tick_iface.viewport_state.mode is RenderMode.VOLUME:
+        tick_iface.level_policy_suppressed = False
+    elif previous_mode is RenderMode.VOLUME:
+        tick_iface.level_policy_suppressed = True
+
+    runner = tick_iface.viewport_runner
+    if runner is not None:
+        runner.ingest_snapshot(snapshot)
+
+    drain_res = drain_render_state(worker, state_for_apply)
+
+    if drain_res.z_index is not None:
+        apply_iface.set_z_index(int(drain_res.z_index))
+    if drain_res.data_wh is not None:
+        apply_iface.set_data_shape(int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
+
+    runner = tick_iface.viewport_runner
+    if runner is not None and tick_iface.viewport_state.mode is RenderMode.PLANE:
+        rect = tick_iface.current_panzoom_rect()
+        if rect is not None:
+            runner.update_camera_rect(rect)
+        if tick_iface.current_level_index() == int(runner.state.target_level):
+            runner.mark_level_applied(tick_iface.current_level_index())
+    elif runner is not None and tick_iface.current_level_index() == int(runner.state.target_level):
+        runner.mark_level_applied(tick_iface.current_level_index())
+
+    if (
+        drain_res.render_marked
+        and tick_iface.viewport_state.mode is not RenderMode.VOLUME
+        and not tick_iface.level_policy_suppressed
+    ):
+        tick_iface.evaluate_level_policy()
+
+    if tick_iface.level_policy_suppressed:
+        ledger = tick_iface.ledger
+        assert ledger is not None, "ledger must be attached before rendering"
+        op_kind_entry = ledger.get("scene", "main", "op_kind")
+        if op_kind_entry is not None and str(op_kind_entry.value) == "dims-update":
+            tick_iface.level_policy_suppressed = False
+@dataclass(slots=True)
+class _OpSeqWatcherState:
+    last_op_seq: int = -1
+    view_signature: SignatureToken | None = None
+    axes_signature: SignatureToken | None = None
+    index_signature: SignatureToken | None = None
+    lod_signature: SignatureToken | None = None
+    camera_signature: SignatureToken | None = None
+    layers_signature: SignatureToken | None = None
+
+    def observe(
+        self,
+        op_seq: int,
+        *,
+        view: SignatureToken,
+        axes: SignatureToken,
+        index: SignatureToken,
+        lod: SignatureToken,
+        camera: SignatureToken,
+        layers: SignatureToken,
+    ) -> bool:
+        changed = op_seq != self.last_op_seq
+        for attr, token in (
+            ("view_signature", view),
+            ("axes_signature", axes),
+            ("index_signature", index),
+            ("lod_signature", lod),
+            ("camera_signature", camera),
+            ("layers_signature", layers),
+        ):
+            previous = getattr(self, attr)
+            if previous is None or previous.value != token.value:
+                changed = True
+                setattr(self, attr, token)
+        self.last_op_seq = op_seq
+        return changed

@@ -127,7 +127,11 @@ Current Status (2025-11-10)
 
 - **Feature flag:** `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1` (see
   `scene/blocks/__init__.py::ENABLE_VIEW_AXES_INDEX_BLOCKS`) now switches on the
-  Phase 1 dual-write path. Reducers (
+  Phase 1 dual-write path **and** the Phase 3 op_seq watcher runtime. With the
+  flag enabled the worker bypasses `RenderUpdateMailbox`, watches `scene.main.op_seq`,
+  and applies `{view, axes, index, lod, camera, layers}` blocks directly via the
+  per-block signature cache introduced in `runtime/worker/lifecycle.py`.
+  Reducers (
   `src/napari_cuda/server/control/state_reducers.py`) write:
   - `view.main.state` (`ViewBlock`)
   - `axes.main.state` (`AxesBlock`)
@@ -145,11 +149,11 @@ Current Status (2025-11-10)
   level baseline is recorded as a snapshot; otherwise we seed the per-client
   sequencer before emitting the first delta. This keeps `notify.level` cursors in
   sync with the new ledger scopes.
-- **Parity guardrails:** `uv run pytest -q src/napari_cuda/server/tests/test_state_channel_updates.py`
-  passes with the flag both unset/set. This suite asserts that control-channel
-  baselines (`notify.scene`, `notify.layers`, `notify.stream`, `notify.dims`,
-  `notify.level`) remain identical even though reducers now dual-write the new
-  blocks.
+- **Parity guardrails:** targeted tests inside
+  `src/napari_cuda/server/tests/test_state_channel_updates.py` still pass with
+  the flag monkeypatched off/on. Now that all consumers read the block
+  payloads, we’re skipping the broader flag-matrix harness and instead moving
+  directly into Phase 3 cleanup so the block path becomes the only path.
 - **Restore cache helpers:** `state_reducers.py` now exposes `load_*_restore_cache`,
   `write_*_restore_cache`, and `_plane/_volume_cache_from_state`, and reducers
   (bootstrap, dims, camera, level, plane/volume restore) already dual-write
@@ -187,8 +191,31 @@ Outstanding Phase 1 work:
 4. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
    the protocol docs so consumers know where to look once the flag flips.
 
-Only after those items land should we begin Phase 2 (wiring notify builders and
-the worker to consume the block ledger).
+Phase 2 is now complete; all consumers read the block ledger under the flag.
+Phase 3 (in progress) removes the legacy planner/mailbox stack, deletes
+`viewport.*` / `camera_*` scopes, flips the feature flag on by default, and
+collapses notify/runtime code to the block schema only.
+
+Phase 3 work items (authoritative once this doc is updated again):
+1. **In progress – watcher landed behind the flag.** Remove the render-loop
+   mailbox/planner stack (`RenderUpdateMailbox`, `ViewportPlanner`, ledger-backed
+   `PlaneViewportCache` / `VolumeViewportCache` duplicates) so worker ticks hydrate
+   the viewer directly from the block snapshots every frame. _Implementation note:_
+   the op_seq watcher path already skips the mailbox; deleting the legacy classes
+   is now unblocked once we verify the flag-on runtime in production.
+2. Delete legacy ledger scopes (`viewport.plane/volume.state`,
+   `camera_plane.*`, `camera_volume.*`) and update reducers/transactions to
+   persist only the block payloads (plus restore caches while they still exist).
+   Prep checklist:
+   - inventory all imports of `PlaneViewportCache` / `VolumeViewportCache`
+     outside the worker (main offenders: `state_reducers.py`, `scene/builders.py`,
+     `tests/test_state_channel_updates.py`);
+   - map every `ledger.get("viewport", ...)` use site so we can swap them to
+     `fetch_scene_blocks` / block payloads;
+   - confirm notify builders no longer read `camera_plane` / `camera_volume`.
+3. Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default, strip the flag-off
+   branches from scene builders/notify/runtime, and refresh docs/tests/CI to
+   assume the block schema is the sole path.
 
 Restore Flow (Current → Target)
 -------------------------------
