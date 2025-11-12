@@ -93,9 +93,6 @@ def apply_plane_restore_transaction(
         [
             ("multiscale", "main", "level", level_idx),
             ("dims", "main", "current_step", step_tuple),
-            ("camera_plane", "main", "center", plane_center_tuple),
-            ("camera_plane", "main", "zoom", zoom_value),
-            ("camera_plane", "main", "rect", rect_tuple),
         ]
     )
     if extra_entries is not None:

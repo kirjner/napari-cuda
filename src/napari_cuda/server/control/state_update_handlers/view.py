@@ -8,12 +8,9 @@ from typing import Any, Mapping, Optional, TYPE_CHECKING
 from napari_cuda.server.control.state_reducers import (
     load_plane_restore_cache,
     load_volume_restore_cache,
-    reduce_plane_restore,
     reduce_view_update,
-    reduce_volume_restore,
 )
 from napari_cuda.server.scene.blocks import (
-    ENABLE_VIEW_AXES_INDEX_BLOCKS,
     PlaneRestoreCacheBlock,
     VolumeRestoreCacheBlock,
 )
@@ -70,189 +67,6 @@ def _volume_cache_from_restore_block(cache: VolumeRestoreCacheBlock) -> VolumeVi
     return volume_state
 
 
-def _apply_plane_restore_from_ledger(
-    server: Any,
-    *,
-    timestamp: float | None,
-    intent_id: str,
-) -> bool:
-    ledger = server._state_ledger
-    with server._state_lock:
-        plane_entry = ledger.get("viewport", "plane", "state")
-
-    if plane_entry is None or not isinstance(plane_entry.value, Mapping):
-        logger.warning("plane_restore skipped due to missing viewport plane state")
-        return False
-
-    plane_state = PlaneViewportCache(**dict(plane_entry.value))  # type: ignore[arg-type]
-
-    level_value = plane_state.applied_level or plane_state.target_level
-    step_value: Optional[tuple[int, ...]] = None
-    if plane_state.applied_step is not None:
-        step_value = tuple(int(v) for v in plane_state.applied_step)
-    elif plane_state.target_step is not None:
-        step_value = tuple(int(v) for v in plane_state.target_step)
-
-    center_value: Optional[tuple[float, float, float]] = None
-    if plane_state.pose.center is not None:
-        cx, cy = plane_state.pose.center
-        center_value = (float(cx), float(cy), 0.0)
-
-    zoom_value = plane_state.pose.zoom
-    rect_value = plane_state.pose.rect
-
-    missing: list[str] = []
-    if level_value is None:
-        missing.append("plane_state.level")
-    if step_value is None:
-        missing.append("plane_state.step")
-    if center_value is None:
-        missing.append("viewport.plane.state.pose.center")
-    if zoom_value is None:
-        missing.append("viewport.plane.state.pose.zoom")
-    if rect_value is None:
-        missing.append("viewport.plane.state.pose.rect")
-
-    if missing:
-        logger.warning("plane_restore skipped due to missing ledger entries: %s", ", ".join(missing))
-        return False
-
-    level_idx = int(level_value)
-
-    def _as_step(value: Any) -> tuple[int, ...]:
-        if isinstance(value, Mapping):
-            # unexpected, fall back to tuple()
-            return tuple(int(v) for v in value.values())
-        return tuple(int(v) for v in value)
-
-    def _as_center(value: Any) -> tuple[float, float, float]:
-        seq = tuple(float(v) for v in value)
-        if len(seq) == 3:
-            return seq  # type: ignore[return-value]
-        if len(seq) >= 2:
-            return (seq[0], seq[1], 0.0)
-        raise ValueError("plane restore center requires at least two components")
-
-    def _as_zoom(value: Any) -> float:
-        zoom_val = float(value)
-        if zoom_val <= 0:
-            raise ValueError("zoom must be positive")
-        return zoom_val
-
-    def _as_rect(value: Any) -> tuple[float, float, float, float]:
-        return tuple(float(v) for v in value[:4])  # type: ignore[return-value]
-
-    step_tuple = _as_step(step_value)
-    center_tuple = _as_center(center_value)
-    zoom_float = _as_zoom(zoom_value)
-    rect_tuple = _as_rect(rect_value)
-
-    reduce_plane_restore(
-        server._state_ledger,
-        level=level_idx,
-        step=step_tuple,
-        center=center_tuple,
-        zoom=zoom_float,
-        rect=rect_tuple,
-        intent_id=intent_id,
-        timestamp=timestamp,
-        origin="client.state.view",
-    )
-    return True
-
-
-def _apply_volume_restore_from_ledger(
-    server: Any,
-    *,
-    timestamp: float | None,
-    intent_id: str,
-) -> Optional[VolumeViewportCache]:
-    ledger = server._state_ledger
-    with server._state_lock:
-        volume_entry = ledger.get("viewport", "volume", "state")
-        center_entry = ledger.get("camera_volume", "main", "center")
-        angles_entry = ledger.get("camera_volume", "main", "angles")
-        distance_entry = ledger.get("camera_volume", "main", "distance")
-        fov_entry = ledger.get("camera_volume", "main", "fov")
-
-    if volume_entry is None or not isinstance(volume_entry.value, Mapping):
-        logger.warning("volume_restore skipped due to missing viewport volume state")
-        return None
-
-    volume_state = VolumeViewportCache(**dict(volume_entry.value))  # type: ignore[arg-type]
-
-    level_value: Optional[int] = volume_state.level
-
-    center_value = volume_state.pose.center
-    if (center_value is None or len(center_value) < 3) and center_entry is not None and center_entry.value is not None:
-        center_payload = tuple(float(v) for v in center_entry.value)
-        if len(center_payload) >= 3:
-            center_value = center_payload  # type: ignore[assignment]
-
-    angles_value = volume_state.pose.angles
-    if (angles_value is None or len(angles_value) < 3) and angles_entry is not None and angles_entry.value is not None:
-        angles_payload = tuple(float(v) for v in angles_entry.value)
-        if len(angles_payload) >= 2:
-            roll_component = float(angles_payload[2]) if len(angles_payload) >= 3 else 0.0
-            angles_value = (float(angles_payload[0]), float(angles_payload[1]), roll_component)
-
-    distance_value = volume_state.pose.distance
-    if distance_value is None and distance_entry is not None and distance_entry.value is not None:
-        distance_value = float(distance_entry.value)
-
-    fov_value = volume_state.pose.fov
-    if fov_value is None and fov_entry is not None and fov_entry.value is not None:
-        fov_value = float(fov_entry.value)
-
-    if (
-        level_value is None
-        or center_value is None
-        or len(center_value) < 3
-        or angles_value is None
-        or len(angles_value) < 2
-        or distance_value is None
-        or fov_value is None
-    ):
-        logger.debug("volume_restore skipped (pose missing); awaiting worker emit")
-        return None
-
-    level_idx = int(level_value)
-    center_tuple = (
-        float(center_value[0]),
-        float(center_value[1]),
-        float(center_value[2]),
-    )
-    roll_component = float(angles_value[2]) if len(angles_value) >= 3 else 0.0
-    angles_tuple = (
-        float(angles_value[0]),
-        float(angles_value[1]),
-        roll_component,
-    )
-    distance_float = float(distance_value)
-    fov_float = float(fov_value)
-
-    volume_state.level = level_idx
-    volume_state.update_pose(
-        center=center_tuple,
-        angles=angles_tuple,
-        distance=distance_float,
-        fov=fov_float,
-    )
-
-    reduce_volume_restore(
-        ledger,
-        level=level_idx,
-        center=center_tuple,
-        angles=angles_tuple,
-        distance=distance_float,
-        fov=fov_float,
-        intent_id=intent_id,
-        timestamp=timestamp,
-        origin="client.state.view",
-    )
-    return volume_state
-
-
 async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
     server = ctx.server
     try:
@@ -299,29 +113,15 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
     server.mark_stream_config_dirty()
     server._schedule_coro(server._ensure_keyframe(), "ndisplay-keyframe")
 
+    ledger = server._state_ledger
     restored_volume_state: Optional[VolumeViewportCache] = None
     plane_state_override: Optional[PlaneViewportCache] = None
-    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
-        ledger = server._state_ledger
-        if new_ndisplay >= 3:
-            cache = load_volume_restore_cache(ledger)
-            restored_volume_state = _volume_cache_from_restore_block(cache)
-        if was_volume and new_ndisplay == 2:
-            cache = load_plane_restore_cache(ledger)
-            plane_state_override = _plane_cache_from_restore_block(cache)
-    else:
-        if new_ndisplay >= 3:
-            restored_volume_state = _apply_volume_restore_from_ledger(
-                server,
-                timestamp=ctx.timestamp,
-                intent_id=ctx.intent_id,
-            )
-        if was_volume and new_ndisplay == 2:
-            _apply_plane_restore_from_ledger(
-                server,
-                timestamp=ctx.timestamp,
-                intent_id=ctx.intent_id,
-            )
+    if new_ndisplay >= 3:
+        cache = load_volume_restore_cache(ledger)
+        restored_volume_state = _volume_cache_from_restore_block(cache)
+    if was_volume and new_ndisplay == 2:
+        cache = load_plane_restore_cache(ledger)
+        plane_state_override = _plane_cache_from_restore_block(cache)
 
     await ctx.ack(applied_value=new_ndisplay, version=int(result.version))
 

@@ -127,8 +127,13 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
+from napari_cuda.server.scene.viewport import PlanePose
 from napari_cuda.server.ledger import ServerStateLedger
-from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
+from napari_cuda.server.scene.blocks import (
+    ENABLE_VIEW_AXES_INDEX_BLOCKS,
+    plane_restore_cache_block_from_payload,
+    volume_restore_cache_block_from_payload,
+)
 from napari_cuda.server.utils.websocket import safe_send
 from napari_cuda.server.control.state_reducers import reduce_thumbnail_capture
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
@@ -685,16 +690,37 @@ class EGLHeadlessServer:
             pass
 
     def _load_plane_cache(self) -> PlaneViewportCache:
-        entry = self._state_ledger.get("viewport", "plane", "state")
-        if entry is not None and isinstance(entry.value, Mapping):
-            return PlaneViewportCache(**dict(entry.value))
-        return PlaneViewportCache()
+        cache_entry = self._state_ledger.get("restore_cache", "plane", "state")
+        if cache_entry is None or not isinstance(cache_entry.value, Mapping):
+            return PlaneViewportCache()
+        cache_block = plane_restore_cache_block_from_payload(cache_entry.value)
+        plane_cache = PlaneViewportCache()
+        plane_cache.target_ndisplay = 2
+        plane_cache.target_level = cache_block.level
+        plane_cache.applied_level = cache_block.level
+        plane_cache.target_step = cache_block.index
+        plane_cache.applied_step = cache_block.index
+        plane_cache.pose = PlanePose(
+            rect=cache_block.pose.rect,
+            center=cache_block.pose.center,
+            zoom=cache_block.pose.zoom,
+        )
+        return plane_cache
 
     def _load_volume_cache(self) -> VolumeViewportCache:
-        entry = self._state_ledger.get("viewport", "volume", "state")
-        if entry is not None and isinstance(entry.value, Mapping):
-            return VolumeViewportCache(**dict(entry.value))
-        return VolumeViewportCache()
+        cache_entry = self._state_ledger.get("restore_cache", "volume", "state")
+        if cache_entry is None or not isinstance(cache_entry.value, Mapping):
+            return VolumeViewportCache()
+        cache_block = volume_restore_cache_block_from_payload(cache_entry.value)
+        volume_cache = VolumeViewportCache()
+        volume_cache.level = cache_block.level
+        volume_cache.update_pose(
+            center=cache_block.pose.center,
+            angles=cache_block.pose.angles,
+            distance=cache_block.pose.distance,
+            fov=cache_block.pose.fov,
+        )
+        return volume_cache
 
     def _refresh_scene_snapshot(self, render_state: Optional[RenderLedgerSnapshot] = None) -> None:
         worker = self._worker

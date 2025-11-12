@@ -68,14 +68,6 @@ def apply_volume_restore_transaction(
         if op_kind is not None:
             batch_entries.append(("scene", "main", "op_kind", str(op_kind)))
 
-    batch_entries.extend(
-        [
-            ("camera_volume", "main", "center", center_tuple),
-            ("camera_volume", "main", "angles", angles_tuple),
-            ("camera_volume", "main", "distance", distance_value),
-            ("camera_volume", "main", "fov", fov_value),
-        ]
-    )
     if extra_entries is not None:
         batch_entries.extend(extra_entries)
 

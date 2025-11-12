@@ -6,7 +6,7 @@ import logging
 import math
 import time
 from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any, Mapping, Optional
 
 from vispy import scene  # type: ignore
 from vispy.geometry import Rect
@@ -29,6 +29,7 @@ from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     dims_spec as ledger_dims_spec,
     step as ledger_step,
 )
+from napari_cuda.server.scene.blocks import camera_block_from_payload
 from napari_cuda.server.scene.viewport import (
     PlaneViewportCache,
     RenderMode,
@@ -264,15 +265,16 @@ def _enter_volume_mode(worker: EGLRendererWorker) -> None:
         worker._level_intent_callback(intent)
 
     volume_pose_cached = False
-    if worker._ledger.get("camera_volume", "main", "center") is not None:
-        center_entry = worker._ledger.get("camera_volume", "main", "center")
-        angles_entry = worker._ledger.get("camera_volume", "main", "angles")
-        distance_entry = worker._ledger.get("camera_volume", "main", "distance")
-        fov_entry = worker._ledger.get("camera_volume", "main", "fov")
-        volume_pose_cached = all(
-            entry is not None and entry.value is not None
-            for entry in (center_entry, angles_entry, distance_entry, fov_entry)
-        )
+    camera_entry = worker._ledger.get("camera", "main", "state")
+    assert camera_entry is not None and isinstance(camera_entry.value, Mapping), "camera block missing"
+    camera_block = camera_block_from_payload(camera_entry.value)
+    volume_block = camera_block.volume
+    volume_pose_cached = (
+        volume_block.center is not None
+        and volume_block.angles is not None
+        and volume_block.distance is not None
+        and volume_block.fov is not None
+    )
 
     _configure_camera_for_mode(worker)
     if not volume_pose_cached:
