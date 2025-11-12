@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import replace
 from typing import Any, Mapping, Optional, TYPE_CHECKING
 
 from napari_cuda.server.control.state_reducers import (
@@ -21,9 +20,7 @@ from napari_cuda.server.scene.blocks import (
 from napari_cuda.server.scene import (
     PlaneViewportCache,
     RenderMode,
-    RenderUpdate,
     VolumeViewportCache,
-    snapshot_render_state,
 )
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
@@ -337,38 +334,5 @@ async def handle_view_ndisplay(ctx: "StateUpdateContext") -> bool:
         )
 
     # Post-frame thumbnail emission handles updates; no explicit queue here.
-
-    runtime = getattr(server, "runtime", None)
-    if runtime is not None and runtime.is_ready:
-        snapshot = runtime.viewport_snapshot()
-        if snapshot is None:
-            return True
-        plane_state = plane_state_override if plane_state_override is not None else snapshot.plane
-        plane_state.target_ndisplay = int(new_ndisplay)
-        volume_state = replace(restored_volume_state) if restored_volume_state is not None else snapshot.volume
-        desired_mode = RenderMode.VOLUME if new_ndisplay >= 3 else RenderMode.PLANE
-
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "view.toggle enqueue: mode=%s plane_target_level=%s volume_level=%s",
-                desired_mode.name,
-                plane_state.target_level,
-                volume_state.level,
-            )
-            logger.debug(
-                "view.toggle plane_state=%s volume_state=%s",
-                plane_state,
-                volume_state,
-            )
-
-        snapshot_state = snapshot_render_state(server._state_ledger)
-        runtime.enqueue_render_update(
-            RenderUpdate(
-                scene_state=snapshot_state,
-                mode=desired_mode,
-                plane_state=plane_state,
-                volume_state=volume_state,
-            )
-        )
 
     return True

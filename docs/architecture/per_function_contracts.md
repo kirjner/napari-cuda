@@ -156,7 +156,7 @@ Conventions
 
 - server._handle_worker_level_intents()
   - Preconditions: WorkerIntentMailbox has a LevelSwitchIntent.
-  - Postconditions: calls reduce_level_update(...) to commit level/shape/state; pulls new RenderLedgerSnapshot; enqueues RenderUpdate.
+  - Postconditions: calls reduce_level_update(...) to commit level/shape/state; worker notices the `scene.main.op_seq` bump and rehydrates from the ledger on the next render tick.
   - Side effects: ledger writes; pixel channel enqueue; mirrors may broadcast notify.
 
 - server._apply_worker_camera_pose(pose)

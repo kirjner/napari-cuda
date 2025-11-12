@@ -125,12 +125,11 @@ contains:
 Worker Consumption Path
 -----------------------
 
-1. `worker_loop` pulls a snapshot per frame and enqueues it via
-   `consume_render_snapshot` (`render_loop/planning/staging.py`), which marks a
-   render tick as needed. (Future work: remove `RenderUpdate` entirely; right
-   now we still push snapshots through the mailbox.)
-2. `drain_scene_updates` drains the mailbox and applies the snapshot using
-   `RenderApplyInterface`:
+1. `worker_loop` pulls a snapshot per frame via `consume_render_snapshot`
+   (`render_loop/planning/staging.py`), which applies it immediately and marks a
+   render tick as needed.
+2. `drain_scene_updates` is now a no-op placeholder; the worker already consumes
+   the ledger snapshot directly.
    * `apply_render_snapshot` dispatches to plane or volume paths in
      `render_loop/applying/apply.py`. Plane flows delegate to
      `plane.py` / `plane_ops.py`; volume flows go through
@@ -171,11 +170,9 @@ Bootstrap, Restore, and Runtime Helpers
     transitions during startup or when the worker toggles modes internally.
   These helpers read `worker.viewport_state` (seeded from ledger snapshots) and
   use `ViewerBootstrapInterface` to fetch multiscale metadata.
-* **Render mailbox** (`runtime/ipc/mailboxes/render_update.py`) coalesces
-  `RenderUpdate` structs. Even though we now feed the worker fresh snapshots,
-  the mailbox still stores `mode`, `PlaneViewportCache`, and
-  `VolumeViewportCache` copies for viewport runners to inspect. Removing it
-  entirely is part of the longer-term plan.
+* **Render mailbox** (legacy) used to coalesce `RenderUpdate` structs between
+  control and worker. Phase 3 removed this hop; the worker samples the ledger
+  directly and tracks per-block signatures locally.
 
 Key Dependencies to Untangle
 ----------------------------
@@ -194,8 +191,8 @@ Key Dependencies to Untangle
 4. **Render snapshot shape** — everything downstream expects a
   `RenderLedgerSnapshot`. Changing the ledger schema implies updating that
   dataclass or replacing it entirely.
-5. **RenderUpdate mailbox** — still sits between control + worker; we want to
-  remove it once the worker snapshots directly from the ledger on each poke.
+5. **RenderUpdate mailbox** — removed; the worker now snapshots the ledger
+  directly whenever `scene.main.op_seq` bumps.
 
 Migration Implications
 ----------------------
@@ -298,19 +295,14 @@ Track this list as you migrate so nothing lingers:
      `AppliedVersions`, `normalize_scene_state`, `record_snapshot_versions`,
      `extract_layer_changes`, `consume_render_snapshot`,
      `drain_scene_updates`.
-   - `src/napari_cuda/server/runtime/ipc/mailboxes/render_update.py`:
-     `RenderUpdateMailbox`, `RenderZoomHint` (and the `set_scene_state`,
-     `set_viewport_state`, `drain`, `record/consume_zoom_hint`,
-     `append/drain_camera_ops`, `update_state_signature` methods).
-      *Future replacement:* once this entire planner/mailbox stack is removed,
-      the worker watches `scene.main.op_seq`, snapshots the block ledger on each
-      poke, and compares `{view, axes, index, lod, camera}` against its in-memory
-      PlaneViewportCache / VolumeViewportCache (renamed from `PlaneState` /
-      `VolumeState`). Plane↔volume toggles become: reducer writes the desired mode,
-      per-mode level/index, and pose into the blocks → worker sees the blocks
-      change → worker applies the appropriate mode using the cached pose for the
-      inactive mode. No server-side planner bookkeeping is required; restore
-      flows are entirely block-driven.
+   - The legacy `render_update` mailbox has been deleted; the worker now tracks
+     per-block signatures inside `_OpSeqWatcherState` (see
+     `runtime/worker/lifecycle.py`) and compares ledger snapshots directly
+     against its in-memory caches whenever `scene.main.op_seq` bumps. Plane↔volume
+     toggles become: reducer writes the desired mode plus `{lod,index,camera}`
+     blocks → worker sees the change → worker applies the appropriate mode using
+     the cached pose for the inactive mode. No server-side planner bookkeeping is
+     required; restore flows are entirely block-driven.
 6. **Worker apply façade built on Plane/Volume caches**
    - `src/napari_cuda/server/runtime/render_loop/applying/interface.py`:
      `RenderApplyInterface` (all viewport, camera, ROI, ledger, layer, and

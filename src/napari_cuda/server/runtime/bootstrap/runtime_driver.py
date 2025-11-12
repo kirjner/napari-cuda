@@ -21,7 +21,6 @@ from napari_cuda.server.data.zarr_source import (
 from napari_cuda.server.runtime.bootstrap.scene_setup import (
     create_scene_source,
 )
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 from napari_cuda.server.scene import BootstrapSceneMetadata
 
 
@@ -230,7 +229,8 @@ def setup_worker_runtime(
 
     worker._camera_queue = camera_queue  # type: ignore[attr-defined]
     worker._state_lock = threading.RLock()  # type: ignore[attr-defined]
-    worker._render_mailbox = RenderUpdateMailbox()  # type: ignore[attr-defined]
+    worker._zoom_hint_ratio = None  # type: ignore[attr-defined]
+    worker._zoom_hint_ts = 0.0  # type: ignore[attr-defined]
     worker._op_seq_watcher_state = None  # type: ignore[attr-defined]
     worker._last_ensure_log = None  # type: ignore[attr-defined]
     worker._last_ensure_log_ts = 0.0  # type: ignore[attr-defined]

@@ -119,7 +119,6 @@ from napari_cuda.server.scene import (
     PlaneViewportCache,
     RenderLedgerSnapshot,
     RenderMode,
-    RenderUpdate,
     VolumeViewportCache,
     pull_render_snapshot,
     snapshot_layer_controls,
@@ -404,23 +403,7 @@ class EGLHeadlessServer:
             volume_state=intent.volume_state,
         )
 
-        snapshot = snapshot_render_state(self._state_ledger)
-        if logger.isEnabledFor(logging.INFO):
-            logger.info(
-                "level.intent snapshot: level=%d step=%s",
-                int(snapshot.current_level) if snapshot.current_level is not None else -1,
-                snapshot.current_step,
-            )
-
-        worker.enqueue_update(
-            RenderUpdate(
-                scene_state=snapshot,
-                mode=intent_mode,
-                plane_state=intent.plane_state,
-                volume_state=intent.volume_state,
-            )
-        )
-        # No explicit thumbnail queue; post-frame logic will emit
+        # worker re-pulls the ledger via op_seq watcher; no direct enqueue needed
 
     def _log_volume_update(self, fmt: str, *args) -> None:
         try:
@@ -437,9 +420,6 @@ class EGLHeadlessServer:
     ) -> None:
         target = pose.target or "main"
         seq = int(pose.command_seq)
-
-        plane_cache: PlaneViewportCache | None = None
-        volume_cache: VolumeViewportCache | None = None
 
         with self._state_lock:
             if self._log_cam_debug:
@@ -466,21 +446,7 @@ class EGLHeadlessServer:
                 metadata={"pose_seq": seq},
                 bump_op_seq=False,
             )
-            plane_cache = self._load_plane_cache()
-            volume_cache = self._load_volume_cache()
-
-        # reducer call persists the pose for both plane and volume scopes
-
-        worker = self._worker
-        if worker is not None and plane_cache is not None and volume_cache is not None:
-            worker.enqueue_update(
-                RenderUpdate(
-                    scene_state=None,
-                    mode=None,
-                    plane_state=plane_cache,
-                    volume_state=volume_cache,
-                )
-            )
+        # reducer call persists the pose for both plane and volume scopes; worker already applied
 
         self._schedule_coro(
             broadcast_camera_update(

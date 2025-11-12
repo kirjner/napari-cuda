@@ -20,7 +20,6 @@ from .models import (
     LayerVisualState,
     RenderLedgerSnapshot,
 )
-from .render_update import RenderUpdate
 from .viewport import (
     PlanePose,
     PlaneRequest,
@@ -45,7 +44,6 @@ __all__ = [
     "PoseEvent",
     "RenderLedgerSnapshot",
     "RenderMode",
-    "RenderUpdate",
     "ViewportState",
     "VolumePose",
     "VolumeViewportCache",

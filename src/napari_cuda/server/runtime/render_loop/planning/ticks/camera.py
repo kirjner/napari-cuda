@@ -129,8 +129,6 @@ def record_zoom_hint(
     if not commands:
         return
 
-    mailbox = tick_iface.render_mailbox
-
     for command in reversed(commands):
         if getattr(command, "kind", None) != "zoom":
             continue
@@ -139,7 +137,7 @@ def record_zoom_hint(
             continue
         zoom_factor = float(factor)
         if zoom_factor > 0.0:
-            mailbox.record_zoom_hint(zoom_factor)
+            tick_iface.record_zoom_hint(zoom_factor)
             break
 
 

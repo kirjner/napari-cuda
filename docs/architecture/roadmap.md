@@ -52,8 +52,8 @@ References:
   - Code: server/control/state_reducers.py, state_update_handlers/*
 
 3) Render Runtime
-- Per‑block signatures in mailbox; drop unified scene signature once all call sites updated.
-  - Code: server/utils/signatures.py, server/runtime/ipc/mailboxes/render_update.py
+- Per‑block signatures maintained by the op_seq watcher; drop the unified scene signature once all call sites updated.
+  - Code: server/utils/signatures.py, server/runtime/worker/lifecycle.py
 - Name alignment: apply_dims_block/apply_camera_block/apply_layers_block (no wrappers).
   - Code: server/runtime/render_loop/applying/*, apply.py
 

@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Optional
 from napari_cuda.server.scene import (
     PlaneViewportCache,
     RenderMode,
-    RenderUpdate,
     VolumeViewportCache,
 )
 
@@ -69,21 +68,6 @@ class RuntimeHandle:
             return None
 
         return ViewportSnapshot(mode=mode, plane=plane_copy, volume=volume_copy)
-
-    def enqueue_render_update(self, update: RenderUpdate) -> bool:
-        worker = self._resolve_worker()
-        if worker is None:
-            logger.debug("RuntimeHandle: enqueue skipped (no worker)")
-            return False
-        if not getattr(worker, "is_ready", False):
-            logger.debug("RuntimeHandle: enqueue skipped (worker not ready)")
-            return False
-        try:
-            worker.enqueue_update(update)  # type: ignore[attr-defined]
-            return True
-        except Exception:
-            logger.exception("RuntimeHandle: enqueue_update failed")
-            return False
 
     def request_level(self, level: int, path: Optional[str]) -> bool:
         logger.debug(

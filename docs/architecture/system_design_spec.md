@@ -342,8 +342,8 @@ def build_notify_level(active: ActiveViewState) -> Mapping[str, object]: ...
   - Timing: best‑effort immediate after ledger commit; mirrors/broadcasters may coalesce.
 
 - Pixel Channel (render loop)
-  - Trigger: Server/worker pull of `RenderLedgerSnapshot` (e.g., on tick, on specific events).
-  - Path: ledger → snapshot_render_state → mailbox → drain_scene_updates → per‑block apply/plan.
+  - Trigger: worker observes `scene.main.op_seq` bump.
+  - Path: ledger → fetch scene blocks (`{view, axes, index, lod, camera, layers}`) → per-block signature diff → apply helpers → render/apply policies.
   - Purpose: render the scene (ROI, levels, camera) and stream pixels. No notify messages are produced here.
 
 Separation Guarantees
@@ -356,25 +356,7 @@ Separation Guarantees
   - `LevelSwitchIntent`: worker multiscale/level policy decisions. Server calls `reduce_level_update(...)` with the selected level (and optional shape/state), then pulls a fresh `RenderLedgerSnapshot` and enqueues it for render. This guarantees state consistency (ledger → notify, and render consumes the same committed state).
   - `ThumbnailCapture`: worker-captured thumbnails. Control loop may dedupe and persist via the thumbnail transaction.
 
-7. Render Mailbox and Signatures (Modular)
-Module: `src/napari_cuda/server/runtime/ipc/mailboxes/render_update.py`
-```
-class RenderUpdateMailbox:
-    def update_dims_signature(self, spec: DimsSpec) -> bool: ...
-    def update_camera_signature(self, plane: PlanePose | None, volume: VolumePose | None) -> bool: ...
-    def update_layers_signature(self, layers: Mapping[str, LayerVisualState]) -> bool: ...
-    def update_active_signature(self, active: ActiveViewState | None) -> bool: ...
-```
-
-Signature helpers (module: `src/napari_cuda/server/utils/signatures.py`)
-```
-def dims_content_signature(spec: DimsSpec) -> SignatureToken: ...
-def camera_pose_signature(plane: PlanePose | None, volume: VolumePose | None) -> SignatureToken: ...
-def layers_signature(layers: Mapping[str, LayerVisualState]) -> SignatureToken: ...
-def active_view_signature(active: ActiveViewState | None) -> SignatureToken: ...
-```
-
-8. Runtime Apply (Deterministic)
+7. Runtime Apply (Deterministic)
 Modules: `src/napari_cuda/server/runtime/render_loop/applying/*`
 ```
 def apply_dims_block(snapshot_iface: RenderApplyInterface, spec: DimsSpec) -> None:
@@ -454,7 +436,7 @@ Phase F: Layer parity extensions (multi-layer attributes) built by extending blo
 - server/control/state_reducers.py: reducers; record_active_view helper.
 - server/control/transactions/*: domain txns, strictly scoped.
 - server/scene/builders.py: snapshot builders; notify builders using shared serializers.
-- server/runtime/ipc/mailboxes/render_update.py: block signatures.
+- server/runtime/worker/lifecycle.py + server/utils/signatures.py: op_seq watcher + block signatures.
 - server/runtime/render_loop/applying/*: block-specific apply functions.
 - client/control/emitters/*: consume notify.*; compare against viewer; emit state.update.
 - client/rendering/presenter_facade.py: HUD current level from notify.level in volume mode.

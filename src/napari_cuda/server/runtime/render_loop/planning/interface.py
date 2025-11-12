@@ -5,10 +5,9 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
     from napari_cuda.server.runtime.worker.egl import EGLRendererWorker
 
 
@@ -51,22 +50,11 @@ class RenderPlanInterface:
     def set_scene_source(self, source: Any) -> None:
         self.worker._scene_source = source  # type: ignore[attr-defined]
 
-    # Render mailbox ------------------------------------------------------
-    @property
-    def render_mailbox(self) -> RenderUpdateMailbox:
-        return self.worker._render_mailbox  # type: ignore[attr-defined]
-
-    def render_mailbox_record_zoom_hint(self, value: float) -> None:
-        self.render_mailbox.record_zoom_hint(float(value))
-
-    def render_mailbox_set_scene_state(self, state: Any) -> None:
-        self.render_mailbox.set_scene_state(state)
-
-    def render_mailbox_drain(self):
-        return self.render_mailbox.drain()
-
-    def render_mailbox_update_signature(self, snapshot: Any) -> bool:
-        return self.render_mailbox.update_state_signature(snapshot)
+    # Zoom hint helpers ---------------------------------------------------
+    def record_zoom_hint(self, value: float) -> None:
+        recorder = getattr(self.worker, "_record_zoom_hint", None)  # type: ignore[attr-defined]
+        if recorder is not None:
+            recorder(float(value))
 
     # Camera helpers ------------------------------------------------------
     def current_panzoom_rect(self):

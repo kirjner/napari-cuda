@@ -4,7 +4,6 @@
 the neutral module name reflects its broader responsibilities:
 
 * bootstrap the napari Viewer/VisPy canvas and keep it on the worker thread,
-* drain `RenderUpdateMailbox` updates and apply them to the viewer/visuals,
 * drive the render loop, including camera animation and policy evaluation,
 * capture frames via `CaptureFacade`, hand them to the encoder, and surface
   timing metadata for downstream metrics.
@@ -59,14 +58,9 @@ from napari_cuda.server.runtime.camera import (
     CameraPoseApplied,
 )
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.runtime.ipc.mailboxes import (
-    RenderUpdate,
-)
 from napari_cuda.server.runtime.lod import level_policy
 from napari_cuda.server.runtime.render_loop.planning.staging import (
     consume_render_snapshot,
-    drain_scene_updates,
-    normalize_scene_state,
 )
 from napari_cuda.server.runtime.render_loop.planning.ticks import (
     capture as capture_tick,
@@ -160,6 +154,8 @@ class EGLRendererWorker:
         self._debug: Optional[DebugDumper] = None
         self._debug_config = DebugConfig.from_policy(self._debug_policy.dumps)
         self._ledger: ServerStateLedger = ServerStateLedger()
+        self._zoom_hint_ratio: Optional[float] = None
+        self._zoom_hint_ts: float = 0.0
 
     @property
     def is_ready(self) -> bool:
@@ -398,34 +394,29 @@ class EGLRendererWorker:
         if azimuth_deg is not None:
             assert self.view is not None and self.view.camera is not None
             self.view.camera.azimuth = float(azimuth_deg)
-        drain_scene_updates(self)
         t0 = time.perf_counter()
         self.canvas.render()
         self._render_tick_required = False
         self._render_loop_started = True
 
-    def enqueue_update(self, delta: RenderUpdate) -> None:
-        """Normalize and enqueue a render delta for the worker mailbox."""
+    def _record_zoom_hint(self, value: float) -> None:
+        """Record the most recent zoom hint for the level policy."""
 
-        if (
-            delta.mode is not None
-            or delta.plane_state is not None
-            or delta.volume_state is not None
-        ):
-            self._render_mailbox.set_viewport_state(
-                mode=delta.mode,
-                plane_state=delta.plane_state,
-                volume_state=delta.volume_state,
-            )
+        self._zoom_hint_ratio = float(value)
+        self._zoom_hint_ts = time.perf_counter()
 
-        scene_state = None
-        if delta.scene_state is not None:
-            self._last_interaction_ts = time.perf_counter()
-            scene_state = normalize_scene_state(delta.scene_state)
-        if scene_state is not None:
-            self._render_mailbox.set_scene_state(scene_state)
-            self._mark_render_tick_needed()
-            return
+    def _consume_zoom_hint(self, max_age: float) -> Optional[float]:
+        """Return the latest zoom hint if it is still fresh."""
+
+        ratio = getattr(self, "_zoom_hint_ratio", None)
+        if ratio is None:
+            return None
+        age = time.perf_counter() - float(getattr(self, "_zoom_hint_ts", 0.0))
+        if age > float(max_age):
+            self._zoom_hint_ratio = None
+            return None
+        self._zoom_hint_ratio = None
+        return float(ratio)
 
     def _capture_blit_gpu_ns(self) -> Optional[int]:
         return capture_tick.capture_blit_gpu_ns(self)

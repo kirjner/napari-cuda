@@ -66,19 +66,17 @@
 
 ## IMMEDIATE NEXT GOAL
 
-Implement ledger‑driven restore and block consumption under the feature flag:
+Phase 3 cleanup: remove the remaining legacy viewport/camera scopes now that the worker
+consumes the block ledger directly.
 
-- Restore cache helpers (`load_*`, `write_*`, `_plane/_volume_cache_from_state`) now dual-write from bootstrap + every reducer when the flag is on; legacy writers still run for compatibility.
-- `reduce_view_update` now copies the restore cache payloads into `{lod,index,camera}` in a single transaction, and the cache dataclasses are `PlaneRestoreCacheBlock` / `VolumeRestoreCacheBlock` to match the rest of the scene block schema.
-- Persist per‑mode RestoreCaches on the ledger so view toggles are single-pass:
-  - `restore_cache.plane.state`: `{ level: int, index: tuple[int,...], pose: {rect,center,zoom} }`
-  - `restore_cache.volume.state`: `{ level: int, index: tuple[int,...], pose: {center,angles,distance,fov} }`
-  - Define TypedDicts/dataclasses in `src/napari_cuda/server/scene/blocks/restore.py` and dual-write them from current reducer/worker paths.
-- View toggle transactions (flag on) write `ViewBlock` and copy the target mode’s RestoreCache into authoritative blocks (`LodBlock.level`, `IndexBlock.value`, `CameraBlock.*`) in a single pass.
-- Worker-issued camera poses now refresh the viewport caches without bumping `scene.op_seq`; next step is to flip `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1` in dev runs and confirm the block-backed camera consumers stay jitter-free before cutting over permanently.
-- Next step: begin the Phase 2 consumer flip—teach `snapshot_scene_blocks` (the block-focused successor to `snapshot_viewport_state`), notify builders, and worker apply paths to read the block scopes when the flag is enabled while legacy keys remain for compatibility.
-- Once block-backed consumers are proven, plan the Phase 3 rename where `viewport_state`
-  metadata is replaced entirely by the scene block payloads (view/index/lod/camera) so we can
-  delete the legacy `viewport.*` ledger scopes without changing downstream behavior.
-- Add parity tests to assert toggles set blocks from caches and notify payloads are unchanged; keep legacy scopes for compatibility until Phase 3.
-- Keep minimal worker‑side caches (PlaneViewportCache/VolumeViewportCache) only for real‑time deltas, ROI hysteresis, and per‑block signature diffing.
+- Stop writing `viewport.plane/volume.state`, `camera_plane.*`, and `camera_volume.*`
+  from reducers/transactions; emit only `{view, axes, index, lod, camera}` blocks plus
+  restore caches.
+- Teach snapshot/notify builders to treat the block payloads as the single source of truth
+  (fall back to legacy scopes only when running with the feature flag off in tests).
+- Collapse worker/runtime helpers that still depend on `PlaneViewportCache` /
+  `VolumeViewportCache` ledger mirrors so the only remaining caches live in-memory on the worker.
+- Update docs/tests to describe the block-only runtime and document the removal of the
+  legacy scopes so downstream consumers know the new schema.
+- Keep the `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` flag until the apply/helpers are fully
+  block-native, then flip it on by default and delete the dead branches.

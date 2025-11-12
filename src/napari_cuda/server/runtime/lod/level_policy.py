@@ -187,8 +187,7 @@ def evaluate(worker: EGLRendererWorker) -> PolicyEvaluation | None:
         return None
 
     current = int(worker._current_level_index())
-    zoom_hint = worker._render_mailbox.consume_zoom_hint(max_age=0.5)
-    zoom_ratio = float(zoom_hint.ratio) if zoom_hint is not None else None
+    zoom_ratio = worker._consume_zoom_hint(max_age=0.5)
 
     config = lod.LevelPolicyConfig(
         threshold_in=float(worker._level_threshold_in),

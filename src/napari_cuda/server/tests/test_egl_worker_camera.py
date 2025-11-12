@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from types import SimpleNamespace
+from typing import Optional
+import time
 
 import pytest
 from vispy.scene.cameras import PanZoomCamera
 
 from napari_cuda.server.runtime.camera.controller import CameraDeltaOutcome
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdateMailbox
 from napari_cuda.server.runtime.render_loop.planning.ticks import camera as camera_tick
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.runtime.worker import EGLRendererWorker
@@ -29,12 +30,13 @@ class _StubWorker:
         self._debug_pan = False
         self._debug_orbit = False
         self._debug_reset = False
-        self._render_mailbox = RenderUpdateMailbox()
         self._user_interaction_seen = False
         self._last_interaction_ts = 0.0
         self._capture = None
         self._camera_pose_callback = None
         self._zoom_hints: list[float] = []
+        self._zoom_hint_ratio = None
+        self._zoom_hint_ts = 0.0
         self.use_volume = False
         self._pose_seq = 1
         self._max_camera_command_seq = 0
@@ -60,6 +62,21 @@ class _StubWorker:
     def _apply_camera_reset(self, _camera) -> None:
         pass
 
+    def _record_zoom_hint(self, value: float) -> None:
+        self._zoom_hint_ratio = float(value)
+        self._zoom_hint_ts = time.perf_counter()
+
+    def _consume_zoom_hint(self, max_age: float) -> Optional[float]:
+        ratio = self._zoom_hint_ratio
+        if ratio is None:
+            return None
+        age = time.perf_counter() - self._zoom_hint_ts
+        if age > float(max_age):
+            self._zoom_hint_ratio = None
+            return None
+        self._zoom_hint_ratio = None
+        return float(ratio)
+
 def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
     worker = _StubWorker()
     camera = worker.view.camera
@@ -74,7 +91,7 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
                 factor = float(command.factor)
                 ratio = 1.0 / factor
                 worker._zoom_hints.append(ratio)
-                worker._render_mailbox.record_zoom_hint(ratio)
+                worker._record_zoom_hint(ratio)
 
     monkeypatch.setattr(camera_tick, "record_zoom_hint", _record_zoom_hint)
     monkeypatch.setattr(
@@ -95,7 +112,7 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
         for command in commands:
             if getattr(command, "kind", None) == "zoom" and command.factor not in (None, 0):
                 ratio = 1.0 / float(command.factor)
-                tick_iface.render_mailbox.record_zoom_hint(ratio)
+                tick_iface.record_zoom_hint(ratio)
                 worker._zoom_hints.append(ratio)
         return CameraDeltaOutcome(
             camera_changed=True,
@@ -116,8 +133,8 @@ def test_process_camera_deltas_invokes_pose_callback(monkeypatch) -> None:
 
     assert worker._user_interaction_seen is True
     assert worker._last_interaction_ts > 0.0
-    hint = worker._render_mailbox.consume_zoom_hint(max_age=1.0)
-    assert hint is not None and hint.ratio == pytest.approx(0.8)
+    hint = worker._consume_zoom_hint(max_age=1.0)
+    assert hint is not None and hint == pytest.approx(0.8)
     assert len(captured) == 1
     pose = captured[0]
     assert pose.command_seq == 10

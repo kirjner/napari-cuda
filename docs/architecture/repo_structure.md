@@ -66,9 +66,10 @@ Lean Refactor Plan (Safe Moves)
 - Introduce explicit modules for the new view/axes/index/lod/camera scopes when they
   land so legacy `DimsSpec` types can be retired cleanly once consumers migrate.
 - Delete the legacy `runtime/render_loop/planning/*`, `render_loop/applying/*`,
-  `runtime/ipc/mailboxes/render_update.py`, and `scene/viewport.py` packages once
-  the worker consumes the factored ledger scopes directly (worker pulls ledger
-  → applies blocks → emits intents only via the worker intent mailbox).
+  and `scene/viewport.py` packages once the worker consumes the factored ledger
+  scopes directly (worker pulls ledger → applies blocks → emits intents only via
+  the worker intent mailbox). The op_seq watcher already bypasses the mailbox;
+  the remaining cleanup is purely structural.
 
 Style Enforcement
 - Add README.md per major package (control, runtime, scene) outlining roles and key entrypoints.

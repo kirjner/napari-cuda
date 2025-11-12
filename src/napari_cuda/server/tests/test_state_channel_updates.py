@@ -108,7 +108,6 @@ class _CaptureWorker:
         self.viewport_state.plane.applied_level = initial_level
         self.viewport_state.plane.applied_step = (0, 0)
         self.viewport_state.volume.level = initial_level
-        self.enqueued_updates: list[Any] = []
 
     def set_policy(self, policy: str) -> None:
         self.policy_calls.append(str(policy))
@@ -122,10 +121,6 @@ class _CaptureWorker:
     @property
     def is_ready(self) -> bool:
         return self._is_ready
-
-    def enqueue_update(self, update: Any) -> None:
-        self.enqueued_updates.append(update)
-
 
     def _ledger_axis_labels(self) -> tuple[str, ...]:
         return self._axis_labels
@@ -1522,10 +1517,14 @@ def _scene_payload_for_block_flag(monkeypatch: pytest.MonkeyPatch, enabled: bool
             ledger_snapshot=ledger.snapshot(),
             viewer_settings={"fps_target": 60.0},
         )
-        return payload.to_dict()
+        return payload
     finally:
         while scheduled:
             asyncio.run(scheduled.pop(0))
+
+
+def _payload_to_dict(payload: Any) -> dict[str, Any]:
+    return payload if isinstance(payload, dict) else payload.to_dict()
 
 
 def test_send_state_baseline_replays_store(monkeypatch) -> None:
@@ -1643,8 +1642,8 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
 
 
 def test_notify_scene_payload_includes_block_viewport_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = _scene_payload_for_block_flag(monkeypatch, enabled=True)
-    metadata = payload.metadata or {}
+    payload = _payload_to_dict(_scene_payload_for_block_flag(monkeypatch, enabled=True))
+    metadata = payload.get("metadata") or {}
     viewport_meta = metadata.get("viewport_state")
     assert viewport_meta is not None
     assert viewport_meta["mode"] == "VOLUME"
@@ -1653,8 +1652,8 @@ def test_notify_scene_payload_includes_block_viewport_state(monkeypatch: pytest.
 
 
 def test_notify_scene_payload_block_flag_parity(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload_off = _scene_payload_for_block_flag(monkeypatch, enabled=False).to_dict()
-    payload_on = _scene_payload_for_block_flag(monkeypatch, enabled=True).to_dict()
+    payload_off = _payload_to_dict(_scene_payload_for_block_flag(monkeypatch, enabled=False))
+    payload_on = _payload_to_dict(_scene_payload_for_block_flag(monkeypatch, enabled=True))
 
     def _without_viewport_state(data: dict[str, Any]) -> dict[str, Any]:
         metadata = data.get("metadata")

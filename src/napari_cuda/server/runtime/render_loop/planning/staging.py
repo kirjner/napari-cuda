@@ -7,7 +7,6 @@ from collections.abc import Iterable, MutableMapping
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Mapping, MutableMapping, Optional
 
-from napari_cuda.server.runtime.ipc.mailboxes import RenderUpdate
 from napari_cuda.server.runtime.render_loop.applying import (
     apply as snapshot_apply,
     drain as snapshot_drain,
@@ -137,33 +136,23 @@ def extract_layer_changes(
 
 
 def consume_render_snapshot(worker: EGLRendererWorker, state: RenderLedgerSnapshot) -> None:
-    """Queue a complete scene state snapshot for the next frame."""
+    """Apply a render snapshot immediately."""
 
     normalized = normalize_scene_state(state)
-    tick_iface = RenderPlanInterface(worker)
-    tick_iface.render_mailbox_set_scene_state(normalized)
-    tick_iface.mark_render_tick_needed()
-    tick_iface.update_last_interaction_timestamp()
+    _apply_snapshot(worker, normalized)
 
 
-def drain_scene_updates(worker: EGLRendererWorker) -> None:
+def drain_scene_updates(worker: EGLRendererWorker) -> None:  # noqa: D401
+    """Legacy hook retained for compatibility."""
+    return None
+
+
+def _apply_snapshot(worker: EGLRendererWorker, state: RenderLedgerSnapshot) -> None:
     tick_iface = RenderPlanInterface(worker)
-    updates: RenderUpdate = tick_iface.render_mailbox_drain()
     apply_iface = RenderApplyInterface(worker)
-    state = updates.scene_state
-    if state is None:
-        apply_viewport_state_snapshot(
-            apply_iface,
-            mode=updates.mode,
-            plane_state=updates.plane_state,
-            volume_state=updates.volume_state,
-        )
-        return
 
-    snapshot_op_seq = updates.op_seq
-    if snapshot_op_seq is None:
-        snapshot_op_seq = int(state.op_seq) if state.op_seq is not None else 0
-    if int(snapshot_op_seq) < int(tick_iface.viewport_state.op_seq):
+    snapshot_op_seq = int(state.op_seq) if state.op_seq is not None else 0
+    if snapshot_op_seq < int(tick_iface.viewport_state.op_seq):
         logger.debug(
             "render snapshot skipped: stale op_seq snapshot=%d latest=%d",
             int(snapshot_op_seq),
@@ -182,26 +171,24 @@ def drain_scene_updates(worker: EGLRendererWorker) -> None:
     elif state.layer_values is not None:
         state_for_apply = replace(state, layer_values=None)
 
-    if updates.plane_state is not None:
-        tick_iface.viewport_state.plane = updates.plane_state
-        if tick_iface.viewport_runner is not None:
-            tick_iface.viewport_runner._plane = tick_iface.viewport_state.plane  # type: ignore[attr-defined]
-    elif ENABLE_VIEW_AXES_INDEX_BLOCKS and _plane_pose_complete(state):
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _plane_pose_complete(state):
         plane_state = _plane_cache_from_snapshot(state)
         tick_iface.viewport_state.plane = plane_state
         if tick_iface.viewport_runner is not None:
             tick_iface.viewport_runner._plane = plane_state  # type: ignore[attr-defined]
-    if updates.volume_state is not None:
-        tick_iface.viewport_state.volume = updates.volume_state
-    elif ENABLE_VIEW_AXES_INDEX_BLOCKS and _volume_pose_complete(state):
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _volume_pose_complete(state):
         tick_iface.viewport_state.volume = _volume_cache_from_snapshot(state)
 
     previous_mode = tick_iface.viewport_state.mode
-    mode_update = updates.mode
-    mode_changed = mode_update is not None and mode_update is not previous_mode
-    signature_changed = tick_iface.render_mailbox_update_signature(state)
-    if mode_changed:
-        signature_changed = True
+    mode_update = previous_mode
+    dims_mode = getattr(state, "dims_mode", None)
+    if isinstance(dims_mode, str):
+        try:
+            mode_update = RenderMode[dims_mode.upper()]
+        except KeyError:
+            mode_update = previous_mode
+    signature_changed = True
+
     if signature_changed:
         apply_render_snapshot(apply_iface, state_for_apply)
 

@@ -83,7 +83,6 @@ from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import (
     LayerVisualState,
     RenderLedgerSnapshot,
-    RenderUpdate,
     snapshot_layer_controls,
     snapshot_multiscale_state,
     snapshot_render_state,
@@ -358,7 +357,6 @@ class CaptureWorker:
             (16, self._zarr_shape[0], self._zarr_shape[1]),
             (8, self._zarr_shape[0] // 2, self._zarr_shape[1] // 2),
         )
-        self.render_updates: list[RenderUpdate] = []
         self._last_scene_state: RenderLedgerSnapshot | None = None
         self._plane_visual_node = SimpleNamespace(
             gamma=1.0,
@@ -536,24 +534,6 @@ class CaptureWorker:
 
     def _emit_current_camera_pose(self, _reason: str) -> None:
         self._pose_seq += 1
-
-    def enqueue_update(self, delta: RenderUpdate) -> None:
-        """Capture controller render updates for assertions without a render loop."""
-
-        self.render_updates.append(delta)
-
-        if delta.mode is not None:
-            self.viewport_state.mode = delta.mode
-
-        if delta.plane_state is not None:
-            self.viewport_state.plane = replace(delta.plane_state)
-
-        if delta.volume_state is not None:
-            self.viewport_state.volume = replace(delta.volume_state)
-
-        if delta.scene_state is not None:
-            self._last_scene_state = delta.scene_state
-            self._mark_render_tick_needed()
 
     def _update_level_metadata(self, descriptor: SimpleNamespace, applied: Any) -> None:
         level = int(applied.level)

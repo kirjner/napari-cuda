@@ -33,18 +33,20 @@ from napari_cuda.server.scene.blocks import (
     AxesBlock,
     axes_to_payload,
     CameraBlock,
+    PlaneCameraBlock,
+    VolumeCameraBlock,
+    camera_block_from_payload,
     camera_block_to_payload,
     IndexBlock,
+    index_block_from_payload,
     index_block_to_payload,
     LodBlock,
+    lod_block_from_payload,
     lod_block_to_payload,
     ViewBlock,
+    view_block_from_payload,
     view_block_to_payload,
     axes_from_payload,
-    camera_block_from_payload,
-    index_block_from_payload,
-    lod_block_from_payload,
-    view_block_from_payload,
 )
 from napari_cuda.shared.dims_spec import (
     dims_block_from_spec,
@@ -194,8 +196,10 @@ def scene_blocks_from_snapshot(
         lod_block = lod_block_from_payload(lod_entry.value)
 
     camera_entry = snapshot.get(("camera", "main", "state"))
-    assert camera_entry is not None and camera_entry.value is not None, "camera block missing under feature flag"
-    camera_block = camera_block_from_payload(camera_entry.value)
+    if camera_entry is not None and camera_entry.value is not None:
+        camera_block = camera_block_from_payload(camera_entry.value)
+    else:
+        camera_block = _legacy_camera_block_from_snapshot(snapshot)
 
     return SceneBlockSnapshot(
         view=view_block,
@@ -400,6 +404,32 @@ def _legacy_viewport_state(snapshot: Mapping[tuple[str, str, str], LedgerEntry])
         payload["volume"] = volume_entry.value
 
     return payload
+
+
+def _legacy_camera_block_from_snapshot(
+    snapshot: Mapping[tuple[str, str, str], LedgerEntry],
+) -> CameraBlock:
+    plane_center = _ledger_value(snapshot, "camera_plane", "main", "center")
+    plane_zoom = _ledger_value(snapshot, "camera_plane", "main", "zoom")
+    plane_rect = _ledger_value(snapshot, "camera_plane", "main", "rect")
+    plane_block = PlaneCameraBlock(
+        rect=plane_rect if plane_rect is not None else None,
+        center=plane_center if plane_center is not None else None,
+        zoom=plane_zoom if plane_zoom is not None else None,
+    )
+
+    volume_center = _ledger_value(snapshot, "camera_volume", "main", "center")
+    volume_angles = _ledger_value(snapshot, "camera_volume", "main", "angles")
+    volume_distance = _ledger_value(snapshot, "camera_volume", "main", "distance")
+    volume_fov = _ledger_value(snapshot, "camera_volume", "main", "fov")
+    volume_block = VolumeCameraBlock(
+        center=volume_center if volume_center is not None else None,
+        angles=tuple(volume_angles) if volume_angles is not None else None,
+        distance=volume_distance if volume_distance is not None else None,
+        fov=volume_fov if volume_fov is not None else None,
+    )
+
+    return CameraBlock(plane=plane_block, volume=volume_block)
 
 
 # ---------------------------------------------------------------------------
