@@ -2,6 +2,39 @@
 
 Tracks intentional updates to the architecture spec and the authoritative modules. Add new entries (date-descending) with links to the implemented sections/files so future sessions can pick up immediately.
 
+# 2025-11-12 — op_seq watcher snapshot refresh (camera jitter fix)
+
+### Runtime
+- `_op_seq_watcher_apply_snapshot` (src/napari_cuda/server/runtime/worker/lifecycle.py) now re-pulls the ledger snapshot whenever a block signature changes and returns that snapshot to the main render loop. The loop replaces its cached `frame_state` with the refreshed snapshot before acknowledging `scene.main.op_state`, so the worker applies the exact `{view, axes, index, lod, camera, layers}` payload that triggered the watcher instead of replaying the prior frame.
+- The change eliminates the camera “boomerang” jitter that appeared when worker pose reducers wrote `camera.main.state` without bumping `scene.main.op_seq`. The block-ledger watcher is now authoritative even for worker-origin poses while keepings op_seq semantics intact.
+- A follow-up task tracks the more holistic render-loop refactor (single authoritative snapshot per tick / block-only watcher inputs). Until that lands, this minimal fix keeps the runtime aligned with Phase 3 goals without reintroducing the mailbox.
+
+### Docs
+- Documented the snapshot refresh plus the planned render-loop cleanup in `docs/architecture/view_axes_index_plan.md` (Phase 3 checklist) and `docs/architecture/cut_down_guides/runtime_pipeline.md` (runtime overview) so future work picks up the remaining action item.
+
+### Tests
+- Targeted runtime-specific suites are already covered by the previous Phase 3 run; no behavior flags changed. Smoke-tested manually via client logs to confirm orbit deltas no longer interleave stale poses.
+
+# 2025-11-11 — Render runtime now block-native (no RenderUpdate mailbox)
+
+### Runtime
+- Deleted `RenderUpdateMailbox`/`RenderUpdate` and their state-machine tests; the worker now samples `{view, axes, index, lod, camera, layers}` directly off the ledger via the op_seq watcher.
+- Reworked `consume_render_snapshot`/`drain_scene_updates` to apply snapshots immediately (the “drain” hook is now a no-op kept for legacy call sites).
+- Simplified `RenderPlanInterface` + camera tick helpers to record zoom hints on the worker itself (`_record/_consume_zoom_hint`); level policy now reads those helpers instead of the mailbox.
+- Control-plane code (`egl_headless_server`, state update handlers, runtime API, harnesses) no longer calls `worker.enqueue_update`—ledger bumps drive the render loop exclusively.
+- Scene builders synthesize `CameraBlock` data if the new scope isn’t present (fallback to `camera_plane`/`camera_volume` while we remove those writers next). This keeps tests + notify paths stable during the cut-over.
+
+### Docs
+- Updated `AGENTS.md`, `docs/architecture/system_design_spec.md`, `docs/architecture/dims_camera_legacy.md`, and `docs/architecture/view_axes_index_plan.md` to document the op_seq watcher as the only runtime path and mark the mailbox removal as complete.
+
+### Tests
+- Targeted pytest runs executed:  
+  `uv run pytest -q src/napari_cuda/server/tests/test_egl_worker_camera.py`  
+  `uv run pytest -q src/napari_cuda/server/tests/test_state_channel_updates.py`  
+  `uv run pytest -q src/napari_cuda/server/tests/test_scene_blocks_parity.py`  
+  `uv run pytest -q src/napari_cuda/server/utils/_tests/test_signatures.py`  
+  `uv run pytest -q src/napari_cuda/server/runtime/_tests/test_op_seq_watcher_state.py`
+
 ## 2025-11-10 — View/Axes/Index/Lod/Camera docs refresh
 
 ### Docs

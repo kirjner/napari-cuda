@@ -197,12 +197,20 @@ Phase 3 (in progress) removes the legacy planner/mailbox stack, deletes
 collapses notify/runtime code to the block schema only.
 
 Phase 3 work items (authoritative once this doc is updated again):
-1. **In progress – watcher landed behind the flag.** Remove the render-loop
-   mailbox/planner stack (`RenderUpdateMailbox`, `ViewportPlanner`, ledger-backed
-   `PlaneViewportCache` / `VolumeViewportCache` duplicates) so worker ticks hydrate
-   the viewer directly from the block snapshots every frame. _Implementation note:_
-   the op_seq watcher path already skips the mailbox; deleting the legacy classes
-   is now unblocked once we verify the flag-on runtime in production.
+1. **✅ Render loop mailbox removed.** Worker ticks now hydrate the viewer directly
+   from the block snapshots via the op_seq watcher. `RenderUpdateMailbox`/`RenderUpdate`
+   no longer exist; `ViewportPlanner` sticks around only for ROI/level bookkeeping
+   and can be simplified once the new block-native apply path lands.
+   - **2025-11-12:** `_op_seq_watcher_apply_snapshot` now re-pulls a fresh ledger snapshot
+     whenever a block signature changes and hands that snapshot back to the render loop.
+     This prevents the worker from reapplying the previous frame’s camera pose (the “orbit
+     jitter” observed when `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1`). The watcher, ledger,
+     and notify paths now stay in lockstep for worker-origin camera poses without touching
+     `scene.main.op_seq`.
+   - **Planned follow-up:** collapse the render loop down to a single authoritative snapshot
+     per tick (or operate directly on `SceneBlockSnapshot`) so we stop double-pulling the
+     ledger entirely. Track this in the Phase 3 cleanup queue once the remaining legacy
+     scopes are deleted.
 2. Delete legacy ledger scopes (`viewport.plane/volume.state`,
    `camera_plane.*`, `camera_volume.*`) and update reducers/transactions to
    persist only the block payloads (plus restore caches while they still exist).

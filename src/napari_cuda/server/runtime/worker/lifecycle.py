@@ -250,7 +250,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             if use_op_seq_watcher:
                 watcher_state = _OpSeqWatcherState()
                 worker._op_seq_watcher_state = watcher_state  # type: ignore[attr-defined]
-                _apply_snapshot_without_mailbox(worker, initial_snapshot)
+                consume_render_snapshot(worker, initial_snapshot)
                 _prime_op_seq_watcher(worker, initial_snapshot, watcher_state)
             else:
                 consume_render_snapshot(worker, initial_snapshot)
@@ -336,8 +336,14 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 )
                 current_op_seq = int(frame_state.op_seq) if isinstance(frame_state.op_seq, int) else 0
                 if use_op_seq_watcher:
-                    applied = _op_seq_watcher_apply_snapshot(worker, frame_state, current_op_seq)
-                    if applied:
+                    refreshed_snapshot = _op_seq_watcher_apply_snapshot(
+                        server,
+                        worker,
+                        frame_state,
+                        current_op_seq,
+                    )
+                    if refreshed_snapshot is not None:
+                        frame_state = refreshed_snapshot
                         server._ack_scene_op_if_open(
                             frame_state=frame_state,
                             origin="worker.render.apply",
@@ -464,10 +470,11 @@ def stop_worker(state: WorkerLifecycleState) -> None:
 
 
 def _op_seq_watcher_apply_snapshot(
+    server: object,
     worker: EGLRendererWorker,
     snapshot: RenderLedgerSnapshot,
     current_op_seq: int,
-) -> bool:
+) -> Optional[RenderLedgerSnapshot]:
     watcher_state: _OpSeqWatcherState | None = getattr(worker, "_op_seq_watcher_state", None)
     if watcher_state is None:
         watcher_state = _OpSeqWatcherState()
@@ -476,7 +483,7 @@ def _op_seq_watcher_apply_snapshot(
     ledger = getattr(worker, "_ledger", None)
     assert ledger is not None, "worker ledger must be attached before rendering"
     blocks: SceneBlockSnapshot = fetch_scene_blocks(ledger)
-    signatures = {
+    detection_signatures = {
         "view": view_block_signature(blocks.view),
         "axes": axes_block_signature(blocks.axes),
         "index": index_block_signature(blocks.index),
@@ -485,20 +492,37 @@ def _op_seq_watcher_apply_snapshot(
         "layers": layers_block_signature(snapshot.layer_values),
     }
 
-    changed = watcher_state.observe(
-        current_op_seq,
-        view=signatures["view"],
-        axes=signatures["axes"],
-        index=signatures["index"],
-        lod=signatures["lod"],
-        camera=signatures["camera"],
-        layers=signatures["layers"],
-    )
-    if not changed:
-        return False
+    changed = current_op_seq != watcher_state.last_op_seq
+    for attr, token in detection_signatures.items():
+        previous: SignatureToken | None = getattr(watcher_state, f"{attr}_signature")
+        if previous is None or previous.value != token.value:
+            changed = True
+            break
 
-    _apply_snapshot_without_mailbox(worker, snapshot)
-    return True
+    if not changed:
+        return None
+
+    fresh_snapshot = pull_render_snapshot(server)
+    fresh_blocks: SceneBlockSnapshot = fetch_scene_blocks(ledger)
+    applied_signatures = {
+        "view": view_block_signature(fresh_blocks.view),
+        "axes": axes_block_signature(fresh_blocks.axes),
+        "index": index_block_signature(fresh_blocks.index),
+        "lod": lod_block_signature(fresh_blocks.lod),
+        "camera": camera_block_signature(fresh_blocks.camera),
+        "layers": layers_block_signature(fresh_snapshot.layer_values),
+    }
+
+    watcher_state.last_op_seq = current_op_seq
+    watcher_state.view_signature = applied_signatures["view"]
+    watcher_state.axes_signature = applied_signatures["axes"]
+    watcher_state.index_signature = applied_signatures["index"]
+    watcher_state.lod_signature = applied_signatures["lod"]
+    watcher_state.camera_signature = applied_signatures["camera"]
+    watcher_state.layers_signature = applied_signatures["layers"]
+
+    consume_render_snapshot(worker, fresh_snapshot)
+    return fresh_snapshot
 
 
 def _prime_op_seq_watcher(
@@ -521,85 +545,6 @@ def _prime_op_seq_watcher(
     )
 
 
-def _apply_snapshot_without_mailbox(worker: EGLRendererWorker, snapshot: RenderLedgerSnapshot) -> None:
-    tick_iface = RenderPlanInterface(worker)
-    apply_iface = RenderApplyInterface(worker)
-
-    snapshot_op_seq = int(snapshot.op_seq) if isinstance(snapshot.op_seq, int) else 0
-    if snapshot_op_seq < int(tick_iface.viewport_state.op_seq):
-        logger.debug(
-            "op-seq watcher snapshot skipped: stale op_seq snapshot=%d latest=%d",
-            snapshot_op_seq,
-            int(tick_iface.viewport_state.op_seq),
-        )
-        return
-    tick_iface.viewport_state.op_seq = snapshot_op_seq
-
-    applied_versions = tick_iface.applied_versions
-    record_snapshot_versions(applied_versions, snapshot)
-    layer_changes = extract_layer_changes(applied_versions, snapshot)
-
-    state_for_apply = snapshot
-    if layer_changes:
-        state_for_apply = replace(snapshot, layer_values=layer_changes)
-    elif snapshot.layer_values is not None:
-        state_for_apply = replace(snapshot, layer_values=None)
-
-    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _plane_pose_complete(snapshot):
-        plane_state = _plane_cache_from_snapshot(snapshot)
-        tick_iface.viewport_state.plane = plane_state
-        if tick_iface.viewport_runner is not None:
-            tick_iface.viewport_runner._plane = plane_state  # type: ignore[attr-defined]
-    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _volume_pose_complete(snapshot):
-        tick_iface.viewport_state.volume = _volume_cache_from_snapshot(snapshot)
-
-    previous_mode = tick_iface.viewport_state.mode
-    next_mode = previous_mode
-    if snapshot.dims_mode is not None:
-        next_mode = RenderMode.VOLUME if snapshot.dims_mode.lower() == "volume" else RenderMode.PLANE
-
-    apply_render_snapshot(apply_iface, state_for_apply)
-
-    tick_iface.viewport_state.mode = next_mode
-    if tick_iface.viewport_state.mode is RenderMode.VOLUME:
-        tick_iface.level_policy_suppressed = False
-    elif previous_mode is RenderMode.VOLUME:
-        tick_iface.level_policy_suppressed = True
-
-    runner = tick_iface.viewport_runner
-    if runner is not None:
-        runner.ingest_snapshot(snapshot)
-
-    drain_res = drain_render_state(worker, state_for_apply)
-
-    if drain_res.z_index is not None:
-        apply_iface.set_z_index(int(drain_res.z_index))
-    if drain_res.data_wh is not None:
-        apply_iface.set_data_shape(int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
-
-    runner = tick_iface.viewport_runner
-    if runner is not None and tick_iface.viewport_state.mode is RenderMode.PLANE:
-        rect = tick_iface.current_panzoom_rect()
-        if rect is not None:
-            runner.update_camera_rect(rect)
-        if tick_iface.current_level_index() == int(runner.state.target_level):
-            runner.mark_level_applied(tick_iface.current_level_index())
-    elif runner is not None and tick_iface.current_level_index() == int(runner.state.target_level):
-        runner.mark_level_applied(tick_iface.current_level_index())
-
-    if (
-        drain_res.render_marked
-        and tick_iface.viewport_state.mode is not RenderMode.VOLUME
-        and not tick_iface.level_policy_suppressed
-    ):
-        tick_iface.evaluate_level_policy()
-
-    if tick_iface.level_policy_suppressed:
-        ledger = tick_iface.ledger
-        assert ledger is not None, "ledger must be attached before rendering"
-        op_kind_entry = ledger.get("scene", "main", "op_kind")
-        if op_kind_entry is not None and str(op_kind_entry.value) == "dims-update":
-            tick_iface.level_policy_suppressed = False
 @dataclass(slots=True)
 class _OpSeqWatcherState:
     last_op_seq: int = -1

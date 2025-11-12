@@ -1,9 +1,15 @@
 Runtime Pipeline (Cut-Down)
 
 Mailbox & Signatures
-- Flag-on (`NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1`): `RenderUpdateMailbox` is bypassed today. The worker
-  watches `scene.main.op_seq`, reads `{view, axes, index, lod, camera, layers}` directly from the ledger,
+- Runtime path (flag-on by default during Phase 3): the worker watches `scene.main.op_seq`,
+  reads `{view, axes, index, lod, camera, layers}` directly from the ledger,
   computes per-block signatures, and re-applies only the blocks whose signatures changed.
+  - 2025-11-12: `_op_seq_watcher_apply_snapshot` re-pulls a fresh render snapshot whenever
+    a signature flips and returns it to the main loop. This keeps camera poses in sync and
+    avoids the “orbit jitter” regression while the block watcher replaces RenderMailbox.
+  - Follow-up (tracked in Phase 3 docs): refactor the render loop so each tick operates on
+    a single authoritative snapshot (or pure block snapshot) to remove the double-pull and
+    simplify watcher bookkeeping.
 - Flag-off: legacy planner/mailbox pipeline remains in place until Phase 3 cleanup deletes it.
 
 Worker Intent Mailbox (Special-Case Loopback)
