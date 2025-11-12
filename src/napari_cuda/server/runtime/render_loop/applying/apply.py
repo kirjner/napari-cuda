@@ -17,6 +17,7 @@ from napari_cuda.server.runtime.render_loop.applying.interface import (
 )
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
+from napari_cuda.server.scene.models import SceneBlockSnapshot
 from napari_cuda.server.utils.signatures import SignatureToken
 from napari_cuda.shared.dims_spec import dims_spec_remap_step_for_level
 
@@ -53,7 +54,11 @@ def _suspend_fit_callbacks(viewer: Any):
         order_event.connect(viewer.fit_to_view)
 
 
-def apply_render_snapshot(snapshot_iface: RenderApplyInterface, snapshot: RenderLedgerSnapshot) -> None:
+def apply_render_snapshot(
+    snapshot_iface: RenderApplyInterface,
+    snapshot: RenderLedgerSnapshot,
+    blocks: SceneBlockSnapshot | None = None,
+) -> None:
     """Apply the snapshot atomically, suppressing napari auto-fit during dims.
 
     This ensures that napari's fit_to_view callback does not run against a
@@ -64,7 +69,7 @@ def apply_render_snapshot(snapshot_iface: RenderApplyInterface, snapshot: Render
     viewer = snapshot_iface.viewer
     assert viewer is not None, "RenderTxn requires an active viewer"
 
-    snapshot_ops = _resolve_snapshot_ops(snapshot_iface, snapshot)
+    snapshot_ops = _resolve_snapshot_ops(snapshot_iface, snapshot, blocks)
 
     with _suspend_fit_callbacks(viewer):
         if logger.isEnabledFor(logging.INFO):
@@ -85,21 +90,35 @@ __all__ = [
 
 
 def _resolve_snapshot_ops(
-    snapshot_iface: RenderApplyInterface, snapshot: RenderLedgerSnapshot
+    snapshot_iface: RenderApplyInterface,
+    snapshot: RenderLedgerSnapshot,
+    blocks: SceneBlockSnapshot | None = None,
 ) -> dict[str, Any]:
     """Compute the metadata and slice ops before mutating worker state."""
 
-    nd = int(snapshot.ndisplay) if snapshot.ndisplay is not None else 2
+    if snapshot.ndisplay is not None:
+        nd = int(snapshot.ndisplay)
+    elif blocks is not None:
+        nd = int(blocks.view.ndim)
+    else:
+        nd = 2
     target_volume = nd >= 3
 
     source = snapshot_iface.ensure_scene_source()
     current_level = snapshot_iface.current_level_index()
-    snapshot_level = int(snapshot.current_level)
+    if snapshot.current_level is not None:
+        snapshot_level = int(snapshot.current_level)
+    elif blocks is not None and blocks.lod is not None:
+        snapshot_level = int(blocks.lod.level)
+    else:
+        snapshot_level = int(current_level)
 
     dims_spec = snapshot.dims_spec
     assert dims_spec is not None, "render snapshot missing dims_spec"
 
     snapshot_step = dims_spec.current_step
+    if snapshot_step is None and blocks is not None and blocks.index is not None:
+        snapshot_step = tuple(int(v) for v in blocks.index.value)
 
     was_volume = snapshot_iface.viewport_state.mode is RenderMode.VOLUME
     ledger_snapshot_step = snapshot_iface.ledger_step()

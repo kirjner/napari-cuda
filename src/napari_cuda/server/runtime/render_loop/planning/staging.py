@@ -20,6 +20,7 @@ from napari_cuda.server.scene import (
     LayerVisualState,
     RenderLedgerSnapshot,
 )
+from napari_cuda.server.scene.models import SceneBlockSnapshot
 from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
 from napari_cuda.server.utils.signatures import snapshot_versions
 
@@ -93,6 +94,86 @@ def _volume_cache_from_snapshot(snapshot: RenderLedgerSnapshot) -> VolumeViewpor
     if snapshot.volume_fov is not None:
         volume_state.update_pose(fov=float(snapshot.volume_fov))
     return volume_state
+
+
+def _plane_cache_from_blocks(blocks: SceneBlockSnapshot) -> PlaneViewportCache | None:
+    restore = blocks.plane_restore
+    if restore is None:
+        return None
+    pose = restore.pose
+    if pose.rect is None or pose.center is None or pose.zoom is None:
+        return None
+    plane_state = PlaneViewportCache()
+    level_value = int(restore.level)
+    step_value = tuple(int(v) for v in restore.index)
+    plane_state.target_level = level_value
+    plane_state.applied_level = level_value
+    plane_state.target_step = step_value
+    plane_state.applied_step = step_value
+    # Plane restores always represent the 2D view.
+    plane_state.target_ndisplay = 2
+    plane_state.snapshot_level = level_value
+    pose = restore.pose
+    plane_state.update_pose(
+        rect=tuple(float(v) for v in pose.rect) if pose.rect is not None else None,
+        center=tuple(float(v) for v in pose.center) if pose.center is not None else None,
+        zoom=float(pose.zoom) if pose.zoom is not None else None,
+    )
+    plane_state.awaiting_level_confirm = False
+    plane_state.camera_pose_dirty = False
+    plane_state.applied_roi = None
+    plane_state.applied_roi_signature = None
+    return plane_state
+
+
+def _volume_cache_from_blocks(blocks: SceneBlockSnapshot) -> VolumeViewportCache | None:
+    restore = blocks.volume_restore
+    if restore is None:
+        return None
+    pose = restore.pose
+    if pose.center is None or pose.angles is None or pose.distance is None or pose.fov is None:
+        return None
+    volume_state = VolumeViewportCache()
+    level_value = int(restore.level)
+    volume_state.level = level_value
+    pose = restore.pose
+    if pose.center is not None:
+        volume_state.update_pose(center=tuple(float(v) for v in pose.center))
+    if pose.angles is not None:
+        volume_state.update_pose(angles=tuple(float(v) for v in pose.angles))
+    if pose.distance is not None:
+        volume_state.update_pose(distance=float(pose.distance))
+    if pose.fov is not None:
+        volume_state.update_pose(fov=float(pose.fov))
+    return volume_state
+
+
+def _hydrate_plane_pose_from_snapshot(
+    plane_state: PlaneViewportCache,
+    state: RenderLedgerSnapshot,
+) -> None:
+    pose = plane_state.pose
+    if pose.rect is None and state.plane_rect is not None:
+        plane_state.update_pose(rect=tuple(float(v) for v in state.plane_rect))
+    if pose.center is None and state.plane_center is not None:
+        plane_state.update_pose(center=tuple(float(v) for v in state.plane_center))
+    if pose.zoom is None and state.plane_zoom is not None:
+        plane_state.update_pose(zoom=float(state.plane_zoom))
+
+
+def _hydrate_volume_pose_from_snapshot(
+    volume_state: VolumeViewportCache,
+    state: RenderLedgerSnapshot,
+) -> None:
+    pose = volume_state.pose
+    if pose.center is None and state.volume_center is not None:
+        volume_state.update_pose(center=tuple(float(v) for v in state.volume_center))
+    if pose.angles is None and state.volume_angles is not None:
+        volume_state.update_pose(angles=tuple(float(v) for v in state.volume_angles))
+    if pose.distance is None and state.volume_distance is not None:
+        volume_state.update_pose(distance=float(state.volume_distance))
+    if pose.fov is None and state.volume_fov is not None:
+        volume_state.update_pose(fov=float(state.volume_fov))
 
 
 def normalize_scene_state(state: RenderLedgerSnapshot) -> RenderLedgerSnapshot:
@@ -171,13 +252,35 @@ def _apply_snapshot(worker: EGLRendererWorker, state: RenderLedgerSnapshot) -> N
     elif state.layer_values is not None:
         state_for_apply = replace(state, layer_values=None)
 
-    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _plane_pose_complete(state):
+    blocks_snapshot = state.block_snapshot if ENABLE_VIEW_AXES_INDEX_BLOCKS else None
+
+    plane_state = None
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        if blocks_snapshot is not None:
+            plane_state = _plane_cache_from_blocks(blocks_snapshot)
+        if plane_state is None and _plane_pose_complete(state):
+            plane_state = _plane_cache_from_snapshot(state)
+    elif _plane_pose_complete(state):
         plane_state = _plane_cache_from_snapshot(state)
+    if plane_state is not None:
+        # Restore caches may omit pose details during bootstrap; fill gaps from the legacy snapshot before applying.
+        _hydrate_plane_pose_from_snapshot(plane_state, state)
         tick_iface.viewport_state.plane = plane_state
         if tick_iface.viewport_runner is not None:
             tick_iface.viewport_runner._plane = plane_state  # type: ignore[attr-defined]
-    if ENABLE_VIEW_AXES_INDEX_BLOCKS and _volume_pose_complete(state):
-        tick_iface.viewport_state.volume = _volume_cache_from_snapshot(state)
+
+    volume_state = None
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        if blocks_snapshot is not None:
+            volume_state = _volume_cache_from_blocks(blocks_snapshot)
+        if volume_state is None and _volume_pose_complete(state):
+            volume_state = _volume_cache_from_snapshot(state)
+    elif _volume_pose_complete(state):
+        volume_state = _volume_cache_from_snapshot(state)
+    if volume_state is not None:
+        # Same story for volume poses: hydrate missing center/angles from the snapshot payloads until caches are authoritative.
+        _hydrate_volume_pose_from_snapshot(volume_state, state)
+        tick_iface.viewport_state.volume = volume_state
 
     previous_mode = tick_iface.viewport_state.mode
     mode_update = previous_mode
@@ -190,7 +293,7 @@ def _apply_snapshot(worker: EGLRendererWorker, state: RenderLedgerSnapshot) -> N
     signature_changed = True
 
     if signature_changed:
-        apply_render_snapshot(apply_iface, state_for_apply)
+        apply_render_snapshot(apply_iface, state_for_apply, blocks_snapshot)
 
     if mode_update is not None:
         tick_iface.viewport_state.mode = mode_update
