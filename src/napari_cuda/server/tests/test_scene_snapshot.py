@@ -4,98 +4,49 @@ from typing import Optional
 
 import numpy as np
 
+from napari_cuda.server.control import state_reducers as reducers
 from napari_cuda.server.scene import snapshot_render_state, snapshot_scene
+from napari_cuda.server.scene import blocks as scene_blocks
+import napari_cuda.server.scene.builders as scene_builders
+from napari_cuda.server.scene.blocks import camera_block_from_payload
 from napari_cuda.server.ledger import ServerStateLedger
-from napari_cuda.shared.dims_spec import (
-    AxisExtent,
-    DimsSpec,
-    DimsSpecAxis,
-    dims_spec_to_payload,
-)
 
 
 def _seed_plane_ledger(ndisplay: int = 2) -> ServerStateLedger:
     ledger = ServerStateLedger()
-    ledger.record_confirmed("dims", "main", "current_step", (0, 0, 0), origin="test.plane")
-    axes = (
-        DimsSpecAxis(
-            index=0,
-            label="z",
-            role="z",
-            displayed=ndisplay >= 3,
-            order_position=0,
-            current_step=0,
-            margin_left_steps=0.0,
-            margin_right_steps=0.0,
-            margin_left_world=0.0,
-            margin_right_world=0.0,
-            per_level_steps=(10,),
-            per_level_world=(AxisExtent(start=0.0, stop=9.0, step=1.0),),
-        ),
-        DimsSpecAxis(
-            index=1,
-            label="y",
-            role="y",
-            displayed=True,
-            order_position=1,
-            current_step=0,
-            margin_left_steps=0.0,
-            margin_right_steps=0.0,
-            margin_left_world=0.0,
-            margin_right_world=0.0,
-            per_level_steps=(20,),
-            per_level_world=(AxisExtent(start=0.0, stop=19.0, step=1.0),),
-        ),
-        DimsSpecAxis(
-            index=2,
-            label="x",
-            role="x",
-            displayed=True,
-            order_position=2,
-            current_step=0,
-            margin_left_steps=0.0,
-            margin_right_steps=0.0,
-            margin_left_world=0.0,
-            margin_right_world=0.0,
-            per_level_steps=(30,),
-            per_level_world=(AxisExtent(start=0.0, stop=29.0, step=1.0),),
-        ),
-    )
-    displayed_axes: tuple[int, ...] = (1, 2) if ndisplay == 2 else (0, 1, 2)
-    spec = DimsSpec(
-        version=1,
-        ndim=3,
-        ndisplay=ndisplay,
+    reducers.reduce_bootstrap_state(
+        ledger,
+        step=(0, 0, 0),
+        axis_labels=("z", "y", "x"),
         order=(0, 1, 2),
-        displayed=displayed_axes,
-        current_level=0,
-        current_step=(0, 0, 0),
         level_shapes=((10, 20, 30),),
-        plane_mode=ndisplay < 3,
-        axes=axes,
-        levels=(
-            {"index": 0, "shape": [10, 20, 30], "downsample": [1.0, 1.0, 1.0]},
-        ),
-        labels=("z", "y", "x"),
+        levels=({"index": 0, "shape": [10, 20, 30]},),
+        current_level=0,
+        ndisplay=ndisplay,
+        origin="test.bootstrap",
     )
-    ledger.record_confirmed("dims", "main", "dims_spec", dims_spec_to_payload(spec), origin="test.plane")
-    ledger.record_confirmed(
-        "camera_plane",
-        "main",
-        "center",
-        (5.0, 10.0, 0.0),
-        origin="test.plane",
+    reducers.reduce_camera_update(
+        ledger,
+        center=(5.0, 10.0, 0.0) if ndisplay >= 3 else (5.0, 10.0),
+        zoom=1.0,
+        rect=(0.0, 0.0, 20.0, 30.0),
+        origin="test.camera",
+        bump_op_seq=False,
     )
-    ledger.record_confirmed("camera_plane", "main", "zoom", 1.0, origin="test.plane")
     ledger.record_confirmed(
-        "camera_plane",
-        "main",
-        "rect",
-        (0.0, 0.0, 20.0, 30.0),
-        origin="test.plane",
+        "viewport",
+        "active",
+        "state",
+        {"mode": "volume" if ndisplay >= 3 else "plane", "level": 0},
+        origin="test.bootstrap",
     )
     ledger.record_confirmed("layer", "layer-0", "visible", True, origin="test.plane")
     return ledger
+
+
+reducers.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
+scene_blocks.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
+scene_builders.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
 
 
 def test_snapshot_scene_plane() -> None:
@@ -116,32 +67,25 @@ def test_snapshot_scene_plane() -> None:
 
     camera_block = scene.viewer.camera
     assert camera_block["ndisplay"] == 2
-    assert camera_block["center"] == [5.0, 10.0, 0.0]
+    assert camera_block["center"] == [5.0, 10.0]
     assert camera_block["rect"] == [0.0, 0.0, 20.0, 30.0]
 
     layer_block = scene.layers[0].block
     assert layer_block["volume"] is False
-    assert layer_block["multiscale"]["levels"][0]["shape"] == [10, 20, 30]
+    assert layer_block["controls"]["visible"] is True
 
 
 def test_snapshot_scene_volume_camera() -> None:
     ledger = _seed_plane_ledger(ndisplay=3)
-    ledger.record_confirmed(
-        "camera_volume",
-        "main",
-        "center",
-        (15.0, 25.0, 35.0),
+    reducers.reduce_camera_update(
+        ledger,
+        center=(15.0, 25.0, 35.0),
+        angles=(45.0, 30.0, 0.0),
+        distance=100.0,
+        fov=60.0,
         origin="test.volume",
+        bump_op_seq=False,
     )
-    ledger.record_confirmed(
-        "camera_volume",
-        "main",
-        "angles",
-        (45.0, 30.0, 0.0),
-        origin="test.volume",
-    )
-    ledger.record_confirmed("camera_volume", "main", "distance", 100.0, origin="test.volume")
-    ledger.record_confirmed("camera_volume", "main", "fov", 60.0, origin="test.volume")
     ledger.record_confirmed("volume", "main", "rendering", "mip", origin="test.volume")
 
     render_state = snapshot_render_state(ledger)
@@ -205,3 +149,17 @@ def test_snapshot_scene_without_default_layer() -> None:
 
     assert scene.layers == ()
     assert scene.metadata["status"] == "idle"
+
+
+def test_render_snapshot_includes_block_snapshot_with_restore_caches() -> None:
+    ledger = _seed_plane_ledger()
+    plane_cache = reducers.load_plane_restore_cache(ledger)
+    volume_cache = reducers.load_volume_restore_cache(ledger)
+    render_state = snapshot_render_state(ledger)
+
+    blocks = render_state.block_snapshot
+    assert blocks is not None
+    assert blocks.view.mode == "plane"
+    assert blocks.index is not None
+    assert blocks.plane_restore == plane_cache
+    assert blocks.volume_restore == volume_cache

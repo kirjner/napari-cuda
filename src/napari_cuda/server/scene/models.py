@@ -5,6 +5,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Any, Iterable, Mapping, Literal, Optional
 
+from napari_cuda.server.scene.blocks import (
+    AxesBlock,
+    CameraBlock,
+    IndexBlock,
+    LodBlock,
+    PlaneRestoreCacheBlock,
+    ViewBlock,
+    VolumeRestoreCacheBlock,
+)
 from napari_cuda.shared.dims_spec import DimsSpec
 
 
@@ -22,6 +31,19 @@ class BootstrapSceneMetadata:
     plane_rect: Optional[tuple[float, float, float, float]] = None
     plane_center: Optional[tuple[float, float]] = None
     plane_zoom: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class SceneBlockSnapshot:
+    """Typed snapshot of the ledger scene blocks + restore caches."""
+
+    view: ViewBlock
+    axes: AxesBlock | None
+    index: IndexBlock | None
+    lod: LodBlock | None
+    camera: CameraBlock
+    plane_restore: PlaneRestoreCacheBlock | None
+    volume_restore: VolumeRestoreCacheBlock | None
 
 
 @dataclass(frozen=True)
@@ -71,6 +93,7 @@ class RenderLedgerSnapshot:
     layer_values: Optional[dict[str, "LayerVisualState"]] = None
     camera_versions: Optional[dict[str, int]] = None
     op_seq: int = 0
+    block_snapshot: Optional[SceneBlockSnapshot] = None
 
 
 @dataclass(frozen=True)

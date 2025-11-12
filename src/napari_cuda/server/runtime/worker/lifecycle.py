@@ -43,7 +43,8 @@ from napari_cuda.server.scene import (
 )
 import numpy as np
 from napari_cuda.server.runtime.ipc.mailboxes.worker_intent import ThumbnailCapture
-from napari_cuda.server.scene.builders import fetch_scene_blocks, SceneBlockSnapshot
+from napari_cuda.server.scene.builders import fetch_scene_blocks
+from napari_cuda.server.scene.models import SceneBlockSnapshot
 from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
 from napari_cuda.server.utils.signatures import (
     SignatureToken,
@@ -219,6 +220,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             )
             state.worker = worker
             worker.attach_ledger(server._state_ledger)  # type: ignore[attr-defined]
+            worker._op_seq_watcher_state = None  # type: ignore[attr-defined]
 
             core_init_vispy_scene(worker)
             core_init_egl(worker)
@@ -255,8 +257,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             else:
                 consume_render_snapshot(worker, initial_snapshot)
                 drain_scene_updates(worker)
-            frame_state = pull_render_snapshot(server)
-            last_snapshot_op_seq = int(frame_state.op_seq) if isinstance(frame_state.op_seq, int) else 0
+            last_snapshot_op_seq = int(initial_snapshot.op_seq) if isinstance(initial_snapshot.op_seq, int) else 0
+            frame_state: RenderLedgerSnapshot | None = None
 
             # Mark server-ready AFTER metadata is available, BEFORE worker is_ready/refresh
             state.ready_event.set()
@@ -334,6 +336,8 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                     bool(has_camera_deltas),
                     server._animate,
                 )
+
+                frame_state = pull_render_snapshot(server)
                 current_op_seq = int(frame_state.op_seq) if isinstance(frame_state.op_seq, int) else 0
                 if use_op_seq_watcher:
                     refreshed_snapshot = _op_seq_watcher_apply_snapshot(
@@ -359,7 +363,6 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
 
                 timings, packet, flags, seq = worker.capture_and_encode_packet()
                 thumbnail_state = frame_state
-                frame_state = pull_render_snapshot(server)
                 # Post-frame: capture thumbnail on worker and hand off via mailbox
                 viewer = worker.viewer_model()
                 if viewer is not None and viewer.layers:
@@ -475,14 +478,19 @@ def _op_seq_watcher_apply_snapshot(
     snapshot: RenderLedgerSnapshot,
     current_op_seq: int,
 ) -> Optional[RenderLedgerSnapshot]:
-    watcher_state: _OpSeqWatcherState | None = getattr(worker, "_op_seq_watcher_state", None)
+    watcher_state: _OpSeqWatcherState | None = worker._op_seq_watcher_state  # type: ignore[attr-defined]
     if watcher_state is None:
         watcher_state = _OpSeqWatcherState()
         worker._op_seq_watcher_state = watcher_state  # type: ignore[attr-defined]
 
-    ledger = getattr(worker, "_ledger", None)
+    ledger = worker._ledger  # type: ignore[attr-defined]
     assert ledger is not None, "worker ledger must be attached before rendering"
-    blocks: SceneBlockSnapshot = fetch_scene_blocks(ledger)
+
+    blocks = snapshot.block_snapshot
+    if blocks is None:
+        blocks = fetch_scene_blocks(ledger)
+        snapshot = replace(snapshot, block_snapshot=blocks)
+
     detection_signatures = {
         "view": view_block_signature(blocks.view),
         "axes": axes_block_signature(blocks.axes),
@@ -502,27 +510,16 @@ def _op_seq_watcher_apply_snapshot(
     if not changed:
         return None
 
-    fresh_snapshot = pull_render_snapshot(server)
-    fresh_blocks: SceneBlockSnapshot = fetch_scene_blocks(ledger)
-    applied_signatures = {
-        "view": view_block_signature(fresh_blocks.view),
-        "axes": axes_block_signature(fresh_blocks.axes),
-        "index": index_block_signature(fresh_blocks.index),
-        "lod": lod_block_signature(fresh_blocks.lod),
-        "camera": camera_block_signature(fresh_blocks.camera),
-        "layers": layers_block_signature(fresh_snapshot.layer_values),
-    }
-
     watcher_state.last_op_seq = current_op_seq
-    watcher_state.view_signature = applied_signatures["view"]
-    watcher_state.axes_signature = applied_signatures["axes"]
-    watcher_state.index_signature = applied_signatures["index"]
-    watcher_state.lod_signature = applied_signatures["lod"]
-    watcher_state.camera_signature = applied_signatures["camera"]
-    watcher_state.layers_signature = applied_signatures["layers"]
+    watcher_state.view_signature = detection_signatures["view"]
+    watcher_state.axes_signature = detection_signatures["axes"]
+    watcher_state.index_signature = detection_signatures["index"]
+    watcher_state.lod_signature = detection_signatures["lod"]
+    watcher_state.camera_signature = detection_signatures["camera"]
+    watcher_state.layers_signature = detection_signatures["layers"]
 
-    consume_render_snapshot(worker, fresh_snapshot)
-    return fresh_snapshot
+    consume_render_snapshot(worker, snapshot)
+    return snapshot
 
 
 def _prime_op_seq_watcher(
@@ -530,10 +527,12 @@ def _prime_op_seq_watcher(
     snapshot: RenderLedgerSnapshot,
     watcher_state: _OpSeqWatcherState,
 ) -> None:
-    ledger = getattr(worker, "_ledger", None)
-    if ledger is None:
-        return
-    blocks: SceneBlockSnapshot = fetch_scene_blocks(ledger)
+    blocks = snapshot.block_snapshot
+    if blocks is None:
+        ledger = worker._ledger  # type: ignore[attr-defined]
+        if ledger is None:
+            return
+        blocks = fetch_scene_blocks(ledger)
     watcher_state.observe(
         int(snapshot.op_seq) if isinstance(snapshot.op_seq, int) else 0,
         view=view_block_signature(blocks.view),

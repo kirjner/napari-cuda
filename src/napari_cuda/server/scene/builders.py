@@ -25,6 +25,7 @@ from napari_cuda.server.scene.models import (
     CameraDeltaCommand,
     LayerVisualState,
     RenderLedgerSnapshot,
+    SceneBlockSnapshot,
 )
 from napari_cuda.server.ledger import LedgerEntry, ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode
@@ -47,6 +48,10 @@ from napari_cuda.server.scene.blocks import (
     view_block_from_payload,
     view_block_to_payload,
     axes_from_payload,
+    PlaneRestoreCacheBlock,
+    VolumeRestoreCacheBlock,
+    plane_restore_cache_block_from_payload,
+    volume_restore_cache_block_from_payload,
 )
 from napari_cuda.shared.dims_spec import (
     dims_block_from_spec,
@@ -97,18 +102,6 @@ __all__ = [
     "snapshot_scene_blocks",
     "snapshot_volume_state",
 ]
-
-
-@dataclass(frozen=True)
-class SceneBlockSnapshot:
-    view: ViewBlock
-    axes: AxesBlock | None
-    index: IndexBlock | None
-    lod: LodBlock | None
-    camera: CameraBlock
-
-
-# ---------------------------------------------------------------------------
 @dataclass(frozen=True)
 class _ActiveViewState:
     mode: RenderMode
@@ -199,12 +192,24 @@ def scene_blocks_from_snapshot(
     assert camera_entry is not None and camera_entry.value is not None, "camera block missing"
     camera_block = camera_block_from_payload(camera_entry.value)
 
+    plane_restore_block: PlaneRestoreCacheBlock | None = None
+    plane_restore_entry = snapshot.get(("restore_cache", "plane", "state"))
+    if plane_restore_entry is not None and plane_restore_entry.value is not None:
+        plane_restore_block = plane_restore_cache_block_from_payload(plane_restore_entry.value)
+
+    volume_restore_block: VolumeRestoreCacheBlock | None = None
+    volume_restore_entry = snapshot.get(("restore_cache", "volume", "state"))
+    if volume_restore_entry is not None and volume_restore_entry.value is not None:
+        volume_restore_block = volume_restore_cache_block_from_payload(volume_restore_entry.value)
+
     return SceneBlockSnapshot(
         view=view_block,
         axes=axes_block,
         index=index_block,
         lod=lod_block,
         camera=camera_block,
+        plane_restore=plane_restore_block,
+        volume_restore=volume_restore_block,
     )
 
 
@@ -232,6 +237,12 @@ def fetch_scene_blocks(ledger: ServerStateLedger) -> SceneBlockSnapshot:
         snapshot_map[("lod", "main", "state")] = lod_entry
 
     _require("camera", "main", "state")
+    plane_restore_entry = ledger.get("restore_cache", "plane", "state")
+    if plane_restore_entry is not None and plane_restore_entry.value is not None:
+        snapshot_map[("restore_cache", "plane", "state")] = plane_restore_entry
+    volume_restore_entry = ledger.get("restore_cache", "volume", "state")
+    if volume_restore_entry is not None and volume_restore_entry.value is not None:
+        snapshot_map[("restore_cache", "volume", "state")] = volume_restore_entry
 
     blocks = scene_blocks_from_snapshot(snapshot_map)
     assert blocks is not None, "scene blocks snapshot missing required payloads"
@@ -951,6 +962,7 @@ def build_ledger_snapshot(
         camera_versions=camera_versions_payload,
         op_seq=op_seq_value,
         dims_spec=dims_spec,
+        block_snapshot=blocks_snapshot,
     )
 
 

@@ -201,6 +201,32 @@ Phase 3 (in progress) removed the planner/mailbox stack and the legacy ledger 
 What remains is flipping the feature flag on by default, updating docs/tests, and
 finishing the render-loop cleanup.
 
+### Phase 3 Direction (single snapshot + RenderInterface)
+
+- Worker should pull the ledger once per tick, receive a `SceneBlockSnapshot`
+  (view/axes/index/lod/camera + typed layer blocks + restore caches), and apply it
+  directly. No redundant `pull_render_snapshot` calls, no reconstructing pose data
+  from `dims_spec`.
+- `RenderLedgerSnapshot` becomes an optional compatibility shim for legacy payloads.
+  As soon as layer blocks replace `LayerVisualState`, the worker/render loop no longer
+  depends on it.
+- `RenderPlanInterface` / `ViewportPlanner` collapse into a single `RenderInterface`
+  (today’s `RenderApplyInterface`), which mutates worker state directly from the block
+  snapshot. Per-block signatures replace the current staging helpers.
+
+### Phase 3 Direction (single snapshot + RenderInterface)
+
+- Worker should pull the ledger once per tick, receive a `SceneBlockSnapshot`
+  (view/axes/index/lod/camera + typed layer blocks + restore caches), and apply it
+  directly. No redundant `pull_render_snapshot` calls, no reconstructing pose data
+  from `dims_spec`.
+- `RenderLedgerSnapshot` becomes an optional compatibility shim for legacy payloads.
+  As soon as layer blocks replace `LayerVisualState`, the worker/render loop no longer
+  depends on it.
+- `RenderPlanInterface` / `ViewportPlanner` collapse into a single `RenderInterface`
+  (today’s `RenderApplyInterface`), which mutates worker state directly from the block
+  snapshot. Per-block signatures replace the current staging helpers.
+
 Phase 3 work items (authoritative once this doc is updated again):
 1. **✅ Render loop mailbox removed.** Worker ticks now hydrate the viewer directly
    from the block snapshots via the op_seq watcher. `RenderUpdateMailbox`/`RenderUpdate`

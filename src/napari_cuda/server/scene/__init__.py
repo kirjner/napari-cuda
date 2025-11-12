@@ -19,6 +19,7 @@ from .models import (
     CameraDeltaCommand,
     LayerVisualState,
     RenderLedgerSnapshot,
+    SceneBlockSnapshot,
 )
 from .viewport import (
     PlanePose,
@@ -43,6 +44,7 @@ __all__ = [
     "PlaneViewportCache",
     "PoseEvent",
     "RenderLedgerSnapshot",
+    "SceneBlockSnapshot",
     "RenderMode",
     "ViewportState",
     "VolumePose",
