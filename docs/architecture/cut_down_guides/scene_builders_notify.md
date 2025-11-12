@@ -5,7 +5,7 @@ Scene Snapshot (Pixel Channel)
   - dims spec from `('dims','main','dims_spec')` (required today; the target
     is to emit the factored `view / axes / index / lod / camera` scopes and keep
     `dims_spec` only as a compatibility payload).
-  - camera poses from `camera_plane/*` and `camera_volume/*` (optional per mode).
+  - camera poses from `camera.main.state` (CameraBlock).
   - layer visuals from `('layer', id, *)`.
   - active view from `('viewport','active','state')` when present.
 

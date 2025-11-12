@@ -64,7 +64,7 @@ def run(worker: EGLRendererWorker) -> None:
         )
 
     if plan.zoom_hint is not None:
-        tick_iface.render_mailbox_record_zoom_hint(float(plan.zoom_hint))
+        tick_iface.record_zoom_hint(float(plan.zoom_hint))
 
     level_applied = False
 

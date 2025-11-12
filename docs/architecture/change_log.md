@@ -2,6 +2,19 @@
 
 Tracks intentional updates to the architecture spec and the authoritative modules. Add new entries (date-descending) with links to the implemented sections/files so future sessions can pick up immediately.
 
+# 2025-11-12 — Remove legacy viewport/camera ledger scopes
+
+### Runtime & Control
+- `reduce_bootstrap_state`, `reduce_dims_update`, `reduce_level_update`, `reduce_plane_restore`, `reduce_volume_restore`, and `reduce_camera_update` now emit only `{view, axes, index, lod, camera}` plus the plane/volume restore caches. `viewport.plane/volume.state`, `camera_plane.*`, and `camera_volume.*` are no longer written anywhere.
+- Plane/volume restore handlers, the EGL server bootstrap, and scene builders hydrate exclusively from the restore cache blocks and `camera.main.state`.
+- `apply_plane_restore_transaction` / `apply_volume_restore_transaction` stopped writing the legacy scopes, so the ledger schema now matches the block-only runtime end-state.
+
+### Tests
+- Updated `test_scene_snapshot`, `test_scene_blocks_parity`, `test_state_channel_updates`, `test_state_channel_ingest`, and the signature tests to seed/assert against the camera block + restore caches instead of the removed ledger scopes.
+
+### Docs
+- AGENTS + Phase 3 plan docs now call out that the ledger cleanup is complete and the remaining work is docs/tests parity, flipping the feature flag on by default, and the render-loop refactor.
+
 # 2025-11-12 — op_seq watcher snapshot refresh (camera jitter fix)
 
 ### Runtime
@@ -22,7 +35,7 @@ Tracks intentional updates to the architecture spec and the authoritative module
 - Reworked `consume_render_snapshot`/`drain_scene_updates` to apply snapshots immediately (the “drain” hook is now a no-op kept for legacy call sites).
 - Simplified `RenderPlanInterface` + camera tick helpers to record zoom hints on the worker itself (`_record/_consume_zoom_hint`); level policy now reads those helpers instead of the mailbox.
 - Control-plane code (`egl_headless_server`, state update handlers, runtime API, harnesses) no longer calls `worker.enqueue_update`—ledger bumps drive the render loop exclusively.
-- Scene builders synthesize `CameraBlock` data if the new scope isn’t present (fallback to `camera_plane`/`camera_volume` while we remove those writers next). This keeps tests + notify paths stable during the cut-over.
+- Scene builders synthesize `CameraBlock` data directly from the new scopes; legacy `camera_plane` / `camera_volume` mirrors are no longer expected.
 
 ### Docs
 - Updated `AGENTS.md`, `docs/architecture/system_design_spec.md`, `docs/architecture/dims_camera_legacy.md`, and `docs/architecture/view_axes_index_plan.md` to document the op_seq watcher as the only runtime path and mark the mailbox removal as complete.

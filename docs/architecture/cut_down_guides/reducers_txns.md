@@ -13,7 +13,7 @@ Dims/View/Level
 
 Camera
 - `reduce_camera_update(center|zoom|angles|distance|fov|rect)`
-  - Write `camera_plane/*` or `camera_volume/*` on applied pose (worker origin only); ack with applied values.
+  - Update `camera.main.state` + restore caches on applied pose (worker origin only); ack with applied values.
   - No dims/ActiveView writes.
 
 Layer

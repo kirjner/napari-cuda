@@ -102,7 +102,7 @@ def dims_spec_from_payload(data: Mapping[str, object]) -> DimsSpec: ...
   - `axes.main.state`: tuple of axis records with `{axis_id, label, role, world_extent, margins}`
   - `index.main.cursor`: canonical multi-dimensional index tuple (what used to be `current_step`)
   - `lod.main.state`: `{level: int, roi: tuple[int, ...] | None, policy: str | None}`
-  - `camera.main.state`: plane/volume pose metadata (mirrors `camera_plane`/`camera_volume` but unified)
+- `camera.main.state`: plane/volume pose metadata (single CameraBlock payload)
 - Target dataclasses (illustrative):
 ```
 @dataclass(frozen=True)
@@ -184,7 +184,7 @@ class ActiveViewState:
   ("dims","main","current_index") mirrors the multi-dimensional index
   (legacy scope `"current_step"` until the rename lands); per-axis index entries
   are optional.
-- Camera: ("camera_plane","main", {center,zoom,rect}), ("camera_volume","main", {center,angles,distance,fov}).
+- Camera: ("camera","main","state") carries the unified CameraBlock payload.
 - Plane/Volume State: minimal state needed for restore; request/applied mirrors are deprecated once ActiveView exists.
 - ActiveView: ("viewport","active","state") published by reducers whenever mode/level changes. [Implemented]
 - Versions: per key; transactions must return versioned entries.

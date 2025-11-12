@@ -36,7 +36,7 @@ Conventions
 - handle_camera_set(ctx)
   - Preconditions: pose components provided (subset of center/zoom/angles/rect).
   - Postconditions: calls reduce_camera_update; acks with applied components and version; may broadcast notify.camera(state).
-  - Side effects: ledger writes to camera_plane/* or camera_volume/*.
+  - Side effects: ledger writes to `camera.main.state` + restore caches.
   - Errors: reject on invalid payload or reducer failure.
 
 - handle_layer_property(ctx)
@@ -64,11 +64,11 @@ Conventions
 
 - reduce_plane_restore / reduce_volume_restore
   - Preconditions: pose components typed; level valid.
-  - Postconditions: respective camera_* scoped writes; (plane) dims_spec level/index updated; ActiveView written.
+  - Postconditions: update restore caches + `camera.main.state`; (plane) dims_spec level/index updated; ActiveView written.
 
 - reduce_camera_update(ledger, center|zoom|angles|distance|fov|rect, ...)
   - Preconditions: at least one component provided.
-  - Postconditions: versioned camera_plane/* or camera_volume/* writes; returns ack dict and version; no dims/ActiveView mutation.
+  - Postconditions: versioned `camera.main.state` write + restore cache update; returns ack dict and version; no dims/ActiveView mutation.
 
 - reduce_layer_property(ledger, layer_id, prop, value, ...)
   - Preconditions: layer id exists; value typed per prop.
@@ -84,7 +84,7 @@ Conventions
   - Postconditions: write dims_spec and any related keys; return versioned entries.
 
 - apply_plane_restore_transaction(...), apply_volume_restore_transaction(...)
-  - Postconditions: write camera_* scoped entries atomically.
+  - Postconditions: write the control-plane scopes (dims + blocks); camera poses live under `camera.main.state`.
 
   - apply_camera_update_transaction(ledger, updates, origin, ts, op_seq, op_kind)
   - Preconditions: updates contain (scope,target,key,value[,metadata]) tuples; 4–6 tuple entries accepted.

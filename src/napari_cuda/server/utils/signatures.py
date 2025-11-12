@@ -188,14 +188,8 @@ def snapshot_versions(snapshot: RenderLedgerSnapshot) -> VersionGate:
 
 
 def _split_camera_attr(attr: str) -> Tuple[str, str]:
-    if "." not in attr:
-        return "camera", attr
-    prefix, remainder = attr.split(".", 1)
-    if prefix == "plane":
-        return "camera_plane", remainder
-    if prefix == "volume":
-        return "camera_volume", remainder
-    if prefix == "legacy":
+    if "." in attr:
+        _, remainder = attr.split(".", 1)
         return "camera", remainder
     return "camera", attr
 

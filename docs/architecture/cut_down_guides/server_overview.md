@@ -21,8 +21,8 @@ Control Channel (State Updates)
 Reducers (src/napari_cuda/server/control/state_reducers.py)
 - Build canonical blocks and call scoped transactions:
   - dims/view/level → write `('dims','main','dims_spec')` (+ current_index —
-    legacy scope `'current_step'`), snapshot plane/volume state in minimal form.
-  - camera → write camera_plane/* or camera_volume/* (pose only) on worker pose.
+    legacy scope `'current_step'`); persist restore caches for plane/volume pose.
+  - camera → write `camera.main.state` (CameraBlock) plus restore caches on worker pose.
   - layer → write per-layer visuals.
 
 Transactions (src/napari_cuda/server/control/transactions/*)

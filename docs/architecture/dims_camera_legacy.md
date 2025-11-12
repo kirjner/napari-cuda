@@ -3,7 +3,8 @@ Current Dims/View/Cursor Stack
 
 This document catalogs the existing “dims + camera” pipeline so we can migrate it
 to the new `view / axes / index / lod / camera` design without missing any touch
-points.
+points. The `camera_plane` / `camera_volume` scopes described below were removed
+in Phase 3; the doc is retained for historical context.
 
 Ledger State Today
 ------------------

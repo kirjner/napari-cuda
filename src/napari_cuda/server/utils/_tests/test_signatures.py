@@ -178,7 +178,7 @@ def test_snapshot_versions_apply_updates_mapping() -> None:
         dims_version=3,
         view_version=4,
         multiscale_level_version=5,
-        camera_versions={"plane.zoom": 6, "volume.fov": 7},
+        camera_versions={"camera.state": 6},
     )
     gate = snapshot_versions(snapshot)
     cache: dict[tuple[str, str, str], int] = {}
@@ -186,8 +186,7 @@ def test_snapshot_versions_apply_updates_mapping() -> None:
     assert cache[("dims", "main", "current_step")] == 3
     assert cache[("dims", "main", "dims_spec")] == 4
     assert cache[("multiscale", "main", "level")] == 5
-    assert cache[("camera_plane", "main", "zoom")] == 6
-    assert cache[("camera_volume", "main", "fov")] == 7
+    assert cache[("camera", "main", "state")] == 6
 
 
 def test_layers_block_signature_sorts_layer_ids() -> None:
