@@ -13,9 +13,7 @@ from napari_cuda.server.runtime.render_loop.applying.volume import (
     VolumeApplyResult,
     apply_volume_level as _apply_volume_level,
 )
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
+from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
 
 
 def apply_plane_metadata(
@@ -25,7 +23,7 @@ def apply_plane_metadata(
 ) -> None:
     """Apply plane metadata during bootstrap without exporting the apply façade."""
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     _apply_plane_metadata(snapshot_iface, source, context)
 
 
@@ -36,7 +34,7 @@ def apply_volume_metadata(
 ) -> None:
     """Apply volume metadata during bootstrap without exporting the apply façade."""
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     _apply_volume_metadata(snapshot_iface, source, context)
 
 
@@ -47,7 +45,7 @@ def apply_volume_level(
 ) -> VolumeApplyResult:
     """Load + apply volume level mutations via the render-loop façade."""
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     return _apply_volume_level(
         snapshot_iface,
         source,

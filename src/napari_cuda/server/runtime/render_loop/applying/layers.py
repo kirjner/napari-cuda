@@ -12,19 +12,16 @@ from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import LayerVisualState
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
 
 logger = logging.getLogger(__name__)
 
 
 def _active_visual(worker: Any) -> Any:
-    iface = RenderApplyInterface(worker)
-    if iface.viewport_state.mode is RenderMode.VOLUME:
-        handle = iface.volume_visual_handle
+    mode = worker.viewport_state.mode  # type: ignore[attr-defined]
+    if mode is RenderMode.VOLUME:
+        handle = getattr(worker, "_volume_visual_handle", None)
     else:
-        handle = iface.plane_visual_handle
+        handle = getattr(worker, "_plane_visual_handle", None)
     assert handle is not None, "visual handle must be registered before applying layer state"
     return handle.node
 

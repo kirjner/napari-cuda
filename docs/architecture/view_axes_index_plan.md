@@ -64,8 +64,11 @@ sequenceDiagram
 ```
 
 Key points:
-- `RenderUpdateMailbox`, `ViewportPlanner`, `PlaneViewportCache`/`VolumeViewportCache`,
-  and the apply shims disappear.
+- `RenderUpdateMailbox`, `PlaneViewportCache`, `VolumeViewportCache`, and the apply
+  shims disappear once the block-native path is authoritative.
+- `ViewportPlanner` survives temporarily as an ROI/level-policy helper but no longer
+  owns snapshot staging; it will be deleted once those heuristics move into the
+  ledger-backed restore caches.
 - Only `WorkerIntentMailbox` remains (level intents, thumbnail captures).
 - Ledger scopes are read directly each tick; per-block signatures prevent
   redundant reapply.
@@ -102,9 +105,10 @@ Temporary patching:
    - Keep the legacy planner/mailbox path behind a fallback flag for staged rollout.
 
 ### Phase 3 — Legacy removal
-1. Delete `ViewportPlanner`, `PlaneViewportCache`, `VolumeViewportCache`, `RenderUpdateMailbox`,
+1. Delete `PlaneViewportCache`, `VolumeViewportCache`, `RenderUpdateMailbox`,
    bootstrap camera helpers, and all planner/apply shims (as listed in
-   `docs/architecture/dims_camera_legacy.md`).
+   `docs/architecture/dims_camera_legacy.md`). `ViewportPlanner` remains only as the
+   worker’s ROI/level-policy helper until those heuristics move elsewhere.
 2. Remove `dims_spec` writes and legacy notify fields; collapse `scene/blocks`
    to only the new schema.
 3. Update docs/tests to treat the new blocks as the only source of truth.
@@ -210,8 +214,7 @@ finishing the render-loop cleanup.
 - `RenderLedgerSnapshot` becomes an optional compatibility shim for legacy payloads.
   As soon as layer blocks replace `LayerVisualState`, the worker/render loop no longer
   depends on it.
-- `RenderPlanInterface` / `ViewportPlanner` collapse into a single `RenderInterface`
-  (today’s `RenderApplyInterface`), which mutates worker state directly from the block
+- `RenderInterface` owns both the planning and apply APIs, mutating worker state directly from the block
   snapshot. Per-block signatures replace the current staging helpers.
 
 ### Phase 3 Direction (single snapshot + RenderInterface)
@@ -223,8 +226,7 @@ finishing the render-loop cleanup.
 - `RenderLedgerSnapshot` becomes an optional compatibility shim for legacy payloads.
   As soon as layer blocks replace `LayerVisualState`, the worker/render loop no longer
   depends on it.
-- `RenderPlanInterface` / `ViewportPlanner` collapse into a single `RenderInterface`
-  (today’s `RenderApplyInterface`), which mutates worker state directly from the block
+- `RenderInterface` owns both the planning and apply APIs, mutating worker state directly from the block
   snapshot. Per-block signatures replace the current staging helpers.
 
 Phase 3 work items (authoritative once this doc is updated again):

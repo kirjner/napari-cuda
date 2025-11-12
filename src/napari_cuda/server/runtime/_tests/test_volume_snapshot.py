@@ -9,9 +9,7 @@ from napari_cuda.server.runtime.render_loop.applying.volume import (
     apply_volume_camera_pose,
     apply_volume_level,
 )
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
+from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
 from napari_cuda.server.scene.viewport import ViewportState
 from napari_cuda.server.scene import (
     RenderLedgerSnapshot,
@@ -115,7 +113,7 @@ def test_apply_volume_level_updates_state(monkeypatch: pytest.MonkeyPatch) -> No
         dtype="float32",
     )
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     result = apply_volume_level(
         snapshot_iface,
         source=_Source(),
@@ -175,7 +173,7 @@ def test_apply_volume_camera_pose_updates_state(monkeypatch: pytest.MonkeyPatch)
         volume_fov=45.0,
     )
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     apply_volume_camera_pose(snapshot_iface, snapshot)
 
     vol_state = viewport_state.volume

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from vispy.scene.cameras import PanZoomCamera
 
@@ -18,9 +18,6 @@ from napari_cuda.server.data import (
 )
 from napari_cuda.server.data.roi import plane_wh_for_level
 from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
 from napari_cuda.server.runtime.render_loop.applying.layer_data import apply_slice_layer_data
 from napari_cuda.server.runtime.render_loop.applying.plane_ops import (
     apply_pose_to_camera,
@@ -39,6 +36,9 @@ from napari_cuda.shared.dims_spec import (
 
 from .viewer_metadata import apply_plane_metadata
 
+if TYPE_CHECKING:
+    from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
+
 logger = logging.getLogger(__name__)
 
 
@@ -56,7 +56,7 @@ class SliceApplyResult:
 
 
 def aligned_roi_signature(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     level: int,
     roi: Optional[SliceROI] = None,
@@ -80,7 +80,7 @@ def aligned_roi_signature(
 
 
 def apply_dims_from_snapshot(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     snapshot: RenderLedgerSnapshot,
 ) -> None:
     """Apply dims metadata from ``snapshot`` back onto the worker viewer."""
@@ -157,7 +157,7 @@ def apply_dims_from_snapshot(
 
 
 def update_z_index_from_snapshot(
-    snapshot_iface: RenderApplyInterface, snapshot: RenderLedgerSnapshot
+    snapshot_iface: "RenderInterface", snapshot: RenderLedgerSnapshot
 ) -> None:
     """Update the cached z-index if the snapshot provides axis labels."""
 
@@ -172,7 +172,7 @@ def update_z_index_from_snapshot(
 
 
 def apply_slice_snapshot(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     snapshot: RenderLedgerSnapshot,
 ) -> SliceApplyResult:
@@ -202,7 +202,7 @@ def apply_slice_snapshot(
 
 
 def apply_slice_camera_pose(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     snapshot: RenderLedgerSnapshot,
 ) -> None:
     """Apply slice camera pose from the snapshot to the active view."""
@@ -225,7 +225,7 @@ def apply_slice_camera_pose(
 
 
 def apply_slice_level(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     applied: lod.LevelContext,
 ) -> SliceApplyResult:
@@ -334,7 +334,7 @@ def apply_slice_level(
 
 
 def apply_slice_roi(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     level: int,
     roi: SliceROI,

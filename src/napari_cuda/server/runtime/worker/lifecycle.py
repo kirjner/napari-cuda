@@ -22,20 +22,8 @@ from napari_cuda.server.runtime.bootstrap.runtime_driver import (
 )
 from napari_cuda.server.runtime.camera import CameraPoseApplied
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
-from napari_cuda.server.runtime.render_loop.applying.apply import apply_render_snapshot
-from napari_cuda.server.runtime.render_loop.applying.drain import drain_render_state
-from napari_cuda.server.runtime.render_loop.applying.interface import RenderApplyInterface
-from napari_cuda.server.runtime.render_loop.planning.interface import RenderPlanInterface
-from napari_cuda.server.runtime.render_loop.planning.staging import (
-    consume_render_snapshot,
-    drain_scene_updates,
-    extract_layer_changes,
-    record_snapshot_versions,
-    _plane_cache_from_snapshot,
-    _plane_pose_complete,
-    _volume_cache_from_snapshot,
-    _volume_pose_complete,
-)
+from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
+from napari_cuda.server.runtime.render_loop.planning.staging import drain_scene_updates
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import (
     pull_render_snapshot,
@@ -221,6 +209,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             state.worker = worker
             worker.attach_ledger(server._state_ledger)  # type: ignore[attr-defined]
             worker._op_seq_watcher_state = None  # type: ignore[attr-defined]
+            render_iface = RenderInterface(worker)
 
             core_init_vispy_scene(worker)
             core_init_egl(worker)
@@ -252,10 +241,10 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
             if use_op_seq_watcher:
                 watcher_state = _OpSeqWatcherState()
                 worker._op_seq_watcher_state = watcher_state  # type: ignore[attr-defined]
-                consume_render_snapshot(worker, initial_snapshot)
+                render_iface.apply_scene_blocks(initial_snapshot)
                 _prime_op_seq_watcher(worker, initial_snapshot, watcher_state)
             else:
-                consume_render_snapshot(worker, initial_snapshot)
+                render_iface.apply_scene_blocks(initial_snapshot)
                 drain_scene_updates(worker)
             last_snapshot_op_seq = int(initial_snapshot.op_seq) if isinstance(initial_snapshot.op_seq, int) else 0
             frame_cache: dict[str, Any] = {}
@@ -347,6 +336,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         frame_state,
                         current_op_seq,
                         blocks=frame_state.block_snapshot,
+                        render_iface=render_iface,
                     )
                     if refreshed_snapshot is not None:
                         frame_state = refreshed_snapshot
@@ -358,7 +348,7 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         )
                         last_snapshot_op_seq = current_op_seq
                 elif current_op_seq != last_snapshot_op_seq:
-                    consume_render_snapshot(worker, frame_state)
+                    render_iface.apply_scene_blocks(frame_state)
                     frame_cache["snapshot"] = frame_state
                     frame_cache["op_seq"] = current_op_seq
                     server._ack_scene_op_if_open(
@@ -501,6 +491,7 @@ def _op_seq_watcher_apply_snapshot(
     current_op_seq: int,
     *,
     blocks: SceneBlockSnapshot | None = None,
+    render_iface: RenderInterface | None = None,
 ) -> Optional[RenderLedgerSnapshot]:
     watcher_state: _OpSeqWatcherState | None = worker._op_seq_watcher_state  # type: ignore[attr-defined]
     if watcher_state is None:
@@ -544,7 +535,8 @@ def _op_seq_watcher_apply_snapshot(
     watcher_state.camera_signature = detection_signatures["camera"]
     watcher_state.layers_signature = detection_signatures["layers"]
 
-    consume_render_snapshot(worker, snapshot)
+    iface = render_iface or RenderInterface(worker)
+    iface.apply_scene_blocks(snapshot)
     return snapshot
 
 

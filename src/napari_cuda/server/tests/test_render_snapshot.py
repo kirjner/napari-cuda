@@ -5,13 +5,9 @@ from types import SimpleNamespace
 import pytest
 
 from napari_cuda.server.data import SliceROI
-from napari_cuda.server.runtime.render_loop.applying import (
-    apply as snapshot_mod,
-    plane as plane_mod,
-)
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
+from napari_cuda.server.runtime.render_loop import render_interface as snapshot_mod
+from napari_cuda.server.runtime.render_loop.applying import plane as plane_mod
+from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
 from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import RenderLedgerSnapshot
@@ -335,7 +331,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
         lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")),
     )  # type: ignore[arg-type]
     monkeypatch.setattr(
-        RenderApplyInterface,
+        RenderInterface,
         "viewport_roi_for_level",
         lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
     )
@@ -348,7 +344,7 @@ def test_apply_snapshot_multiscale_enters_volume(monkeypatch: pytest.MonkeyPatch
 
     worker._configure_camera_for_mode = _wrapped_configure  # type: ignore[assignment]
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
     snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
@@ -406,7 +402,7 @@ def test_apply_snapshot_multiscale_stays_volume_skips_volume_load(monkeypatch: p
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
     snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
@@ -460,12 +456,12 @@ def test_apply_snapshot_multiscale_exit_volume(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", _fake_slice)
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("volume apply should not run")))  # type: ignore[arg-type]
     monkeypatch.setattr(
-        RenderApplyInterface,
+        RenderInterface,
         "viewport_roi_for_level",
         lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
     )
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
     snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
@@ -520,12 +516,12 @@ def test_apply_snapshot_multiscale_falls_back_to_budget_level(monkeypatch: pytes
     monkeypatch.setattr(snapshot_mod, "apply_volume_level", _fake_volume)
     monkeypatch.setattr(snapshot_mod, "apply_slice_level", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("slice apply should not run")))  # type: ignore[arg-type]
     monkeypatch.setattr(
-        RenderApplyInterface,
+        RenderInterface,
         "viewport_roi_for_level",
         lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
     )
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
     snapshot_mod._apply_snapshot_ops(snapshot_iface, snapshot, ops)
 
@@ -569,16 +565,16 @@ def test_apply_render_snapshot_short_circuits_on_matching_signature(monkeypatch:
 
     monkeypatch.setattr(plane_mod, "apply_dims_from_snapshot", _track_apply_dims)
     monkeypatch.setattr(
-        RenderApplyInterface,
+        RenderInterface,
         "viewport_roi_for_level",
         lambda self, *_args, **_kwargs: SliceROI(0, 10, 0, 10),
     )
 
-    snapshot_iface = RenderApplyInterface(worker)
+    snapshot_iface = RenderInterface(worker)
     ops = snapshot_mod._resolve_snapshot_ops(snapshot_iface, snapshot)
     plane_ops = ops["plane"]
     assert plane_ops is not None
     snapshot_iface.set_last_slice_signature(plane_ops["slice_token"])
 
-    snapshot_mod.apply_render_snapshot(snapshot_iface, snapshot)
+    snapshot_mod._apply_render_snapshot(snapshot_iface, snapshot)
     assert worker._apply_dims_calls == 0

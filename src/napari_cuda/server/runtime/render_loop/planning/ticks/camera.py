@@ -13,7 +13,7 @@ from napari_cuda.server.runtime.camera.controller import (
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import CameraDeltaCommand
 
-from ..interface import RenderPlanInterface
+from ...render_interface import RenderInterface
 from ..staging import drain_scene_updates
 from . import viewport
 
@@ -36,8 +36,8 @@ def _apply_commands(
     *,
     reset_policy_suppression: bool,
 ) -> CameraCommandResult:
-    tick_iface = RenderPlanInterface(worker)
-    outcome = _process_camera_deltas(tick_iface, commands)
+    render_iface = RenderInterface(worker)
+    outcome = _process_camera_deltas(render_iface, commands)
 
     last_seq: Optional[int]
     try:
@@ -46,26 +46,26 @@ def _apply_commands(
         last_seq = None
 
     if last_seq is not None:
-        tick_iface.bump_camera_sequences(last_seq)
+        render_iface.bump_camera_sequences(last_seq)
 
-    runner = tick_iface.viewport_runner
+    runner = render_iface.viewport_runner
     if runner is not None:
         runner.ingest_camera_deltas(commands)
-        if tick_iface.viewport_state.mode is RenderMode.PLANE:
-            rect = tick_iface.current_panzoom_rect()
+        if render_iface.viewport_state.mode is RenderMode.PLANE:
+            rect = render_iface.current_panzoom_rect()
             if rect is not None:
                 runner.update_camera_rect(rect)
 
-    tick_iface.mark_render_tick_needed()
-    tick_iface.record_user_interaction()
+    render_iface.mark_render_tick_needed()
+    render_iface.record_user_interaction()
 
     if reset_policy_suppression:
-        tick_iface.level_policy_suppressed = False
+        render_iface.level_policy_suppressed = False
 
-    if outcome.camera_changed and tick_iface.viewport_state.mode is RenderMode.VOLUME:
-        tick_iface.emit_camera_pose("camera-delta")
+    if outcome.camera_changed and render_iface.viewport_state.mode is RenderMode.VOLUME:
+        render_iface.emit_current_camera_pose("camera-delta")
 
-    record_zoom_hint(tick_iface, commands)
+    record_zoom_hint(render_iface, commands)
 
     return CameraCommandResult(
         policy_triggered=bool(outcome.policy_triggered),
@@ -83,17 +83,17 @@ def process_commands(
     if not commands:
         return CameraCommandResult(False, False, None)
 
-    tick_iface = RenderPlanInterface(worker)
-    tick_iface.record_user_interaction()
+    render_iface = RenderInterface(worker)
+    render_iface.record_user_interaction()
     result = _apply_commands(worker, commands, reset_policy_suppression=False)
     viewport.run(worker)
 
     if (
         result.policy_triggered
-        and tick_iface.viewport_state.mode is not RenderMode.VOLUME
-        and not tick_iface.level_policy_suppressed
+        and render_iface.viewport_state.mode is not RenderMode.VOLUME
+        and not render_iface.level_policy_suppressed
     ):
-        tick_iface.evaluate_level_policy()
+        render_iface.evaluate_level_policy()
 
     return result
 
@@ -101,8 +101,8 @@ def process_commands(
 def drain(worker: EGLRendererWorker) -> None:
     """Drain queued camera deltas, then scene updates, for a render tick."""
 
-    tick_iface = RenderPlanInterface(worker)
-    commands = tick_iface.camera_queue_pop_all()
+    render_iface = RenderInterface(worker)
+    commands = render_iface.camera_queue_pop_all()
     result: Optional[CameraCommandResult] = None
 
     if commands:
@@ -114,14 +114,14 @@ def drain(worker: EGLRendererWorker) -> None:
     if (
         result is not None
         and result.policy_triggered
-        and tick_iface.viewport_state.mode is not RenderMode.VOLUME
-        and not tick_iface.level_policy_suppressed
+        and render_iface.viewport_state.mode is not RenderMode.VOLUME
+        and not render_iface.level_policy_suppressed
     ):
-        tick_iface.evaluate_level_policy()
+        render_iface.evaluate_level_policy()
 
 
 def record_zoom_hint(
-    tick_iface: RenderPlanInterface,
+    tick_iface: RenderInterface,
     commands: Sequence[CameraDeltaCommand],
 ) -> None:
     """Capture the most recent zoom factor for policy evaluation."""

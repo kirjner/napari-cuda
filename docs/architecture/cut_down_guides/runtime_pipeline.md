@@ -22,7 +22,7 @@ Drain & Apply (Pixel Channel Only)
   1. Observe `scene.main.op_seq` change (no render mailbox needed when the flag is on).
   2. Pull the latest `{view, axes, index, lod, camera, layers}` scopes via `fetch_scene_blocks(...)`.
   3. Compute per-block signatures to determine what changed.
-  4. Call the existing apply helpers (`apply_render_snapshot`, layer drains, camera metadata) so the napari
+  4. Call the existing apply helpers (`RenderInterface.apply_scene_blocks`, layer drains, camera metadata) so the napari
      viewer stays in sync—no planner and no viewport cache mirrors.
   5. Emit pose/level intents back through reducers (camera pose callback +
      worker intent mailbox).

@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from vispy.geometry import Rect
 from vispy.scene.cameras import PanZoomCamera
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
+
+if TYPE_CHECKING:
+    from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
 
 
 def _apply_dims_and_metadata(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     context: lod.LevelContext,
 ) -> None:
@@ -29,7 +29,7 @@ def _apply_dims_and_metadata(
 
 
 def apply_plane_metadata(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     context: lod.LevelContext,
 ) -> None:
@@ -67,7 +67,7 @@ def apply_plane_metadata(
 
 
 def apply_volume_metadata(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     context: lod.LevelContext,
 ) -> None:
@@ -83,7 +83,9 @@ def apply_plane_metadata_for_worker(
 ) -> None:
     """Bootstrap helper that routes through the apply façade internally."""
 
-    snapshot_iface = RenderApplyInterface(worker)
+    from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
+
+    snapshot_iface = RenderInterface(worker)
     apply_plane_metadata(snapshot_iface, source, context)
 
 
@@ -94,7 +96,9 @@ def apply_volume_metadata_for_worker(
 ) -> None:
     """Bootstrap helper that routes through the apply façade internally."""
 
-    snapshot_iface = RenderApplyInterface(worker)
+    from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
+
+    snapshot_iface = RenderInterface(worker)
     apply_volume_metadata(snapshot_iface, source, context)
 
 

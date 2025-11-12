@@ -70,7 +70,7 @@ Phase 3 cleanup (render-loop convergence):
 
 - Worker/runtime must operate on a single authoritative `SceneBlockSnapshot` per tick.
   - Reuse the snapshot pulled for apply/telemetry instead of double-pulling.
-  - Collapse `_apply_snapshot` and `apply_render_snapshot` into a single `RenderInterface`
+  - Collapse `_apply_snapshot` and `_apply_render_snapshot` into a single `RenderInterface`
     that consumes `{view, axes, index, lod, camera}` + restore caches directly.
 - Once the block-native path is stable, delete `_plane_cache_from_snapshot` /
   `_volume_cache_from_snapshot`, flip `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` on by default,

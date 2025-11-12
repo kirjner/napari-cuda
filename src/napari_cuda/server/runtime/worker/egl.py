@@ -59,9 +59,6 @@ from napari_cuda.server.runtime.camera import (
 )
 from napari_cuda.server.runtime.ipc import LevelSwitchIntent
 from napari_cuda.server.runtime.lod import level_policy
-from napari_cuda.server.runtime.render_loop.planning.staging import (
-    consume_render_snapshot,
-)
 from napari_cuda.server.runtime.render_loop.planning.ticks import (
     capture as capture_tick,
 )
@@ -69,9 +66,7 @@ from napari_cuda.server.runtime.render_loop.applying.viewer_metadata import (
     apply_plane_metadata,
     apply_volume_metadata,
 )
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
+from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
 from napari_cuda.server.runtime.render_loop.plan.ledger_access import (
     dims_spec as ledger_dims_spec,
     level as ledger_level,
@@ -449,7 +444,7 @@ class EGLRendererWorker:
             logger.debug("level intent suppressed (no change or already pending)")
             return
 
-        apply_iface = RenderApplyInterface(self)
+        apply_iface = RenderInterface(self)
         if self._viewport_state.mode is RenderMode.VOLUME:
             apply_volume_metadata(apply_iface, source, context)
         else:

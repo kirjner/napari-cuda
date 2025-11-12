@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from vispy.scene.cameras import TurntableCamera
 
@@ -14,9 +14,6 @@ from napari.layers.image._image_constants import (
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
 import napari_cuda.server.data.lod as lod
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
 from napari_cuda.server.runtime.render_loop.applying.layer_data import apply_volume_layer_data
 from napari_cuda.server.runtime.render_loop.applying.volume_ops import (
     apply_pose_to_camera,
@@ -26,6 +23,9 @@ from napari_cuda.server.runtime.render_loop.applying.volume_ops import (
 )
 from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import RenderLedgerSnapshot
+
+if TYPE_CHECKING:
+    from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
 
 
 @dataclass(frozen=True)
@@ -39,7 +39,7 @@ class VolumeApplyResult:
 
 
 def apply_volume_camera_pose(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     snapshot: RenderLedgerSnapshot,
 ) -> None:
     """Apply volume camera pose from the snapshot to the active view."""
@@ -63,7 +63,7 @@ def apply_volume_camera_pose(
 
 
 def apply_volume_level(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: "RenderInterface",
     source: Any,
     applied: lod.LevelContext,
 ) -> VolumeApplyResult:
@@ -122,7 +122,7 @@ def apply_volume_visual_params(worker: Any, snapshot: RenderLedgerSnapshot) -> N
     if worker.viewport_state.mode is not RenderMode.VOLUME:  # type: ignore[attr-defined]
         return
 
-    handle = RenderApplyInterface(worker).volume_visual_handle
+    handle = getattr(worker, "_volume_visual_handle", None)
     assert handle is not None, "volume visual handle must be registered"
     visual = handle.node
 

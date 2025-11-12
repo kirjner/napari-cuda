@@ -359,18 +359,18 @@ Separation Guarantees
 7. Runtime Apply (Deterministic)
 Modules: `src/napari_cuda/server/runtime/render_loop/applying/*`
 ```
-def apply_dims_block(snapshot_iface: RenderApplyInterface, spec: DimsSpec) -> None:
+def apply_dims_block(snapshot_iface: RenderInterface, spec: DimsSpec) -> None:
     # Must set: axis_labels, ndim, order, displayed, ndisplay, current_index (legacy current_step), margins.
     ...
 
 def apply_camera_block(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: RenderInterface,
     plane: PlanePose | None,
     volume: VolumePose | None,
 ) -> None: ...
 
 def apply_layers_block(
-    snapshot_iface: RenderApplyInterface,
+    snapshot_iface: RenderInterface,
     layers: Mapping[str, LayerVisualState],
 ) -> None: ...
 ```

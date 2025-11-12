@@ -74,12 +74,8 @@ from napari_cuda.server.engine.api import (
 from napari_cuda.server.engine.pixel import broadcaster as pixel_broadcaster
 from napari_cuda.server.runtime.api import RuntimeHandle
 from napari_cuda.server.runtime.camera import CameraCommandQueue
-from napari_cuda.server.runtime.render_loop.applying import (
-    apply as snapshot_mod,
-)
-from napari_cuda.server.runtime.render_loop.applying.interface import (
-    RenderApplyInterface,
-)
+from napari_cuda.server.runtime.render_loop import render_interface as snapshot_mod
+from napari_cuda.server.runtime.render_loop.render_interface import RenderInterface
 from napari_cuda.server.scene import blocks as scene_blocks
 import napari_cuda.server.scene.builders as scene_builders
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
@@ -897,8 +893,8 @@ class StateServerHarness:
             snapshot = server._latest_render_snapshot
             assert snapshot is not None, "harness scene snapshot unavailable"
             assert server._worker._viewer is not None, "harness worker viewer not initialised"
-            snapshot_iface = RenderApplyInterface(server._worker)
-            snapshot_mod.apply_render_snapshot(snapshot_iface, snapshot)
+            snapshot_iface = RenderInterface(server._worker)
+            snapshot_mod._apply_render_snapshot(snapshot_iface, snapshot)
 
         server._commit_level = _commit_level
         server._pending_tasks = self.scheduled

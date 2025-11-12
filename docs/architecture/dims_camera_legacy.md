@@ -131,7 +131,7 @@ Worker Consumption Path
    render tick as needed.
 2. `drain_scene_updates` is now a no-op placeholder; the worker already consumes
    the ledger snapshot directly.
-   * `apply_render_snapshot` dispatches to plane or volume paths in
+   * `RenderInterface.apply_scene_blocks` dispatches to plane or volume paths in
      `render_loop/applying/apply.py`. Plane flows delegate to
      `plane.py` / `plane_ops.py`; volume flows go through
      `volume.py` / `volume_ops.py`.
@@ -290,12 +290,11 @@ Track this list as you migrate so nothing lingers:
      (`ingest_snapshot`, `ingest_camera_deltas`, `request_level`,
      `update_camera_rect`, `plan_tick`, `mark_level_applied`,
      `mark_slice_applied`, `reset_for_volume`).
-   - `src/napari_cuda/server/runtime/render_loop/planning/interface.py`:
-     `RenderPlanInterface` (all viewport/scene/camera/mailbox helpers).
+   - `src/napari_cuda/server/runtime/render_loop/render_interface.py`:
+     `RenderInterface` (merged viewport/scene/camera helpers plus snapshot
+     application bookkeeping).
    - `src/napari_cuda/server/runtime/render_loop/planning/staging.py`:
-     `AppliedVersions`, `normalize_scene_state`, `record_snapshot_versions`,
-     `extract_layer_changes`, `consume_render_snapshot`,
-     `drain_scene_updates`.
+     legacy `drain_scene_updates` stub retained for compatibility.
    - The legacy `render_update` mailbox has been deleted; the worker now tracks
      per-block signatures inside `_OpSeqWatcherState` (see
      `runtime/worker/lifecycle.py`) and compares ledger snapshots directly
@@ -305,13 +304,10 @@ Track this list as you migrate so nothing lingers:
      the cached pose for the inactive mode. No server-side planner bookkeeping is
      required; restore flows are entirely block-driven.
 6. **Worker apply façade built on Plane/Volume caches**
-   - `src/napari_cuda/server/runtime/render_loop/applying/interface.py`:
-     `RenderApplyInterface` (all viewport, camera, ROI, ledger, layer, and
-     metadata accessors).
-   - `src/napari_cuda/server/runtime/render_loop/applying/apply.py`:
-     `_suspend_fit_callbacks`, `apply_render_snapshot`,
-     `_resolve_snapshot_ops`, `_apply_snapshot_ops`, `apply_slice_roi`,
-     `apply_plane_slice_roi`.
+   - `src/napari_cuda/server/runtime/render_loop/render_interface.py` now owns
+     `_suspend_fit_callbacks`, `_resolve_snapshot_ops`,
+     `_apply_snapshot_ops`, and `_apply_render_snapshot` in addition to the
+     public `apply_scene_blocks` entry point.
    - `src/napari_cuda/server/runtime/render_loop/applying/plane.py`:
      `SliceApplyResult`, `aligned_roi_signature`, `apply_dims_from_snapshot`,
      `update_z_index_from_snapshot`, `apply_slice_snapshot`,

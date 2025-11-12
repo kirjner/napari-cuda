@@ -10,11 +10,13 @@ Tracks intentional updates to the architecture spec and the authoritative module
   now reuse that bundle instead of fetching/scattering pose data from legacy scopes.
 - Block snapshots hydrate the worker’s plane/volume caches; legacy `_plane_cache_from_snapshot` /
   `_volume_cache_from_snapshot` remain only as fallbacks when a restore cache is incomplete during bootstrap.
-- `apply_render_snapshot` accepts the block bundle, making it possible to delete `_apply_snapshot` and
+- `RenderInterface.apply_scene_blocks` consumes the block bundle directly,
+  eliminating the `_apply_snapshot` staging layer and paving the way to delete
   `RenderLedgerSnapshot` once the single-snapshot-per-tick path lands.
 
 ### Next steps
-- Collapse `_apply_snapshot` + `apply_render_snapshot` into a single `RenderInterface` that consumes the block bundle directly.
+- Collapse `_apply_snapshot` + `_apply_render_snapshot` into a single `RenderInterface`
+  entry point that consumes the block bundle directly.
 - Remove `_plane_cache_from_snapshot`/`_volume_cache_from_snapshot` and flip
   `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` on by default once the consolidated apply path is stable.
 - Delete `RenderLedgerSnapshot` and the staging module after the interfaces converge; update docs/tests to
@@ -52,8 +54,10 @@ Tracks intentional updates to the architecture spec and the authoritative module
 
 ### Runtime
 - Deleted `RenderUpdateMailbox`/`RenderUpdate` and their state-machine tests; the worker now samples `{view, axes, index, lod, camera, layers}` directly off the ledger via the op_seq watcher.
-- Reworked `consume_render_snapshot`/`drain_scene_updates` to apply snapshots immediately (the “drain” hook is now a no-op kept for legacy call sites).
-- Simplified `RenderPlanInterface` + camera tick helpers to record zoom hints on the worker itself (`_record/_consume_zoom_hint`); level policy now reads those helpers instead of the mailbox.
+- Worker loop now calls `RenderInterface.apply_scene_blocks` directly; the legacy
+  `drain_scene_updates` hook remains a no-op for compatibility only.
+- Simplified the new `RenderInterface` + camera tick helpers to record zoom
+  hints on the worker itself (`_record/_consume_zoom_hint`); level policy now reads those helpers instead of the mailbox.
 - Control-plane code (`egl_headless_server`, state update handlers, runtime API, harnesses) no longer calls `worker.enqueue_update`—ledger bumps drive the render loop exclusively.
 - Scene builders synthesize `CameraBlock` data directly from the new scopes; legacy `camera_plane` / `camera_volume` mirrors are no longer expected.
 

@@ -110,17 +110,13 @@ def test_op_seq_watcher_uses_existing_block_snapshot(monkeypatch: pytest.MonkeyP
     snapshot = RenderLedgerSnapshot(op_seq=1, block_snapshot=blocks)
     worker = SimpleNamespace(_ledger=object(), _op_seq_watcher_state=None)
     consumed: list[RenderLedgerSnapshot] = []
-
-    def _consume(_worker, snap: RenderLedgerSnapshot) -> None:
-        consumed.append(snap)
+    render_iface = SimpleNamespace(
+        apply_scene_blocks=lambda snap: consumed.append(snap),
+    )
 
     def _fail_fetch(_ledger) -> SceneBlockSnapshot:
         raise AssertionError("fetch_scene_blocks should not be called when block snapshot is provided")
 
-    monkeypatch.setattr(
-        "napari_cuda.server.runtime.worker.lifecycle.consume_render_snapshot",
-        _consume,
-    )
     monkeypatch.setattr(
         "napari_cuda.server.runtime.worker.lifecycle.fetch_scene_blocks",
         _fail_fetch,
@@ -131,6 +127,7 @@ def test_op_seq_watcher_uses_existing_block_snapshot(monkeypatch: pytest.MonkeyP
         snapshot=snapshot,
         current_op_seq=1,
         blocks=blocks,
+        render_iface=render_iface,  # type: ignore[arg-type]
     )
 
     assert result is snapshot
@@ -141,6 +138,7 @@ def test_op_seq_watcher_accepts_cached_blocks(monkeypatch: pytest.MonkeyPatch) -
     blocks = _sample_scene_blocks()
     snapshot = RenderLedgerSnapshot(op_seq=1, block_snapshot=None)
     worker = SimpleNamespace(_ledger=object(), _op_seq_watcher_state=None)
+    render_iface = SimpleNamespace(apply_scene_blocks=lambda snap: None)
 
     def _fail_fetch(_ledger) -> SceneBlockSnapshot:
         raise AssertionError("fetch_scene_blocks must not run when cached blocks are provided")
@@ -149,17 +147,13 @@ def test_op_seq_watcher_accepts_cached_blocks(monkeypatch: pytest.MonkeyPatch) -
         "napari_cuda.server.runtime.worker.lifecycle.fetch_scene_blocks",
         _fail_fetch,
     )
-    monkeypatch.setattr(
-        "napari_cuda.server.runtime.worker.lifecycle.consume_render_snapshot",
-        lambda *args, **kwargs: None,
-    )
-
     result = _op_seq_watcher_apply_snapshot(
         server=SimpleNamespace(),
         worker=worker,  # type: ignore[arg-type]
         snapshot=snapshot,
         current_op_seq=2,
         blocks=blocks,
+        render_iface=render_iface,  # type: ignore[arg-type]
     )
 
     assert result is snapshot
@@ -174,10 +168,13 @@ def test_op_seq_watcher_requires_blocks_when_flag_enabled(monkeypatch: pytest.Mo
         True,
     )
 
+    render_iface = SimpleNamespace(apply_scene_blocks=lambda snap: None)
+
     with pytest.raises(AssertionError):
         _op_seq_watcher_apply_snapshot(
             server=SimpleNamespace(),
             worker=worker,  # type: ignore[arg-type]
             snapshot=snapshot,
             current_op_seq=3,
+            render_iface=render_iface,  # type: ignore[arg-type]
         )
