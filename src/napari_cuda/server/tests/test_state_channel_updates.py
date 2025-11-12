@@ -78,6 +78,10 @@ from napari_cuda.server.scene import (
 )
 import napari_cuda.server.scene.builders as scene_builders
 from napari_cuda.server.scene import blocks as scene_blocks
+from napari_cuda.server.scene.blocks import (
+    camera_block_from_payload,
+    plane_restore_cache_block_from_payload,
+)
 from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
@@ -335,21 +339,6 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     server._default_layer_id = _default_layer_id
     server._layer_mirror.start()
 
-    axis_labels = tuple(str(lbl) for lbl in (baseline_dims.axis_labels or ("z", "y", "x")))
-    order = tuple(int(idx) for idx in (baseline_dims.order or (0, 1, 2)))
-    level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in baseline_dims.level_shapes)
-    levels_payload = tuple(dict(level) for level in baseline_dims.levels)
-    reduce_bootstrap_state(
-        server._state_ledger,
-        step=tuple(int(v) for v in baseline_dims.current_step),
-        axis_labels=axis_labels,
-        order=order,
-        level_shapes=level_shapes,
-        levels=levels_payload,
-        current_level=int(baseline_dims.current_level),
-        ndisplay=int(baseline_dims.ndisplay),
-        origin="test.bootstrap",
-    )
     server._refresh_scene_snapshot()
 
     server._state_ledger.record_confirmed(
@@ -465,16 +454,40 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     return server, scheduled, captured
 
 
-def _set_scene_block_flag(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> None:
-    monkeypatch.setattr(reducers, "ENABLE_VIEW_AXES_INDEX_BLOCKS", enabled, raising=False)
-    monkeypatch.setattr(scene_blocks, "ENABLE_VIEW_AXES_INDEX_BLOCKS", enabled, raising=False)
-    monkeypatch.setattr(scene_builders, "ENABLE_VIEW_AXES_INDEX_BLOCKS", enabled, raising=False)
-
-
 def _drain_scheduled(tasks: list[Coroutine[Any, Any, None]]) -> None:
     while tasks:
         coro = tasks.pop(0)
         asyncio.run(coro)
+
+
+def _default_plane_pose(spec: DimsSpec) -> tuple[tuple[float, float, float, float], tuple[float, float], float]:
+    level_idx = int(spec.current_level)
+    level_shapes = spec.level_shapes
+    axes = spec.displayed or tuple(range(max(0, spec.ndisplay)))
+    level_shape = level_shapes[level_idx] if level_shapes else tuple(1 for _ in range(spec.ndim))
+    if len(axes) < 2:
+        axes = tuple(range(max(0, spec.ndim - 2), spec.ndim))
+    height_axis = int(axes[-2]) if len(axes) >= 2 else 0
+    width_axis = int(axes[-1])
+    height = float(level_shape[height_axis]) if height_axis < len(level_shape) else 1.0
+    width = float(level_shape[width_axis]) if width_axis < len(level_shape) else 1.0
+    rect = (0.0, 0.0, width or 1.0, height or 1.0)
+    center = (rect[2] / 2.0, rect[3] / 2.0)
+    zoom = 1.0
+    return rect, center, zoom
+
+
+def _default_volume_pose(spec: DimsSpec) -> tuple[tuple[float, float, float], tuple[float, float, float], float, float]:
+    level_idx = int(spec.current_level)
+    level_shapes = spec.level_shapes
+    level_shape = level_shapes[level_idx] if level_shapes else tuple(1 for _ in range(spec.ndim))
+    def _extent(idx: int) -> float:
+        return float(level_shape[idx]) if idx < len(level_shape) else 1.0
+    center = (_extent(0) / 2.0, _extent(1) / 2.0, _extent(2) / 2.0)
+    angles = (0.0, 0.0, 0.0)
+    distance = max(center) * 2.0 or 1.0
+    fov = 60.0
+    return center, angles, distance, fov
 
 
 def _record_dims_to_ledger(
@@ -483,23 +496,65 @@ def _record_dims_to_ledger(
     *,
     origin: str = "worker.state.dims",
 ) -> None:
-    entries = [
-        ("dims", "main", "current_step", tuple(int(v) for v in payload.current_step)),
-    ]
-    server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
     spec = _dims_spec_from_notify_payload(payload)
-    server._state_ledger.record_confirmed(
-        "dims",
-        "main",
-        "dims_spec",
-        dims_spec_to_payload(spec),
+    level_shapes_tuple = tuple(tuple(int(dim) for dim in shape) for shape in spec.level_shapes)
+    levels_payload = tuple(dict(level) for level in spec.levels)
+    reducers.reduce_bootstrap_state(
+        server._state_ledger,
+        step=tuple(int(v) for v in spec.current_step),
+        axis_labels=tuple(axis.label for axis in spec.axes),
+        order=tuple(int(v) for v in spec.order),
+        level_shapes=level_shapes_tuple,
+        levels=levels_payload,
+        current_level=int(spec.current_level),
+        ndisplay=int(spec.ndisplay),
         origin=origin,
     )
+    rect, center, zoom = _default_plane_pose(spec)
+    plane_pose = scene_blocks.PlaneRestoreCachePose(rect=rect, center=center, zoom=zoom)
+    plane_cache = scene_blocks.PlaneRestoreCacheBlock(
+        level=int(spec.current_level),
+        index=tuple(int(v) for v in spec.current_step),
+        pose=plane_pose,
+    )
     server._state_ledger.record_confirmed(
-        "viewport",
-        "active",
+        "restore_cache",
+        "plane",
         "state",
-        {"mode": str(payload.mode), "level": int(payload.current_level)},
+        scene_blocks.plane_restore_cache_block_to_payload(plane_cache),
+        origin=origin,
+    )
+    volume_center, volume_angles, volume_distance, volume_fov = _default_volume_pose(spec)
+    volume_pose = scene_blocks.VolumeRestoreCachePose(
+        center=volume_center,
+        angles=volume_angles,
+        distance=volume_distance,
+        fov=volume_fov,
+    )
+    volume_cache = scene_blocks.VolumeRestoreCacheBlock(
+        level=int(spec.current_level),
+        index=tuple(int(v) for v in spec.current_step),
+        pose=volume_pose,
+    )
+    server._state_ledger.record_confirmed(
+        "restore_cache",
+        "volume",
+        "state",
+        scene_blocks.volume_restore_cache_block_to_payload(volume_cache),
+        origin=origin,
+    )
+    plane_block = scene_blocks.PlaneCameraBlock(rect=rect, center=center, zoom=zoom)
+    volume_block = scene_blocks.VolumeCameraBlock(
+        center=volume_center,
+        angles=volume_angles,
+        distance=volume_distance,
+        fov=volume_fov,
+    )
+    server._state_ledger.record_confirmed(
+        "camera",
+        "main",
+        "state",
+        scene_blocks.camera_block_to_payload(scene_blocks.CameraBlock(plane=plane_block, volume=volume_block)),
         origin=origin,
     )
 
@@ -874,6 +929,7 @@ def test_dims_update_emits_ack_and_notify() -> None:
 def test_view_ndisplay_update_ack_is_immediate() -> None:
     server, scheduled, captured = _make_server()
     fake_ws = next(iter(server._state_clients))
+    assert reducers.ENABLE_VIEW_AXES_INDEX_BLOCKS, "view/axes/index blocks flag must be enabled for this test"
 
     captured.clear()
 
@@ -889,13 +945,11 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
-    spec_entry = server._state_ledger.get("dims", "main", "dims_spec")
-    assert spec_entry is not None
-    spec_payload = dims_spec_from_payload(spec_entry.value)
-    assert spec_payload is not None
-    assert int(spec_payload.ndisplay) == 3
-    assert spec_entry.version is not None
-    assert server._state_ledger.get("view", "main", "ndisplay") is None
+    view_entry = server._state_ledger.get("view", "main", "state")
+    assert view_entry is not None
+    view_block = scene_blocks.view_block_from_payload(view_entry.value)
+    assert view_block.mode == "volume"
+    assert view_entry.version is not None
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks, "expected immediate ack"
@@ -904,7 +958,7 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
     assert ack_payload["in_reply_to"] == "state-view-1"
     assert ack_payload["status"] == "accepted"
     assert ack_payload["applied_value"] == 3
-    assert ack_payload["version"] == spec_entry.version
+    assert ack_payload["version"] == view_entry.version
 
     interim_dims = _frames_of_type(captured, "notify.dims")
     if interim_dims:
@@ -938,8 +992,6 @@ def test_view_ndisplay_update_ack_is_immediate() -> None:
 
 def test_worker_dims_snapshot_updates_multiscale_state() -> None:
     server, scheduled, captured = _make_server()
-    captured.clear()
-
     snapshot_payload = _make_dims_snapshot(
         level_shapes=[[512, 256, 64], [256, 128, 32]],
         displayed=[0, 1, 2],
@@ -954,11 +1006,7 @@ def test_worker_dims_snapshot_updates_multiscale_state() -> None:
     _record_dims_to_ledger(server, notify_payload)
     _drain_scheduled(scheduled)
 
-    dims_frames = _frames_of_type(captured, "notify.dims")
-    assert dims_frames, "expected dims broadcast"
-    payload = dims_frames[-1]["payload"]
-    assert payload["current_level"] == 1
-
+    server._refresh_scene_snapshot()
     ms_state = snapshot_multiscale_state(server._state_ledger.snapshot())
     assert ms_state.get("current_level") == 1
     levels_snapshot = ms_state.get("levels") or []
@@ -1103,14 +1151,19 @@ def test_camera_set_updates_latest_state() -> None:
     asyncio.run(state_channel_handler._ingest_state_update(server, frame, fake_ws))
     _drain_scheduled(scheduled)
 
-    center_entry = server._state_ledger.get("camera_plane", "main", "center")
-    zoom_entry = server._state_ledger.get("camera_plane", "main", "zoom")
+    camera_entry = server._state_ledger.get("camera", "main", "state")
+    assert camera_entry is not None and camera_entry.value is not None
+    camera_block = camera_block_from_payload(camera_entry.value)
+    assert tuple(camera_block.plane.center or ()) == (1.0, 2.0)
+    assert camera_block.plane.zoom == 2.5
+    assert camera_entry.version is not None
+    expected_version = int(camera_entry.version)
 
-    assert center_entry is not None and center_entry.value == (1.0, 2.0)
-    assert zoom_entry is not None and zoom_entry.value == 2.5
-    assert center_entry.version is not None
-    assert zoom_entry.version is not None
-    expected_version = max(int(center_entry.version), int(zoom_entry.version))
+    cache_entry = server._state_ledger.get("restore_cache", "plane", "state")
+    assert cache_entry is not None and cache_entry.value is not None
+    cache_block = plane_restore_cache_block_from_payload(cache_entry.value)
+    assert cache_block.pose.center == (1.0, 2.0)
+    assert cache_block.pose.zoom == 2.5
 
     acks = _frames_of_type(captured, "ack.state")
     assert acks
@@ -1446,10 +1499,9 @@ def test_handshake_stashes_resume_plan(monkeypatch) -> None:
         loop.close()
 
 
-def _scene_payload_for_block_flag(monkeypatch: pytest.MonkeyPatch, enabled: bool) -> dict[str, Any]:
+def _scene_payload_with_blocks(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     server, scheduled, _captured = _make_server()
     try:
-        _set_scene_block_flag(monkeypatch, enabled)
         ledger = server._state_ledger
         plane_state = PlaneViewportCache()
         plane_state.target_level = 0
@@ -1616,6 +1668,15 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
             plane_state=plane_state,
             volume_state=volume_state,
         )
+        reduce_plane_restore(
+            ledger,
+            level=0,
+            step=(2, 0, 0),
+            center=(10.0, 10.0),
+            zoom=2.0,
+            rect=(0.0, 0.0, 20.0, 20.0),
+            origin="test.plane_restore",
+        )
 
         server._update_scene_manager()
         while scheduled:
@@ -1634,15 +1695,22 @@ def test_notify_scene_payload_includes_viewport_state() -> None:
         viewport_meta = metadata.get("viewport_state")
         assert viewport_meta is not None
         assert viewport_meta["mode"] == "PLANE"
-        assert tuple(viewport_meta["plane"]["applied"]["step"]) == (2, 0, 0)
-        assert viewport_meta["volume"]["level"] == 0
+        camera_meta = viewport_meta.get("camera") or {}
+        plane_camera = camera_meta.get("plane") or {}
+        assert tuple(plane_camera.get("rect") or []) == (0.0, 0.0, 20.0, 20.0)
+        assert tuple(plane_camera.get("center") or []) == (10.0, 10.0)
+        assert pytest.approx(float(plane_camera.get("zoom"))) == 2.0
+        index_meta = viewport_meta.get("index") or {}
+        assert tuple(index_meta.get("value") or ()) == (2, 0, 0)
+        axes_meta = viewport_meta.get("axes") or ()
+        assert len(axes_meta) == 3 and axes_meta[1]["displayed"] is True
     finally:
         while scheduled:
             asyncio.run(scheduled.pop(0))
 
 
 def test_notify_scene_payload_includes_block_viewport_state(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = _payload_to_dict(_scene_payload_for_block_flag(monkeypatch, enabled=True))
+    payload = _payload_to_dict(_scene_payload_with_blocks(monkeypatch))
     metadata = payload.get("metadata") or {}
     viewport_meta = metadata.get("viewport_state")
     assert viewport_meta is not None
@@ -1651,26 +1719,16 @@ def test_notify_scene_payload_includes_block_viewport_state(monkeypatch: pytest.
     assert "axes" in viewport_meta and "index" in viewport_meta
 
 
-def test_notify_scene_payload_block_flag_parity(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload_off = _payload_to_dict(_scene_payload_for_block_flag(monkeypatch, enabled=False))
-    payload_on = _payload_to_dict(_scene_payload_for_block_flag(monkeypatch, enabled=True))
-
-    def _without_viewport_state(data: dict[str, Any]) -> dict[str, Any]:
-        metadata = data.get("metadata")
-        if metadata and "viewport_state" in metadata:
-            metadata = dict(metadata)
-            metadata.pop("viewport_state", None)
-            data = dict(data)
-            data["metadata"] = metadata or None
-        return data
-
-    assert _without_viewport_state(payload_off) == _without_viewport_state(payload_on)
-
-
 def test_reduce_plane_restore_updates_viewport_state() -> None:
     server, scheduled, _captured = _make_server()
     try:
         ledger = server._state_ledger
+        reduce_level_update(
+            ledger,
+            level=2,
+            level_shape=(32, 32, 32),
+            origin="test.level",
+        )
         reduce_plane_restore(
             ledger,
             level=2,
@@ -1685,13 +1743,12 @@ def test_reduce_plane_restore_updates_viewport_state() -> None:
         while scheduled:
             asyncio.run(scheduled.pop(0))
 
-        plane_entry = ledger.get("viewport", "plane", "state")
-        assert plane_entry is not None
-        assert plane_entry.value is not None
-        plane_snapshot = plane_entry.value
-        assert plane_snapshot["applied"]["level"] == 2
-        assert tuple(plane_snapshot["applied"]["step"]) == (6, 0, 0)
-        assert pytest.approx(float(plane_snapshot["pose"]["zoom"])) == 1.1
+        plane_entry = ledger.get("restore_cache", "plane", "state")
+        assert plane_entry is not None and plane_entry.value is not None
+        plane_cache = scene_blocks.plane_restore_cache_block_from_payload(dict(plane_entry.value))
+        assert plane_cache.level == 2
+        assert tuple(int(v) for v in plane_cache.index) == (6, 0, 0)
+        assert pytest.approx(float(plane_cache.pose.zoom or 0.0)) == 1.1
 
         spec_entry = ledger.get("dims", "main", "dims_spec")
         assert spec_entry is not None
@@ -1702,3 +1759,6 @@ def test_reduce_plane_restore_updates_viewport_state() -> None:
     finally:
         while scheduled:
             asyncio.run(scheduled.pop(0))
+reducers.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
+scene_blocks.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
+scene_builders.ENABLE_VIEW_AXES_INDEX_BLOCKS = True

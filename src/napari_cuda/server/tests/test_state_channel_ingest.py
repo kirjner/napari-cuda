@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import asdict
-
 import pytest
 
 import napari_cuda.server.data.lod as lod
@@ -12,8 +10,14 @@ from napari_cuda.protocol.messages import HelloClientInfo
 from napari_cuda.server.runtime.render_loop.applying import (
     apply as snapshot_mod,
 )
-from napari_cuda.server.scene.viewport import PlaneViewportCache
+from napari_cuda.server.scene.blocks import (
+    PlaneRestoreCacheBlock,
+    PlaneRestoreCachePose,
+    plane_restore_cache_block_from_payload,
+    plane_restore_cache_block_to_payload,
+)
 from napari_cuda.server.tests._helpers.state_channel import StateServerHarness
+from napari_cuda.server.control import state_reducers
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
     DimsSpec,
@@ -73,14 +77,12 @@ def _plane_state_payload(
     center: tuple[float, float],
     zoom: float,
 ) -> dict[str, object]:
-    plane_state = PlaneViewportCache()
-    plane_state.target_level = level
-    plane_state.target_step = step
-    plane_state.target_ndisplay = 2
-    plane_state.applied_level = level
-    plane_state.applied_step = step
-    plane_state.update_pose(rect=rect, center=center, zoom=zoom)
-    return asdict(plane_state)
+    cache_block = PlaneRestoreCacheBlock(
+        level=level,
+        index=step,
+        pose=PlaneRestoreCachePose(rect=rect, center=center, zoom=zoom),
+    )
+    return plane_restore_cache_block_to_payload(cache_block)
 
 
 def _build_dims_spec(
@@ -193,23 +195,21 @@ async def _test_ingest_state_applies_view_update() -> None:
         await harness.stop()
 
 
-def test_view_toggle_triggers_plane_restore_once() -> None:
-    asyncio.run(_test_view_toggle_triggers_plane_restore_once())
+def test_view_toggle_uses_plane_restore_cache() -> None:
+    asyncio.run(_test_view_toggle_uses_plane_restore_cache())
 
 
-async def _test_view_toggle_triggers_plane_restore_once() -> None:
+async def _test_view_toggle_uses_plane_restore_cache() -> None:
     loop = asyncio.get_running_loop()
     harness = StateServerHarness(loop)
-    from napari_cuda.server.control.state_update_handlers import view as view_handlers
-
-    orig_plane_restore = view_handlers.reduce_plane_restore
+    orig_plane_restore = state_reducers.reduce_plane_restore
     calls: list[dict[str, object]] = []
 
     def _wrapped_plane_restore(*args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append({"args": args, "kwargs": kwargs})
         return orig_plane_restore(*args, **kwargs)
 
-    view_handlers.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
+    state_reducers.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -238,7 +238,7 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
         )
         ledger.batch_record_confirmed(
             [
-                ("viewport", "plane", "state", plane_state),
+                ("restore_cache", "plane", "state", plane_state),
                 ("multiscale", "main", "level", 1),
                 ("dims", "main", "current_step", (60, 0, 0)),
                 ("multiscale", "main", "level_shapes", level_shapes),
@@ -274,9 +274,12 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
             timeout=3.0,
         )
         assert ack["payload"]["status"] == "accepted"
-        assert len(calls) == 1
-        scene_level = harness.server._state_ledger.get("multiscale", "main", "level")
-        assert scene_level is not None and int(scene_level.value) == plane_level
+        assert len(calls) == 0
+        cache_entry = harness.server._state_ledger.get("restore_cache", "plane", "state")
+        assert cache_entry is not None
+        cache_block = plane_restore_cache_block_from_payload(dict(cache_entry.value))
+        assert cache_block.level == plane_level
+        assert tuple(cache_block.index) == plane_step
         spec_entry = harness.server._state_ledger.get("dims", "main", "dims_spec")
         assert spec_entry is not None
         spec_payload = dims_spec_from_payload(spec_entry.value)
@@ -289,9 +292,9 @@ async def _test_view_toggle_triggers_plane_restore_once() -> None:
             timeout=3.0,
         )
         assert ack_repeat["payload"]["status"] == "accepted"
-        assert len(calls) == 1
+        assert len(calls) == 0
     finally:
-        view_handlers.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
+        state_reducers.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
         await harness.stop()
 
 
@@ -302,16 +305,15 @@ def test_view_toggle_skips_plane_restore_without_cache() -> None:
 async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
     loop = asyncio.get_running_loop()
     harness = StateServerHarness(loop)
-    from napari_cuda.server.control.state_update_handlers import view as view_handlers
 
-    orig_plane_restore = view_handlers.reduce_plane_restore
+    orig_plane_restore = state_reducers.reduce_plane_restore
     calls: list[dict[str, object]] = []
 
     def _wrapped_plane_restore(*args, **kwargs):  # type: ignore[no-untyped-def]
         calls.append({"args": args, "kwargs": kwargs})
         return orig_plane_restore(*args, **kwargs)
 
-    view_handlers.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
+    state_reducers.reduce_plane_restore = _wrapped_plane_restore  # type: ignore[assignment]
     try:
         harness.queue_client_payload(_hello_payload())
         await harness.start()
@@ -337,7 +339,7 @@ async def _test_view_toggle_skips_plane_restore_without_cache() -> None:
         assert ack["payload"]["status"] == "accepted"
         assert calls == []
     finally:
-        view_handlers.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
+        state_reducers.reduce_plane_restore = orig_plane_restore  # type: ignore[assignment]
         await harness.stop()
 
 
@@ -366,7 +368,7 @@ async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
         )
 
         ledger.record_confirmed(
-            "viewport",
+            "restore_cache",
             "plane",
             "state",
             cached_plane_state,
@@ -416,17 +418,13 @@ async def _test_view_toggle_restores_plane_pose_from_viewport_state() -> None:
         )
         assert ack["payload"]["status"] == "accepted"
 
-        restored_center = ledger.get("camera_plane", "main", "center")
-        restored_zoom = ledger.get("camera_plane", "main", "zoom")
-        restored_rect = ledger.get("camera_plane", "main", "rect")
-
-        assert restored_center is not None
-        assert restored_zoom is not None
-        assert restored_rect is not None
-
-        assert tuple(float(v) for v in restored_center.value) == (50.0, 60.0)
-        assert float(restored_zoom.value) == pytest.approx(2.5)
-        assert tuple(float(v) for v in restored_rect.value) == (10.0, 20.0, 30.0, 40.0)
+        cache_entry = ledger.get("restore_cache", "plane", "state")
+        assert cache_entry is not None and cache_entry.value is not None
+        cache_block = plane_restore_cache_block_from_payload(cache_entry.value)
+        pose = cache_block.pose
+        assert pose.center == (50.0, 60.0)
+        assert pose.zoom == pytest.approx(2.5)
+        assert pose.rect == (10.0, 20.0, 30.0, 40.0)
     finally:
         await harness.stop()
 

@@ -45,6 +45,7 @@ from napari_cuda.protocol.snapshots import SceneSnapshot
 from napari_cuda.server.control import (
     control_channel_server as state_channel_handler,
 )
+from napari_cuda.server.control import state_reducers as reducers
 from napari_cuda.server.control.mirrors.dims_mirror import ServerDimsMirror
 from napari_cuda.server.control.mirrors.layer_mirror import ServerLayerMirror
 from napari_cuda.server.control.resumable_history_store import (
@@ -79,6 +80,8 @@ from napari_cuda.server.runtime.render_loop.applying import (
 from napari_cuda.server.runtime.render_loop.applying.interface import (
     RenderApplyInterface,
 )
+from napari_cuda.server.scene import blocks as scene_blocks
+import napari_cuda.server.scene.builders as scene_builders
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import (
     LayerVisualState,
@@ -98,6 +101,9 @@ from napari_cuda.shared.dims_spec import (
     dims_spec_to_payload,
 )
 
+scene_blocks.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
+scene_builders.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
+reducers.ENABLE_VIEW_AXES_INDEX_BLOCKS = True
 _SENTINEL = object()
 
 
@@ -785,22 +791,6 @@ class StateServerHarness:
         server._dims_mirror.start()
         server._layer_mirror.start()
 
-        axis_labels = tuple(str(lbl) for lbl in (base_metrics.axis_labels or ("z", "y", "x")))
-        order = tuple(int(idx) for idx in (base_metrics.order or (0, 1, 2)))
-        level_shapes = tuple(tuple(int(dim) for dim in shape) for shape in base_metrics.level_shapes)
-        levels_payload = tuple(dict(level) for level in base_metrics.levels)
-        reduce_bootstrap_state(
-            server._state_ledger,
-            step=tuple(int(v) for v in base_metrics.current_step),
-            axis_labels=axis_labels,
-            order=order,
-            level_shapes=level_shapes,
-            levels=levels_payload,
-            current_level=int(base_metrics.current_level),
-            ndisplay=int(base_metrics.ndisplay),
-            origin="harness.bootstrap",
-        )
-
         server._refresh_scene_snapshot()
 
         server._ndisplay_calls: list[int] = []
@@ -948,18 +938,68 @@ class StateServerHarness:
         *,
         origin: str = "worker.state.dims",
     ) -> None:
-        entries = [
-            ("dims", "main", "current_step", tuple(int(v) for v in payload.current_step)),
-        ]
-        server._state_ledger.batch_record_confirmed(entries, origin=origin, dedupe=False)
-        if payload.dims_spec is not None:
-            server._state_ledger.record_confirmed(
-                "dims",
-                "main",
-                "dims_spec",
-                dims_spec_to_payload(payload.dims_spec),
-                origin=origin,
-            )
+        spec = payload.dims_spec or dims_spec_from_payload(payload.dims_spec_payload())
+        assert spec is not None, "payload missing dims_spec"
+        level_shapes_tuple = tuple(tuple(int(dim) for dim in shape) for shape in spec.level_shapes)
+        levels_payload = tuple(dict(level) for level in spec.levels)
+        reduce_bootstrap_state(
+            server._state_ledger,
+            step=tuple(int(v) for v in spec.current_step),
+            axis_labels=tuple(axis.label for axis in spec.axes),
+            order=tuple(int(v) for v in spec.order),
+            level_shapes=level_shapes_tuple,
+            levels=levels_payload,
+            current_level=int(spec.current_level),
+            ndisplay=int(spec.ndisplay),
+            origin=origin,
+        )
+        rect, center, zoom = _default_plane_pose(spec)
+        plane_pose = scene_blocks.PlaneRestoreCachePose(rect=rect, center=center, zoom=zoom)
+        plane_cache = scene_blocks.PlaneRestoreCacheBlock(
+            level=int(spec.current_level),
+            index=tuple(int(v) for v in spec.current_step),
+            pose=plane_pose,
+        )
+        server._state_ledger.record_confirmed(
+            "restore_cache",
+            "plane",
+            "state",
+            scene_blocks.plane_restore_cache_block_to_payload(plane_cache),
+            origin=origin,
+        )
+        volume_center, volume_angles, volume_distance, volume_fov = _default_volume_pose(spec)
+        volume_pose = scene_blocks.VolumeRestoreCachePose(
+            center=volume_center,
+            angles=volume_angles,
+            distance=volume_distance,
+            fov=volume_fov,
+        )
+        volume_cache = scene_blocks.VolumeRestoreCacheBlock(
+            level=int(spec.current_level),
+            index=tuple(int(v) for v in spec.current_step),
+            pose=volume_pose,
+        )
+        server._state_ledger.record_confirmed(
+            "restore_cache",
+            "volume",
+            "state",
+            scene_blocks.volume_restore_cache_block_to_payload(volume_cache),
+            origin=origin,
+        )
+        plane_block = scene_blocks.PlaneCameraBlock(rect=rect, center=center, zoom=zoom)
+        volume_block = scene_blocks.VolumeCameraBlock(
+            center=volume_center,
+            angles=volume_angles,
+            distance=volume_distance,
+            fov=volume_fov,
+        )
+        server._state_ledger.record_confirmed(
+            "camera",
+            "main",
+            "state",
+            scene_blocks.camera_block_to_payload(scene_blocks.CameraBlock(plane=plane_block, volume=volume_block)),
+            origin=origin,
+        )
 
 
 def frames_of_type(frames: Iterable[dict[str, Any]], frame_type: str) -> list[dict[str, Any]]:
@@ -987,6 +1027,38 @@ def _default_dims_snapshot() -> dict[str, Any]:
         "level_shapes": level_shapes,
         "dims_spec": dims_spec_to_payload(spec),
     }
+
+
+def _default_plane_pose(spec: DimsSpec) -> tuple[tuple[float, float, float, float], tuple[float, float], float]:
+    level_idx = int(spec.current_level)
+    level_shapes = spec.level_shapes
+    ndim = spec.ndim or len(spec.current_step)
+    level_shape = level_shapes[level_idx] if level_shapes else tuple(1 for _ in range(ndim))
+    displayed = spec.displayed or tuple(range(max(0, ndim - max(1, int(spec.ndisplay))), ndim))
+    if len(displayed) < 2:
+        displayed = tuple(range(max(0, ndim - 2), ndim))
+    height_axis = int(displayed[-2]) if len(displayed) >= 2 else 0
+    width_axis = int(displayed[-1])
+    height = float(level_shape[height_axis]) if height_axis < len(level_shape) else 1.0
+    width = float(level_shape[width_axis]) if width_axis < len(level_shape) else 1.0
+    rect = (0.0, 0.0, max(width, 1.0), max(height, 1.0))
+    center = (rect[2] / 2.0, rect[3] / 2.0)
+    zoom = 1.0
+    return rect, center, zoom
+
+
+def _default_volume_pose(spec: DimsSpec) -> tuple[tuple[float, float, float], tuple[float, float, float], float, float]:
+    level_idx = int(spec.current_level)
+    level_shapes = spec.level_shapes
+    ndim = spec.ndim or len(spec.current_step)
+    level_shape = level_shapes[level_idx] if level_shapes else tuple(1 for _ in range(max(3, ndim)))
+    def _extent(idx: int) -> float:
+        return float(level_shape[idx]) if idx < len(level_shape) else 1.0
+    center = (_extent(0) / 2.0, _extent(1) / 2.0, _extent(2) / 2.0)
+    angles = (0.0, 0.0, 0.0)
+    distance = max(center) * 2.0 or 1.0
+    fov = 60.0
+    return center, angles, distance, fov
 
 
 def _build_dims_spec(

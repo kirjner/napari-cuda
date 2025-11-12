@@ -131,15 +131,13 @@ Current Status (2025-11-10)
   flag enabled the worker bypasses `RenderUpdateMailbox`, watches `scene.main.op_seq`,
   and applies `{view, axes, index, lod, camera, layers}` blocks directly via the
   per-block signature cache introduced in `runtime/worker/lifecycle.py`.
-  Reducers (
-  `src/napari_cuda/server/control/state_reducers.py`) write:
+  Reducers write:
   - `view.main.state` (`ViewBlock`)
   - `axes.main.state` (`AxesBlock`)
-  - `index.main.cursor` (`IndexBlock`, renamed from “step”)
+  - `index.main.cursor` (`IndexBlock`)
   - `lod.main.state` (`LodBlock`)
   - `camera.main.state` (`CameraBlock`)
-  alongside the legacy `dims_spec`, `camera_plane`, `camera_volume`, and
-  `viewport.*` caches.
+  plus the plane/volume restore caches. Legacy `viewport.*` / `camera_*` scopes are gone.
 - **Transactions:** All scene control transactions accept `extra_entries`, so
   block payloads land in the same atomic ledger batch as the legacy keys. This
   ensures notify/mirror code can start reading the new scopes without race
@@ -151,9 +149,8 @@ Current Status (2025-11-10)
   sync with the new ledger scopes.
 - **Parity guardrails:** targeted tests inside
   `src/napari_cuda/server/tests/test_state_channel_updates.py` still pass with
-  the flag monkeypatched off/on. Now that all consumers read the block
-  payloads, we’re skipping the broader flag-matrix harness and instead moving
-  directly into Phase 3 cleanup so the block path becomes the only path.
+  the flag monkeypatched off/on. Remaining work is updating the docs/tests to drop
+  references to the removed scopes entirely before flipping the flag on by default.
 - **Restore cache helpers:** `state_reducers.py` now exposes `load_*_restore_cache`,
   `write_*_restore_cache`, and `_plane/_volume_cache_from_state`, and reducers
   (bootstrap, dims, camera, level, plane/volume restore) already dual-write
@@ -181,20 +178,28 @@ Outstanding Phase 1 work:
    ledger keys when the flag is set, while legacy scopes remain in place for the
    off-path. Once the block path is default, rename this helper to reflect that
    it snapshots scene blocks directly (e.g., `snapshot_scene_blocks`), move
-   `viewport_state` metadata to the block payloads, and delete the legacy
-   reconstruction path.
+  `viewport_state` metadata to the block payloads, and delete the legacy
+  reconstruction path.
 3. Treat the renamed worker-side caches (**PlaneViewportCache** /
    **VolumeViewportCache**) as worker-only snapshots for restore/autoframe
    toggles. They do not need dedicated ledger scopes once block consumers are
    authoritative, so plan the removal of their ledger mirrors after the
    consumer flip is complete.
+4. Document + refactor the bootstrap defaults used in tests: both
+   `src/napari_cuda/server/tests/test_state_channel_updates.py` and
+   `src/napari_cuda/server/tests/_helpers/state_channel.py` now carry
+   `_default_plane_pose` / `_default_volume_pose` helpers to seed camera +
+   restore-cache blocks when reducers aren’t invoked directly. Once reducers
+   own the entire bootstrap path we should expose a shared “seed ledger for
+   tests” helper (or call the real reducers) so those defaults only live in one
+   place.
 4. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
    the protocol docs so consumers know where to look once the flag flips.
 
 Phase 2 is now complete; all consumers read the block ledger under the flag.
-Phase 3 (in progress) removes the legacy planner/mailbox stack, deletes
-`viewport.*` / `camera_*` scopes, flips the feature flag on by default, and
-collapses notify/runtime code to the block schema only.
+Phase 3 (in progress) removed the planner/mailbox stack and the legacy ledger scopes.
+What remains is flipping the feature flag on by default, updating docs/tests, and
+finishing the render-loop cleanup.
 
 Phase 3 work items (authoritative once this doc is updated again):
 1. **✅ Render loop mailbox removed.** Worker ticks now hydrate the viewer directly
@@ -211,19 +216,12 @@ Phase 3 work items (authoritative once this doc is updated again):
      per tick (or operate directly on `SceneBlockSnapshot`) so we stop double-pulling the
      ledger entirely. Track this in the Phase 3 cleanup queue once the remaining legacy
      scopes are deleted.
-2. Delete legacy ledger scopes (`viewport.plane/volume.state`,
-   `camera_plane.*`, `camera_volume.*`) and update reducers/transactions to
-   persist only the block payloads (plus restore caches while they still exist).
-   Prep checklist:
-   - inventory all imports of `PlaneViewportCache` / `VolumeViewportCache`
-     outside the worker (main offenders: `state_reducers.py`, `scene/builders.py`,
-     `tests/test_state_channel_updates.py`);
-   - map every `ledger.get("viewport", ...)` use site so we can swap them to
-     `fetch_scene_blocks` / block payloads;
-   - confirm notify builders no longer read `camera_plane` / `camera_volume`.
+2. **✅ Delete legacy ledger scopes.** Reducers/transactions now persist only the block
+   payloads (plus restore caches). Notify/builders/worker bootstrap read those scopes exclusively.
 3. Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default, strip the flag-off
    branches from scene builders/notify/runtime, and refresh docs/tests/CI to
    assume the block schema is the sole path.
+4. Finish the render-loop cleanup noted above (single snapshot per tick).
 
 Restore Flow (Current → Target)
 -------------------------------

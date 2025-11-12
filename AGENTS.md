@@ -46,7 +46,7 @@
 - Copy env: `cp .env.example .env`. On headless GPU hosts: set `QT_QPA_PLATFORM=offscreen` and `PYOPENGL_PLATFORM=egl`; configure `CUDA_VISIBLE_DEVICES` as needed.
 - Prefer `uv` for all commands to ensure consistent environments.
 
-## Current Focus (2025-11-10)
+## Current Focus (2025-11-12)
 - Migrating the legacy `dims_spec + planner/mailbox` pipeline to the factored
   `view / axes / index / lod / camera / layers` ledger design.
 - Reference plan: `docs/architecture/view_axes_index_plan.md` (call-stack
@@ -67,16 +67,21 @@
 ## IMMEDIATE NEXT GOAL
 
 Phase 3 cleanup: remove the remaining legacy viewport/camera scopes now that the worker
-consumes the block ledger directly.
+and state-channel paths consume the block ledger directly (tests already seed blocks +
+restore caches via reducers; remaining work is render-loop + worker apply only).
 
-- Stop writing `viewport.plane/volume.state`, `camera_plane.*`, and `camera_volume.*`
-  from reducers/transactions; emit only `{view, axes, index, lod, camera}` blocks plus
-  restore caches.
-- Teach snapshot/notify builders to treat the block payloads as the single source of truth
-  (fall back to legacy scopes only when running with the feature flag off in tests).
-- Collapse worker/runtime helpers that still depend on `PlaneViewportCache` /
-  `VolumeViewportCache` ledger mirrors so the only remaining caches live in-memory on the worker.
-- Update docs/tests to describe the block-only runtime and document the removal of the
-  legacy scopes so downstream consumers know the new schema.
-- Keep the `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` flag until the apply/helpers are fully
-  block-native, then flip it on by default and delete the dead branches.
+- `_op_seq_watcher_apply_snapshot` now re-pulls and reapplies a *fresh* ledger snapshot
+  whenever block signatures change. This fixes the camera-orbit jitter seen when
+  `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1` (worker poses no longer replay stale snapshots)
+  and keeps `{view, axes, index, lod, camera}` authoritative during Phase 3.
+  - Follow-up: collapse the render loop to a single authoritative snapshot per tick (or
+    operate directly on `SceneBlockSnapshot`) so the watcher no longer double-pulls the ledger.
+
+- Reducers/transactions no longer write `viewport.*` or `camera_plane/camera_volume` scopes;
+  they emit `{view, axes, index, lod, camera}` plus restore caches only.
+
+Next steps:
+- Update docs/tests to reflect the block-only ledger (restore caches + `camera.main.state`).
+- Flip `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` on by default once tests/apply paths are fully
+  block-native, then delete the dead branches.
+- Finish the render-loop cleanup noted above.
