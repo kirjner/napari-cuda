@@ -76,6 +76,7 @@ payload:
    shrinking `RenderLedgerSnapshot` to a shim until everything else flips.
 2. **Notify + mirror consumers** – teach state-channel builders, the layer mirror, and
    snapshot helpers to read `SceneBlockSnapshot.layers` directly and emit the same payloads.
+   - Baseline/resume paths already hydrate `_collect_default_visuals` from LayerBlocks; next up is wiring the layer mirror + notify payload builders to the same blocks.
 3. **Protocol flip** – once server-side consumers rely on LayerBlocks, update the notify
    payload schema (and any stub clients) to speak LayerBlocks natively, then delete
    `LayerVisualState` / `RenderLedgerSnapshot.layer_values`.

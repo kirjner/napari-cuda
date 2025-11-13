@@ -1,18 +1,20 @@
 # napari-cuda Roadmap (View/Axes/Index Ledger)
 
-_Last updated: 2025-11-12_
+_Last updated: 2025-11-13_
 
 ## Where We Are
 - ✅ Reducers/transactions emit `{view, axes, index, lod, camera, layers}` blocks plus restore caches; worker runtime now ingests a single `SceneBlockSnapshot` per tick.
 - ✅ Op-seq watcher + render interface reuse the block snapshot, so the render loop no longer reconstructs pose data from `RenderLedgerSnapshot`.
 - ✅ Planner/mailbox stack is bypassed under the flag; worker tracks per-block signatures locally.
-- ⚠️ Notify builders, the layer mirror, and snapshot helpers still hydrate from `RenderLedgerSnapshot.layer_values` instead of `SceneBlockSnapshot.layers`.
+- ✅ `_collect_default_visuals`, state-channel baselines, and tests now hydrate from `SceneBlockSnapshot.layers` (via `scene_layers.*.block`) using the LayerBlock adapter; the ledger shim only persists for mirror/notify emitters.
+- ✅ Shared LayerBlock diff helpers are in place so runtime and control paths compute mutations the same way.
+- ⚠️ ServerLayerMirror, resumable history, and notify.layers builders still read `RenderLedgerSnapshot.layer_values`; they must switch to the new block deltas next.
 - ⚠️ `LayerVisualState` / `RenderLedgerSnapshot` remain as shims for the notify protocol even though no external clients require backward compatibility.
 
 ## Immediate Next Steps (Phase 3 Cleanup)
-1. **Control/notify consumers → LayerBlocks**
-   - Teach `_collect_default_visuals`, notify builders, and state-channel tests to read `SceneBlockSnapshot.layers` (or the ledger `scene_layers.*.block`) directly.
-   - Mirror/cache modules should keep emitting the same payload shape for now, but populate it from LayerBlocks instead of `layer_values`.
+1. **Control/notify consumers → LayerBlocks (Pass A2)**
+   - Rewire `ServerLayerMirror`, notify.layers builders, and resumable history to consume LayerBlock deltas via the shared diff helper.
+   - Keep emitting the legacy payload shape for now, but derive it from LayerBlocks instead of `layer_values`.
 2. **Protocol flip (no compat clients)**
    - Update notify payload builders + resumable history to speak LayerBlocks natively (TypedDict mirroring the block schema) and remove `LayerVisualState`.
    - Delete `RenderLedgerSnapshot.layer_values` + the dual-write shim once the new payload lands; adjust stub clients/tests alongside the server.
@@ -25,7 +27,7 @@ _Last updated: 2025-11-12_
 ## Upcoming Passes
 | Pass | Focus | Key Tasks | Exit Criteria |
 | ---- | ----- | --------- | ------------- |
-| **Pass A** | Control/notify block ingestion | - Consume `SceneBlockSnapshot.layers` (or `scene_layers.*.block`) everywhere in notify builders, mirrors, and snapshot helpers<br>- Keep emitting existing payloads via the shim until the protocol flip lands | Server-side state/notify code no longer reads `RenderLedgerSnapshot.layer_values`. |
+| **Pass A** | Control/notify block ingestion | - Finish migrating ServerLayerMirror + notify/history emission to LayerBlock deltas<br>- Keep emitting existing payloads via the shim until the protocol flip lands | Server-side state/notify code no longer reads `RenderLedgerSnapshot.layer_values`. |
 | **Pass B** | Protocol flip + shim removal | - Update notify payload schema + clients/tests to carry LayerBlocks directly<br>- Delete `LayerVisualState`, `RenderLedgerSnapshot.layer_values`, and the dual-write reducer paths | Layer appearance travels exclusively as LayerBlocks end-to-end. |
 | **Pass C** | Flag default + pipeline cleanup | - Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default<br>- Remove planner/mailbox artifacts and snapshot fallbacks<br>- Refresh docs/tests for the block-only runtime | Block-only pipeline is the sole runtime path; docs/tests treat it as the contract. |
 

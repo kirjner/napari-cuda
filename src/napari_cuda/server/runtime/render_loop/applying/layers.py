@@ -10,8 +10,10 @@ from napari._vispy.layers.image import _napari_cmap_to_vispy
 from napari.layers import Image as NapariImage
 from napari.utils.colormaps.colormap_utils import ensure_colormap
 
-from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene import LayerVisualState
+from napari_cuda.server.scene.blocks import LayerControlsBlock
+from napari_cuda.server.scene.layer_block_diff import LayerBlockDelta
+from napari_cuda.server.scene.viewport import RenderMode
 
 logger = logging.getLogger(__name__)
 
@@ -131,7 +133,6 @@ def _noop_setter(worker: Any, layer: Any, value: Any) -> bool:
 
 
 _PLANE_ONLY_PROPS = {"projection_mode"}
-_ALLOW_NONE_PROPS = {"metadata", "thumbnail"}
 _LAYER_SETTERS = {
     "visible": _set_visible,
     "opacity": _set_opacity,
@@ -149,37 +150,105 @@ _LAYER_SETTERS = {
     "thumbnail": _noop_setter,
 }
 
+_MANDATORY_CONTROL_KEYS = (
+    "visible",
+    "opacity",
+    "blending",
+    "interpolation",
+    "colormap",
+    "gamma",
+)
+
+_OPTIONAL_CONTROL_KEYS = (
+    "contrast_limits",
+    "depiction",
+    "rendering",
+    "attenuation",
+    "iso_threshold",
+    "projection_mode",
+    "plane_thickness",
+)
+
+
+def apply_layer_block_state(worker: Any, delta: LayerBlockDelta, *, mode: RenderMode) -> bool:
+    """Apply the mutated fields from a LayerBlock."""
+
+    if not delta.controls and not delta.metadata_changed and not delta.thumbnail_changed:
+        return False
+
+    layer = worker._napari_layer  # type: ignore[attr-defined]
+    block = delta.block
+    controls = block.controls
+
+    changed = False
+    for key in delta.controls:
+        if key in _PLANE_ONLY_PROPS and mode is RenderMode.VOLUME:
+            continue
+        if key == "depiction" and mode is not RenderMode.VOLUME:
+            continue
+        if key == "plane_thickness" and mode is not RenderMode.VOLUME:
+            continue
+        setter = _LAYER_SETTERS.get(key)
+        if setter is None:
+            continue
+        value = getattr(controls, key)
+        if setter(worker, layer, value):
+            changed = True
+
+    if delta.metadata_changed:
+        _set_metadata(worker, layer, block.metadata)
+        changed = True
+
+    if delta.thumbnail_changed:
+        setter = _LAYER_SETTERS["thumbnail"]
+        setter(worker, layer, block.thumbnail)
+        changed = True
+
+    return changed
+
+
+def apply_layer_block_updates(worker: Any, updates: Mapping[str, LayerBlockDelta]) -> bool:
+    """Apply a mapping of LayerBlock mutations."""
+
+    if not updates:
+        return False
+
+    mode = worker.viewport_state.mode  # type: ignore[attr-defined]
+    changed = False
+    for delta in updates.values():
+        if apply_layer_block_state(worker, delta, mode=mode):
+            changed = True
+
+    if changed:
+        worker._mark_render_tick_needed()  # type: ignore[attr-defined]
+    return changed
+
 
 def apply_layer_visual_state(worker: Any, layer_state: LayerVisualState, *, mode: RenderMode) -> bool:
-    """Apply a single layer visual state to the active napari layer."""
+    """Legacy LayerVisualState apply helper (compat path)."""
 
     layer = worker._napari_layer  # type: ignore[attr-defined]
 
     changed = False
     active_keys = layer_state.keys()
     for key in active_keys:
-        # Skip plane-only props in volume
         if key in _PLANE_ONLY_PROPS and mode is RenderMode.VOLUME:
             continue
-        # depiction is 3D-only; ignore in plane mode
         if key == "depiction" and mode is not RenderMode.VOLUME:
             continue
-        # plane_thickness is 3D-only (slicing plane)
         if key == "plane_thickness" and mode is not RenderMode.VOLUME:
             continue
         setter = _LAYER_SETTERS.get(key)
         if setter is None:
             continue
         value = layer_state.get(key)
-        if value is None and key not in _ALLOW_NONE_PROPS:
-            continue
         if setter(worker, layer, value):
             changed = True
     return changed
 
 
 def apply_layer_visual_updates(worker: Any, updates: Mapping[str, LayerVisualState]) -> bool:
-    """Apply a mapping of layer visual updates."""
+    """Apply legacy LayerVisualState deltas (flag-off path)."""
 
     if not updates:
         return False
@@ -195,4 +264,9 @@ def apply_layer_visual_updates(worker: Any, updates: Mapping[str, LayerVisualSta
     return changed
 
 
-__all__ = ["apply_layer_visual_state", "apply_layer_visual_updates"]
+__all__ = [
+    "apply_layer_block_state",
+    "apply_layer_block_updates",
+    "apply_layer_visual_state",
+    "apply_layer_visual_updates",
+]

@@ -217,6 +217,7 @@ clients depend on it.
   loop operate on the block bundle alone.
 - `RenderInterface` owns both the planning and apply APIs, mutating worker state directly from the block
   snapshot. Per-block signatures replace the current staging helpers.
+- A shared LayerBlock diff helper (`compute_layer_block_deltas`) now powers the runtime reapply path; reuse it for mirror/notify ingestion so every consumer observes the same mutation semantics.
 
 ### Control / protocol flip
 
@@ -229,6 +230,7 @@ clients depend on it.
   `RenderLedgerSnapshot.layer_values`, and the dual-write reducer path.
 - After the shim is gone, `RenderLedgerSnapshot` should disappear entirely—everything
   runs on the block snapshot and restore caches.
+- Baseline/resume flows (`_collect_default_visuals`, state-channel helpers, tests) already hydrate from the LayerBlocks via the adapter; remaining work in this phase is flipping `ServerLayerMirror`, notify payload builders, and history stores onto the shared block deltas.
 
 ### LayerBlock target schema (lean internal form)
 

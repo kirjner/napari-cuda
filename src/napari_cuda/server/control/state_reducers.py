@@ -43,6 +43,11 @@ from napari_cuda.server.scene.blocks import (
     AxesBlock,
     CameraBlock,
     IndexBlock,
+    LayerBlock,
+    LayerControlsBlock,
+    LayerLevelDescriptor,
+    LayerMultiscaleBlock,
+    LayerThumbnail,
     LodBlock,
     PlaneCameraBlock,
     PlaneRestoreCacheBlock,
@@ -54,12 +59,15 @@ from napari_cuda.server.scene.blocks import (
     axes_to_payload,
     camera_block_to_payload,
     index_block_to_payload,
+    layer_block_to_payload,
+    layer_thumbnail_from_payload,
     lod_block_to_payload,
     plane_restore_cache_block_from_payload,
     plane_restore_cache_block_to_payload,
     volume_restore_cache_block_from_payload,
     volume_restore_cache_block_to_payload,
     view_block_to_payload,
+    LAYER_BLOCK_SCOPE,
 )
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
@@ -105,6 +113,168 @@ _ALLOWED_RENDERING = {
 }
 
 _ALLOWED_PROJECTION = {mode.value for mode in NapariProjectionMode}
+
+_DEFAULT_LAYER_ID = "layer-0"
+_LAYER_BLOCK_SCOPE = LAYER_BLOCK_SCOPE
+
+_LAYER_CONTROL_DEFAULTS = {
+    "visible": True,
+    "opacity": 1.0,
+    "blending": "opaque",
+    "interpolation": "linear",
+    "colormap": "gray",
+    "gamma": 1.0,
+}
+
+_LAYER_VERSION_KEYS = (
+    "visible",
+    "opacity",
+    "blending",
+    "interpolation",
+    "colormap",
+    "gamma",
+    "contrast_limits",
+    "depiction",
+    "rendering",
+    "attenuation",
+    "iso_threshold",
+    "projection_mode",
+    "plane_thickness",
+    "metadata",
+    "thumbnail",
+)
+
+
+def _layer_metadata_from_ledger(ledger: ServerStateLedger, layer_id: str) -> dict[str, Any]:
+    entry = ledger.get("layer", layer_id, "metadata")
+    if entry is None or entry.value is None:
+        return {}
+    return dict(entry.value)
+
+
+def _layer_controls_from_ledger(ledger: ServerStateLedger, layer_id: str) -> LayerControlsBlock:
+    visible_entry = ledger.get("layer", layer_id, "visible")
+    opacity_entry = ledger.get("layer", layer_id, "opacity")
+    blending_entry = ledger.get("layer", layer_id, "blending")
+    interpolation_entry = ledger.get("layer", layer_id, "interpolation")
+    colormap_entry = ledger.get("layer", layer_id, "colormap")
+    gamma_entry = ledger.get("layer", layer_id, "gamma")
+    contrast_entry = ledger.get("layer", layer_id, "contrast_limits")
+    depiction_entry = ledger.get("layer", layer_id, "depiction")
+    rendering_entry = ledger.get("layer", layer_id, "rendering")
+    attenuation_entry = ledger.get("layer", layer_id, "attenuation")
+    iso_entry = ledger.get("layer", layer_id, "iso_threshold")
+    projection_entry = ledger.get("layer", layer_id, "projection_mode")
+    plane_thickness_entry = ledger.get("layer", layer_id, "plane_thickness")
+
+    contrast_limits = None
+    if contrast_entry is not None and contrast_entry.value is not None:
+        pair = contrast_entry.value
+        contrast_limits = (float(pair[0]), float(pair[1]))
+
+    return LayerControlsBlock(
+        visible=bool(visible_entry.value) if visible_entry and visible_entry.value is not None else _LAYER_CONTROL_DEFAULTS["visible"],
+        opacity=float(opacity_entry.value) if opacity_entry and opacity_entry.value is not None else float(_LAYER_CONTROL_DEFAULTS["opacity"]),
+        blending=str(blending_entry.value) if blending_entry and blending_entry.value is not None else str(_LAYER_CONTROL_DEFAULTS["blending"]),
+        interpolation=str(interpolation_entry.value) if interpolation_entry and interpolation_entry.value is not None else str(_LAYER_CONTROL_DEFAULTS["interpolation"]),
+        colormap=str(colormap_entry.value) if colormap_entry and colormap_entry.value is not None else str(_LAYER_CONTROL_DEFAULTS["colormap"]),
+        gamma=float(gamma_entry.value) if gamma_entry and gamma_entry.value is not None else float(_LAYER_CONTROL_DEFAULTS["gamma"]),
+        contrast_limits=contrast_limits,
+        depiction=str(depiction_entry.value) if depiction_entry and depiction_entry.value is not None else None,
+        rendering=str(rendering_entry.value) if rendering_entry and rendering_entry.value is not None else None,
+        attenuation=float(attenuation_entry.value) if attenuation_entry and attenuation_entry.value is not None else None,
+        iso_threshold=float(iso_entry.value) if iso_entry and iso_entry.value is not None else None,
+        projection_mode=str(projection_entry.value) if projection_entry and projection_entry.value is not None else None,
+        plane_thickness=float(plane_thickness_entry.value) if plane_thickness_entry and plane_thickness_entry.value is not None else None,
+    )
+
+
+def _layer_multiscale_block(ledger: ServerStateLedger) -> LayerMultiscaleBlock | None:
+    spec_entry = ledger.get("dims", "main", "dims_spec")
+    if spec_entry is None or spec_entry.value is None:
+        return None
+    spec = dims_spec_from_payload(spec_entry.value)
+    assert spec is not None, "dims spec payload missing"
+
+    levels_list: list[LayerLevelDescriptor] = []
+    for level in spec.levels:
+        shape = tuple(int(dim) for dim in level["shape"])
+        downsample_payload = level.get("downsample")
+        if downsample_payload is None:
+            downsample = tuple(1.0 for _ in shape)
+        else:
+            downsample = tuple(float(value) for value in downsample_payload)
+        levels_list.append(LayerLevelDescriptor(shape=shape, downsample=downsample))
+    if not levels_list:
+        return None
+    levels = tuple(levels_list)
+
+    active_entry = ledger.get("viewport", "active", "state")
+    if active_entry is not None and active_entry.value is not None:
+        current_level = int(active_entry.value.get("level", spec.current_level))
+    else:
+        current_level = int(spec.current_level)
+
+    policy_entry = ledger.get("multiscale", "main", "policy")
+    index_space_entry = ledger.get("multiscale", "main", "index_space")
+
+    return LayerMultiscaleBlock(
+        current_level=current_level,
+        levels=levels,
+        policy=str(policy_entry.value) if policy_entry and policy_entry.value is not None else None,
+        index_space=str(index_space_entry.value) if index_space_entry and index_space_entry.value is not None else None,
+    )
+
+
+def _layer_thumbnail_from_ledger(ledger: ServerStateLedger, layer_id: str) -> LayerThumbnail | None:
+    entry = ledger.get("layer", layer_id, "thumbnail")
+    if entry is None or entry.value is None:
+        return None
+    return layer_thumbnail_from_payload(entry.value)
+
+
+def _layer_versions_from_ledger(ledger: ServerStateLedger, layer_id: str) -> dict[str, int] | None:
+    versions: dict[str, int] = {}
+    for key in _LAYER_VERSION_KEYS:
+        entry = ledger.get("layer", layer_id, key)
+        if entry is None or entry.version is None:
+            continue
+        versions[key] = int(entry.version)
+    return versions or None
+
+
+def _build_layer_block(ledger: ServerStateLedger, *, layer_id: str) -> LayerBlock:
+    controls = _layer_controls_from_ledger(ledger, layer_id)
+    metadata = _layer_metadata_from_ledger(ledger, layer_id)
+    thumbnail = _layer_thumbnail_from_ledger(ledger, layer_id)
+    multiscale = _layer_multiscale_block(ledger)
+    versions = _layer_versions_from_ledger(ledger, layer_id)
+
+    return LayerBlock(
+        layer_id=str(layer_id),
+        layer_type="image",
+        controls=controls,
+        metadata=metadata,
+        thumbnail=thumbnail,
+        multiscale=multiscale,
+        versions=versions,
+        extras={},
+    )
+
+
+def _write_layer_block_snapshot(ledger: ServerStateLedger, *, layer_id: str = _DEFAULT_LAYER_ID) -> None:
+    if not ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        return
+    block = _build_layer_block(ledger, layer_id=layer_id)
+    payload = layer_block_to_payload(block)
+    ledger.record_confirmed(
+        _LAYER_BLOCK_SCOPE,
+        str(layer_id),
+        "block",
+        payload,
+        origin="control.layer_block",
+        dedupe=True,
+    )
 
 
 
@@ -556,7 +726,8 @@ def reduce_layer_property(
 
     metadata = {"intent_id": intent_id} if intent_id else None
 
-    updates: list[tuple[str, str, str, Any]] = [("layer", layer_id, prop, canonical)]
+    layer_id_str = str(layer_id)
+    updates: list[tuple[str, str, str, Any]] = [("layer", layer_id_str, prop, canonical)]
 
     if prop == "colormap":
         updates.append(("volume", "main", "colormap", canonical))
@@ -582,14 +753,16 @@ def reduce_layer_property(
         op_kind="layer-update",
     )
 
-    primary_entry = stored_entries.get(("layer", layer_id, prop))
+    primary_entry = stored_entries.get(("layer", layer_id_str, prop))
     assert primary_entry is not None, "layer transaction must return primary entry"
     assert primary_entry.version is not None, "layer transaction must yield version"
     version = int(primary_entry.version)
 
+    _write_layer_block_snapshot(ledger, layer_id=layer_id_str)
+
     return ServerLedgerUpdate(
         scope="layer",
-        target=layer_id,
+        target=layer_id_str,
         key=prop,
         value=canonical,
         intent_id=intent_id,
@@ -630,6 +803,8 @@ def reduce_volume_rendering(
     assert entry is not None, "volume transaction must return entry"
     assert entry.version is not None, "volume transaction must yield version"
     version = int(entry.version)
+
+    _write_layer_block_snapshot(ledger, layer_id=_DEFAULT_LAYER_ID)
 
     return ServerLedgerUpdate(
         scope="volume",
@@ -1012,6 +1187,8 @@ def reduce_bootstrap_state(
         metadata=None,
     )
 
+    _write_layer_block_snapshot(ledger, layer_id=_DEFAULT_LAYER_ID)
+
     return [dims_update, view_update]
 
 
@@ -1159,6 +1336,8 @@ def reduce_dims_update(
             timestamp=ts,
             metadata=metadata,
         )
+
+    _write_layer_block_snapshot(ledger, layer_id=_DEFAULT_LAYER_ID)
 
     return ServerLedgerUpdate(
         scope="dims",
@@ -1353,6 +1532,8 @@ def reduce_view_update(
         origin,
     )
 
+    _write_layer_block_snapshot(ledger, layer_id=_DEFAULT_LAYER_ID)
+
     return ServerLedgerUpdate(
         scope="view",
         target="main",
@@ -1470,6 +1651,8 @@ def reduce_plane_restore(
         op_kind="plane-restore",
         extra_entries=_view_axes_index_entries(new_spec),
     )
+
+    _write_layer_block_snapshot(ledger, layer_id=_DEFAULT_LAYER_ID)
 
     return stored
 
@@ -1754,6 +1937,8 @@ def reduce_level_update(
         timestamp=ts,
     )
 
+    _write_layer_block_snapshot(ledger, layer_id=_DEFAULT_LAYER_ID)
+
     return ServerLedgerUpdate(
         scope="multiscale",
         target="main",
@@ -1973,6 +2158,8 @@ def reduce_thumbnail_capture(
     assert entry is not None, "thumbnail transaction must return layer thumbnail entry"
     assert entry.version is not None, "thumbnail transaction must yield version"
     version = int(entry.version)
+
+    _write_layer_block_snapshot(ledger, layer_id=str(layer_id))
 
     return ServerLedgerUpdate(
         scope="layer",

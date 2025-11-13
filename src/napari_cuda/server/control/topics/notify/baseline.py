@@ -23,6 +23,10 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumePlan,
 )
 from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
+from napari_cuda.server.scene import blocks as scene_blocks
+from napari_cuda.server.scene.builders import scene_blocks_from_snapshot
+from napari_cuda.server.scene.layer_block_adapter import layer_block_to_visual_state
+from napari_cuda.server.scene.layer_block_diff import index_layer_blocks
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 from napari_cuda.protocol.messages import NotifyLevelPayload
 from napari_cuda.server.control.protocol.runtime import state_sequencer
@@ -64,7 +68,17 @@ async def orchestrate_connect(
         viewer_settings=_viewer_settings(server),
     )
 
-    default_visuals = _collect_default_visuals(server, scene_snapshot)
+    layer_blocks: dict[str, Any] | None = None
+    if scene_blocks.ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        block_snapshot = scene_blocks_from_snapshot(ledger_snapshot)
+        if block_snapshot is not None:
+            layer_blocks = index_layer_blocks(block_snapshot.layers)
+
+    default_visuals = _collect_default_visuals(
+        server,
+        scene_snapshot,
+        layer_blocks=layer_blocks,
+    )
     _record_default_visuals(server, layers_plan, default_visuals)
 
     await send_scene_baseline(
@@ -117,10 +131,17 @@ def _viewer_settings(server: Any) -> dict[str, Any]:
 def _collect_default_visuals(
     server: Any,
     scene_snapshot: SceneSnapshot,
+    *,
+    layer_blocks: Mapping[str, scene_blocks.LayerBlock] | None,
 ) -> list[LayerVisualState]:
     mirror = getattr(server, "_layer_mirror", None)
     visual_map: dict[str, LayerVisualState] = {}
-    if mirror is not None:
+    if layer_blocks:
+        visual_map = {
+            str(layer_id): layer_block_to_visual_state(block)
+            for layer_id, block in layer_blocks.items()
+        }
+    elif mirror is not None:
         visual_map = mirror.latest_visual_states()
     else:
         logger.debug("layer mirror not initialised; falling back to ledger snapshot controls")

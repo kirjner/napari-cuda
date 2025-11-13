@@ -1,3 +1,15 @@
+# 2025-11-13 — LayerBlock baseline ingest + shared diff helper
+
+### Runtime
+- Extracted a shared LayerBlock diff helper (`compute_layer_block_deltas`) so both the render loop and control consumers compute mutations directly from `{scene_layers.*.block}` records; the worker no longer owns bespoke delta logic.
+
+### Control
+- `_collect_default_visuals`, resumable history baselines, and state-channel tests now hydrate from `SceneBlockSnapshot.layers` via the LayerBlock adapter—`RenderLedgerSnapshot.layer_values` remains only for the mirror + payload builders.
+- Multiscale reducer helpers tolerate dims specs without precomputed `downsample`, unblocking block snapshot writes during bootstrap.
+
+### Next steps
+- Rewire `ServerLayerMirror`, notify.layers deltas, and history replay to reuse the LayerBlock delta helper, then drop `LayerVisualState`/`RenderLedgerSnapshot.layer_values` as part of the protocol flip.
+
 # Architecture Change Log
 
 Tracks intentional updates to the architecture spec and the authoritative modules. Add new entries (date-descending) with links to the implemented sections/files so future sessions can pick up immediately.

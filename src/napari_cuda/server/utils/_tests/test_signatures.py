@@ -9,6 +9,8 @@ from napari_cuda.server.scene.blocks import (
     AxesBlock,
     CameraBlock,
     IndexBlock,
+    LayerBlock,
+    LayerControlsBlock,
     LodBlock,
     PlaneCameraBlock,
     ViewBlock,
@@ -21,9 +23,10 @@ from napari_cuda.server.utils.signatures import (
     camera_block_signature,
     dims_content_signature,
     index_block_signature,
+    layer_block_signature,
     layer_content_signature,
     layer_inputs_signature,
-    layers_block_signature,
+    layers_visual_signature,
     lod_block_signature,
     scene_content_signature,
     snapshot_versions,
@@ -189,7 +192,7 @@ def test_snapshot_versions_apply_updates_mapping() -> None:
     assert cache[("camera", "main", "state")] == 6
 
 
-def test_layers_block_signature_sorts_layer_ids() -> None:
+def test_layers_visual_signature_sorts_layer_ids() -> None:
     layers_a = {
         "layer-b": LayerVisualState(layer_id="layer-b", visible=True),
         "layer-a": LayerVisualState(layer_id="layer-a", opacity=0.5),
@@ -198,8 +201,27 @@ def test_layers_block_signature_sorts_layer_ids() -> None:
         "layer-a": LayerVisualState(layer_id="layer-a", opacity=0.5),
         "layer-b": LayerVisualState(layer_id="layer-b", visible=True),
     }
-    token_a = layers_block_signature(layers_a)
-    token_b = layers_block_signature(layers_b)
+    token_a = layers_visual_signature(layers_a)
+    token_b = layers_visual_signature(layers_b)
+    assert token_a.value == token_b.value
+
+
+def test_layer_block_signature_sorts_blocks() -> None:
+    block_a = LayerBlock(
+        layer_id="layer-a",
+        layer_type="image",
+        controls=LayerControlsBlock(
+            visible=True,
+            opacity=1.0,
+            blending="opaque",
+            interpolation="linear",
+            colormap="gray",
+            gamma=1.0,
+        ),
+    )
+    block_b = replace(block_a, layer_id="layer-b")
+    token_a = layer_block_signature((block_b, block_a))
+    token_b = layer_block_signature((block_a, block_b))
     assert token_a.value == token_b.value
 
 

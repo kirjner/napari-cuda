@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from napari_cuda.server.data import SliceROI
 from napari_cuda.server.runtime.lod.context import build_level_context
-from napari_cuda.server.runtime.render_loop.applying.drain import drain_render_state
+from napari_cuda.server.runtime.render_loop.applying.dims import apply_dims_step
 from napari_cuda.server.runtime.render_loop.applying.plane import (
     aligned_roi_signature,
     apply_dims_from_snapshot,
@@ -26,9 +26,18 @@ from napari_cuda.server.runtime.render_loop.applying.viewer_metadata import (
 from napari_cuda.server.runtime.render_loop.applying.volume import (
     apply_volume_camera_pose,
     apply_volume_level,
+    apply_volume_visual_params,
+)
+from napari_cuda.server.runtime.render_loop.applying.layers import (
+    apply_layer_block_updates,
+    apply_layer_visual_updates,
 )
 from napari_cuda.server.scene import LayerVisualState, RenderLedgerSnapshot
-from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS
+from napari_cuda.server.scene.blocks import ENABLE_VIEW_AXES_INDEX_BLOCKS, LayerBlock
+from napari_cuda.server.scene.layer_block_diff import (
+    LayerBlockDelta,
+    compute_layer_block_deltas,
+)
 from napari_cuda.server.scene.models import SceneBlockSnapshot
 from napari_cuda.server.scene.viewport import (
     PlaneViewportCache,
@@ -341,17 +350,25 @@ class RenderInterface:
 
         applied_versions = self.applied_versions
         layer_changes: dict[str, LayerVisualState] = {}
+        layer_block_updates: dict[str, LayerBlockDelta] = {}
         if applied_versions is not None:
             _record_snapshot_versions(applied_versions, snapshot)
+
+        blocks_snapshot = snapshot.block_snapshot if ENABLE_VIEW_AXES_INDEX_BLOCKS else None
+        use_layer_blocks = ENABLE_VIEW_AXES_INDEX_BLOCKS and blocks_snapshot is not None
+        if use_layer_blocks:
+            layer_block_updates = compute_layer_block_deltas(
+                applied_versions,
+                blocks_snapshot.layers,
+            )
+        elif applied_versions is not None:
             layer_changes = _extract_layer_changes(applied_versions, snapshot)
 
         state_for_apply = snapshot
         if layer_changes:
             state_for_apply = replace(snapshot, layer_values=layer_changes)
-        elif snapshot.layer_values is not None:
+        elif snapshot.layer_values is not None and not use_layer_blocks:
             state_for_apply = replace(snapshot, layer_values=None)
-
-        blocks_snapshot = snapshot.block_snapshot if ENABLE_VIEW_AXES_INDEX_BLOCKS else None
 
         plane_state = _resolve_plane_state(snapshot, blocks_snapshot)
         if plane_state is not None:
@@ -381,11 +398,20 @@ class RenderInterface:
         if runner is not None:
             runner.ingest_snapshot(snapshot)
 
-        drain_res = drain_render_state(self.worker, state_for_apply)
-        if drain_res.z_index is not None:
-            self.set_z_index(int(drain_res.z_index))
-        if drain_res.data_wh is not None:
-            self.set_data_shape(int(drain_res.data_wh[0]), int(drain_res.data_wh[1]))
+        render_marked = False
+        if viewport_state.mode is not RenderMode.VOLUME and snapshot.current_step is not None:
+            z_index, marked = apply_dims_step(self.worker, snapshot.current_step)
+            if z_index is not None:
+                self.set_z_index(int(z_index))
+            render_marked = render_marked or marked
+        elif viewport_state.mode is RenderMode.VOLUME:
+            apply_volume_visual_params(self.worker, snapshot)
+
+        if layer_block_updates:
+            if apply_layer_block_updates(self.worker, layer_block_updates):
+                render_marked = True
+        elif state_for_apply.layer_values and apply_layer_visual_updates(self.worker, state_for_apply.layer_values):
+            render_marked = True
 
         runner = self.viewport_runner
         if runner is not None and viewport_state.mode is RenderMode.PLANE:
@@ -397,11 +423,7 @@ class RenderInterface:
         elif runner is not None and self.current_level_index() == int(runner.state.target_level):
             runner.mark_level_applied(self.current_level_index())
 
-        if (
-            drain_res.render_marked
-            and viewport_state.mode is not RenderMode.VOLUME
-            and not self.level_policy_suppressed
-        ):
+        if render_marked and viewport_state.mode is not RenderMode.VOLUME and not self.level_policy_suppressed:
             self.evaluate_level_policy()
 
         if self.level_policy_suppressed:
