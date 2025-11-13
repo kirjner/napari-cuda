@@ -68,7 +68,6 @@ from napari_cuda.server.scene.viewport import (
     VolumeViewportCache,
 )
 from napari_cuda.server.scene import (
-    LayerVisualState,
     RenderLedgerSnapshot,
     snapshot_layer_controls,
     snapshot_multiscale_state,
@@ -76,6 +75,7 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
+from napari_cuda.server.scene.layer_block_diff import LayerBlockDelta
 import napari_cuda.server.scene.builders as scene_builders
 from napari_cuda.server.scene import blocks as scene_blocks
 from napari_cuda.server.scene.blocks import (
@@ -312,14 +312,14 @@ def _make_server() -> tuple[SimpleNamespace, list[Coroutine[Any, Any, None]], li
     server._dims_mirror.start()
     async def _layer_broadcast(
         layer_id: str,
-        state: LayerVisualState,
+        delta: LayerBlockDelta,
         intent_id: Optional[str],
         timestamp: float,
     ) -> None:
         await broadcast_layers_delta(
             server,
             layer_id=layer_id,
-            state=state,
+            state=delta,
             intent_id=intent_id,
             timestamp=timestamp,
         )

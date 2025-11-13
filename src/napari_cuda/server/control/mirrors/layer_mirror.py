@@ -23,7 +23,7 @@ from napari_cuda.server.utils.signatures import SignatureToken, layer_content_si
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
 ScheduleFn = Callable[[Awaitable[None], str], None]
-BroadcastFn = Callable[[str, LayerVisualState, Optional[str], float], Awaitable[None]]
+BroadcastFn = Callable[[str, LayerBlockDelta, Optional[str], float], Awaitable[None]]
 DefaultLayerResolver = Callable[[], Optional[str]]
 
 
@@ -91,6 +91,14 @@ class ServerLayerMirror:
     def latest_visual_states(self) -> dict[str, LayerVisualState]:
         with self._lock:
             return dict(self._latest_states)
+
+    def latest_layer_blocks(self) -> dict[str, LayerBlock]:
+        with self._lock:
+            return dict(self._latest_blocks)
+
+    def latest_layer_blocks(self) -> dict[str, LayerBlock]:
+        with self._lock:
+            return dict(self._latest_blocks)
 
     def reset(self) -> None:
         with self._lock:
@@ -227,7 +235,7 @@ class ServerLayerMirror:
             self._last_payload_sig[layer_id] = sig
             intent_id = intents.get(layer_id)
             self._schedule(
-                self._broadcaster(layer_id, subset, intent_id, timestamp),
+                self._broadcaster(layer_id, delta, intent_id, timestamp),
                 f"mirror-layer-{layer_id}",
             )
 

@@ -22,11 +22,15 @@ from napari_cuda.server.control.resumable_history_store import (
     ResumeDecision,
     ResumePlan,
 )
-from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
+from napari_cuda.server.scene import build_ledger_snapshot
 from napari_cuda.server.scene import blocks as scene_blocks
+from napari_cuda.server.scene.blocks import LayerBlock, layer_block_from_payload
 from napari_cuda.server.scene.builders import scene_blocks_from_snapshot
-from napari_cuda.server.scene.layer_block_adapter import layer_block_to_visual_state
-from napari_cuda.server.scene.layer_block_diff import index_layer_blocks
+from napari_cuda.server.scene.layer_block_diff import (
+    compute_layer_block_deltas,
+    LayerBlockDelta,
+    index_layer_blocks,
+)
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 from napari_cuda.protocol.messages import NotifyLevelPayload
 from napari_cuda.server.control.protocol.runtime import state_sequencer
@@ -68,18 +72,18 @@ async def orchestrate_connect(
         viewer_settings=_viewer_settings(server),
     )
 
-    layer_blocks: dict[str, Any] | None = None
+    layer_blocks: dict[str, LayerBlock] | None = None
     if scene_blocks.ENABLE_VIEW_AXES_INDEX_BLOCKS:
         block_snapshot = scene_blocks_from_snapshot(ledger_snapshot)
         if block_snapshot is not None:
             layer_blocks = index_layer_blocks(block_snapshot.layers)
 
-    default_visuals = _collect_default_visuals(
+    default_blocks = _collect_default_layer_blocks(
         server,
         scene_snapshot,
         layer_blocks=layer_blocks,
     )
-    _record_default_visuals(server, layers_plan, default_visuals)
+    _record_default_layer_blocks(server, layers_plan, default_blocks)
 
     await send_scene_baseline(
         server,
@@ -95,7 +99,7 @@ async def orchestrate_connect(
         server,
         ws,
         plan=layers_plan,
-        default_visuals=default_visuals,
+        default_deltas=_build_default_layer_deltas(default_blocks),
     )
     await _send_stream_baseline(server, ws, plan=stream_plan)
 
@@ -128,51 +132,51 @@ def _viewer_settings(server: Any) -> dict[str, Any]:
     }
 
 
-def _collect_default_visuals(
+def _collect_default_layer_blocks(
     server: Any,
     scene_snapshot: SceneSnapshot,
     *,
-    layer_blocks: Mapping[str, scene_blocks.LayerBlock] | None,
-) -> list[LayerVisualState]:
+    layer_blocks: Mapping[str, LayerBlock] | None,
+) -> list[LayerBlock]:
     mirror = getattr(server, "_layer_mirror", None)
-    visual_map: dict[str, LayerVisualState] = {}
+    block_map: dict[str, LayerBlock] = {}
     if layer_blocks:
-        visual_map = {
-            str(layer_id): layer_block_to_visual_state(block)
-            for layer_id, block in layer_blocks.items()
-        }
+        block_map = dict(layer_blocks)
     elif mirror is not None:
-        visual_map = mirror.latest_visual_states()
+        block_map = mirror.latest_layer_blocks()
     else:
         logger.debug("layer mirror not initialised; falling back to ledger snapshot controls")
-        snapshot = build_ledger_snapshot(server._state_ledger)
-        layer_values = snapshot.layer_values or {}
-        visual_map = {str(layer_id): state for layer_id, state in layer_values.items()}
+        snapshot = scene_blocks_from_snapshot(server._state_ledger.snapshot())
+        if snapshot is not None:
+            block_map = index_layer_blocks(snapshot.layers)
 
-    defaults: list[LayerVisualState] = []
+    defaults: list[LayerBlock] = []
     for layer_snapshot in scene_snapshot.layers:
         layer_id = layer_snapshot.layer_id
         if not layer_id:
             continue
-        state = visual_map.get(layer_id)
-        if state is None:
-            updates: dict[str, Any] = {}
-            block_controls = layer_snapshot.block.get("controls")
-            if isinstance(block_controls, Mapping):
-                updates.update({str(key): value for key, value in block_controls.items()})
-            metadata_block = layer_snapshot.block.get("metadata")
-            if isinstance(metadata_block, Mapping) and metadata_block:
-                updates["metadata"] = dict(metadata_block)
-            if updates:
-                state = LayerVisualState(layer_id=layer_id).with_updates(updates=updates)
-        if state is not None:
-            defaults.append(state)
+        block = block_map.get(layer_id)
+        if block is None:
+            payload = layer_snapshot.block
+            if isinstance(payload, Mapping) and payload:
+                block = layer_block_from_payload(payload)
+        if block is not None:
+            defaults.append(block)
 
-    # Include any additional layers not represented in the scene snapshot ordering.
-    for layer_id, state in visual_map.items():
+    for layer_id, block in block_map.items():
         if not any(existing.layer_id == layer_id for existing in defaults):
-            defaults.append(state)
+            defaults.append(block)
     return defaults
+
+
+def _build_default_layer_deltas(blocks: Sequence[LayerBlock]) -> list[LayerBlockDelta]:
+    deltas: list[LayerBlockDelta] = []
+    for block in blocks:
+        delta_map = compute_layer_block_deltas(None, (block,))
+        delta = delta_map.get(block.layer_id)
+        if delta is not None:
+            deltas.append(delta)
+    return deltas
 
 
 _DEFAULT_LAYER_KEYS = {
@@ -190,25 +194,50 @@ _DEFAULT_LAYER_KEYS = {
 }
 
 
-def _record_default_visuals(
+def _block_value(block: LayerBlock, key: str) -> Any:
+    controls = block.controls
+    if key == "visible":
+        return controls.visible
+    if key == "opacity":
+        return controls.opacity
+    if key == "blending":
+        return controls.blending
+    if key == "interpolation":
+        return controls.interpolation
+    if key == "colormap":
+        return controls.colormap
+    if key == "rendering":
+        return controls.rendering
+    if key == "gamma":
+        return controls.gamma
+    if key == "contrast_limits":
+        return controls.contrast_limits
+    if key == "iso_threshold":
+        return controls.iso_threshold
+    if key == "attenuation":
+        return controls.attenuation
+    if key == "metadata":
+        return block.metadata
+    return block.extras.get(key)
+
+
+def _record_default_layer_blocks(
     server: Any,
     plan: ResumePlan | None,
-    default_visuals: Sequence[LayerVisualState],
+    default_blocks: Sequence[LayerBlock],
 ) -> None:
-    if not default_visuals:
+    if not default_blocks:
         return
     if plan is not None and plan.decision == ResumeDecision.REPLAY and plan.deltas:
         # Let replay handle the rehydration.
         return
 
-    for visual in default_visuals:
-        layer_id = visual.layer_id
+    for block in default_blocks:
+        layer_id = block.layer_id
         if not layer_id:
             continue
-        for key in visual.keys():
-            if key not in _DEFAULT_LAYER_KEYS:
-                continue
-            raw_value = visual.get(key)
+        for key in _DEFAULT_LAYER_KEYS:
+            raw_value = _block_value(block, key)
             if raw_value is None:
                 continue
             entry = server._state_ledger.get("layer", layer_id, key)
@@ -265,7 +294,7 @@ async def _send_layer_baseline(
     ws: Any,
     *,
     plan: ResumePlan | None,
-    default_visuals: Sequence[LayerVisualState],
+    default_deltas: Sequence[LayerBlockDelta],
 ) -> None:
     store = history_store(server)
     if store is not None and plan is not None and plan.decision == ResumeDecision.REPLAY:
@@ -274,7 +303,7 @@ async def _send_layer_baseline(
                 await send_layer_snapshot(server, ws, snapshot)
             return
 
-    await send_layer_baseline(server, ws, default_visuals)
+    await send_layer_baseline(server, ws, default_deltas)
 
 
 async def _send_stream_baseline(

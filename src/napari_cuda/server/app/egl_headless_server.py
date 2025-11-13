@@ -115,7 +115,6 @@ from napari_cuda.server.runtime.worker import (
 )
 from napari_cuda.server.scene import (
     CameraDeltaCommand,
-    LayerVisualState,
     PlaneViewportCache,
     RenderLedgerSnapshot,
     RenderMode,
@@ -127,6 +126,7 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
+from napari_cuda.server.scene.layer_block_diff import LayerBlockDelta
 from napari_cuda.server.scene.viewport import PlanePose
 from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.server.scene.blocks import (
@@ -282,14 +282,14 @@ class EGLHeadlessServer:
         )
         async def _mirror_layer_broadcast(
             layer_id: str,
-            state: LayerVisualState,
+            delta: LayerBlockDelta,
             intent_id: Optional[str],
             timestamp: float,
         ) -> None:
             await broadcast_layers_delta(
                 self,
                 layer_id=layer_id,
-                state=state,
+                state=delta,
                 intent_id=intent_id,
                 timestamp=timestamp,
             )
@@ -596,21 +596,16 @@ class EGLHeadlessServer:
         if last is not None and last == token:
             return
         arr = np.asarray(payload.array)
-        if arr.dtype == np.uint8:
-            arr = arr.astype(np.float32) / 255.0
-        else:
-            arr = np.asarray(arr, dtype=np.float32)
-            if arr.size > 0:
-                max_val = float(np.nanmax(arr))
-                if max_val > 0.0:
-                    arr = arr / max_val
-        np.clip(arr, 0.0, 1.0, out=arr)
+        dtype_str = str(arr.dtype)
+        if arr.dtype not in (np.uint8, np.uint16, np.float32, np.float64):
+            arr = arr.astype(np.float32)
+            dtype_str = "float32"
         arr = np.flip(arr, axis=0)
         ts = time.time()
         payload_dict = {
             "array": arr.tolist(),
             "shape": list(arr.shape),
-            "dtype": "float32",
+            "dtype": dtype_str,
             "generated_at": float(ts),
         }
         reduce_thumbnail_capture(

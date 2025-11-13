@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Optional, Union
+from typing import Any, Optional
 
 from napari_cuda.protocol import NOTIFY_LAYERS_TYPE
 from napari_cuda.protocol.envelopes import (
@@ -19,97 +19,30 @@ from napari_cuda.server.control.protocol.runtime import (
     state_session,
 )
 from napari_cuda.server.control.resumable_history_store import EnvelopeSnapshot
-from napari_cuda.server.scene import LayerVisualState
 from napari_cuda.server.scene.layer_block_diff import (
     LayerBlockDelta,
     layer_block_delta_sections,
 )
 
-LayerState = Union[LayerVisualState, LayerBlockDelta]
-
-_CONTROL_KEYS = {
-    "visible",
-    "opacity",
-    "blending",
-    "interpolation",
-    "colormap",
-    "rendering",
-    "gamma",
-    "contrast_limits",
-    "iso_threshold",
-    "attenuation",
-}
-
-
-def _split_visual_state(
-    state: LayerVisualState,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
-    controls: dict[str, Any] = {}
-    for key in _CONTROL_KEYS:
-        value = state.get(key)
-        if value is not None:
-            controls[str(key)] = value
-
-    metadata = state.get("metadata")
-    metadata_payload = dict(metadata) if isinstance(metadata, dict) and metadata else None
-
-    thumbnail = state.get("thumbnail")
-    thumbnail_payload = dict(thumbnail) if isinstance(thumbnail, dict) else None
-
-    data_payload: dict[str, Any] | None = None
-    removed = False
-    for key, value in state.extra.items():
-        skey = str(key)
-        if skey == "removed":
-            removed = bool(value)
-            continue
-        if data_payload is None:
-            data_payload = {}
-        data_payload[skey] = value
-
-    return (
-        controls or None,
-        metadata_payload,
-        data_payload,
-        thumbnail_payload,
-        removed,
-    )
-
-
 def _split_layer_state(
-    state: LayerState,
+    state: LayerBlockDelta,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
-    if isinstance(state, LayerVisualState):
-        return _split_visual_state(state)
     return layer_block_delta_sections(state)
-
-
-def _split_layer_visual_state(
-    state: LayerVisualState,
-) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
-    """Compat wrapper for tests expecting the legacy splitter."""
-
-    return _split_visual_state(state)
-
 
 async def _deliver_layers_delta(
     server: Any,
     *,
     layer_id: Optional[str],
-    state: LayerState,
+    state: LayerBlockDelta,
     intent_id: Optional[str],
     timestamp: Optional[float],
     targets: Optional[Sequence[Any]] = None,
 ) -> None:
-    if isinstance(state, LayerVisualState):
-        if not state.keys() and not state.extra and not state.metadata and state.thumbnail is None:
-            return
-
     controls, metadata, data, thumbnail, removed = _split_layer_state(state)
     if not any((controls, metadata, data, thumbnail)) and not removed:
         return
 
-    resolved_layer_id = layer_id or state.layer_id or "layer-0"
+    resolved_layer_id = layer_id or state.block.layer_id or "layer-0"
 
     payload = build_notify_layers_payload(
         layer_id=resolved_layer_id,
@@ -168,7 +101,7 @@ async def broadcast_layers_delta(
     server: Any,
     *,
     layer_id: Optional[str],
-    state: LayerState,
+    state: LayerBlockDelta,
     intent_id: Optional[str],
     timestamp: Optional[float],
 ) -> None:
@@ -187,7 +120,7 @@ async def send_layers_delta(
     ws: Any,
     *,
     layer_id: Optional[str],
-    state: LayerState,
+    state: LayerBlockDelta,
     intent_id: Optional[str],
     timestamp: Optional[float],
 ) -> None:
@@ -223,19 +156,19 @@ async def send_layer_snapshot(server: Any, ws: Any, snapshot: EnvelopeSnapshot) 
 async def send_layer_baseline(
     server: Any,
     ws: Any,
-    default_visuals: Sequence[LayerVisualState],
+    default_blocks: Sequence[LayerBlockDelta],
 ) -> None:
-    if not default_visuals:
+    if not default_blocks:
         return
 
     store = history_store(server)
     if store is not None:
         now = __import__("time").time()
-        for visual in default_visuals:
-            controls, metadata, data, thumbnail, removed = _split_layer_visual_state(visual)
+        for delta in default_blocks:
+            controls, metadata, data, thumbnail, removed = _split_layer_state(delta)
             if not any((controls, metadata, data, thumbnail)) and not removed:
                 continue
-            resolved_layer_id = visual.layer_id or "layer-0"
+            resolved_layer_id = delta.block.layer_id or "layer-0"
             payload = build_notify_layers_payload(
                 layer_id=resolved_layer_id,
                 controls=controls,
@@ -253,12 +186,12 @@ async def send_layer_baseline(
             await send_layer_snapshot(server, ws, snapshot)
         return
 
-    for visual in default_visuals:
+    for delta in default_blocks:
         await send_layers_delta(
             server,
             ws,
-            layer_id=visual.layer_id,
-            state=visual,
+            layer_id=delta.block.layer_id,
+            state=delta,
             intent_id=None,
             timestamp=__import__("time").time(),
         )

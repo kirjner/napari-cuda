@@ -221,9 +221,9 @@ clients depend on it.
 
 ### Control / protocol flip
 
-- State-channel builders, the layer mirror, and resumable history must read
+- State-channel builders, the layer mirror, and resumable history now read
   `SceneBlockSnapshot.layers` (or `scene_layers.<id>.block`) directly instead of
-  `RenderLedgerSnapshot.layer_values`.
+  `RenderLedgerSnapshot.layer_values`; only the over-the-wire schema remains legacy until the protocol flip.
 - Baseline/resume helpers and `ServerLayerMirror` already hydrate from LayerBlocks via the shared diff helper; notify payload builders/history now need to consume the same sections before the shim is removed.
 - The notify payload schema can now be updated to carry LayerBlocks because there
   are no external clients; update stubs/tests alongside the server.

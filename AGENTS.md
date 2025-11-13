@@ -74,10 +74,9 @@ payload:
 
 1. **Runtime/render loop** – DONE: worker ingests a single block snapshot per tick. Keep
    shrinking `RenderLedgerSnapshot` to a shim until everything else flips.
-2. **Notify + mirror consumers** – teach state-channel builders, the layer mirror, and
-   snapshot helpers to read `SceneBlockSnapshot.layers` directly and emit the same payloads.
-   - Baselines/resume helpers and `ServerLayerMirror` now ingest LayerBlocks via the shared diff helper; notify layers still emit the legacy payload shape but it is sourced from the new blocks.
-   - Baseline/resume paths already hydrate `_collect_default_visuals` from LayerBlocks; next up is wiring the layer mirror + notify payload builders to the same blocks.
+2. **Notify + mirror consumers** – DONE: state-channel builders, the layer mirror, and
+   history/baseline helpers read `SceneBlockSnapshot.layers` directly; notify layers still emit the
+   legacy payload shape even though it is sourced from LayerBlocks (protocol flip handles the schema).
 3. **Protocol flip** – once server-side consumers rely on LayerBlocks, update the notify
    payload schema (and any stub clients) to speak LayerBlocks natively, then delete
    `LayerVisualState` / `RenderLedgerSnapshot.layer_values`.

@@ -166,3 +166,12 @@ Open follow-ups (carry into next session):
 
 ### Next steps
 - Switch notify.layers history/replay to pass LayerBlock deltas end-to-end, then flip the protocol schema and delete `LayerVisualState`.
+
+# 2025-11-13 — Pass A complete (notify history on LayerBlocks)
+
+### Control
+- Baseline/resume helpers, resumable history, and notify.layers builders now derive payloads from `LayerBlockDelta` objects; `LayerVisualState` is no longer consumed by the control plane.
+- Worker thumbnail ingestion preserves the renderer-provided dtype/range so gamma/contrast tweaks show up in both notify payloads and history replays.
+
+### Next steps
+- Proceed with Pass B (protocol flip) to update the wire schema and delete `LayerVisualState` / `RenderLedgerSnapshot.layer_values`.

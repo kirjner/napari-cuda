@@ -80,7 +80,6 @@ from napari_cuda.server.scene import blocks as scene_blocks
 import napari_cuda.server.scene.builders as scene_builders
 from napari_cuda.server.scene.viewport import RenderMode, ViewportState
 from napari_cuda.server.scene import (
-    LayerVisualState,
     RenderLedgerSnapshot,
     snapshot_layer_controls,
     snapshot_multiscale_state,
@@ -88,6 +87,7 @@ from napari_cuda.server.scene import (
     snapshot_scene,
     snapshot_volume_state,
 )
+from napari_cuda.server.scene.layer_block_diff import LayerBlockDelta
 from napari_cuda.server.ledger import ServerStateLedger
 from napari_cuda.shared.dims_spec import (
     AxisExtent,
@@ -758,14 +758,14 @@ class StateServerHarness:
         )
         async def _layer_mirror_broadcast(
             layer_id: str,
-            state: LayerVisualState,
+            delta: LayerBlockDelta,
             intent_id: Optional[str],
             timestamp: float,
         ) -> None:
             await broadcast_layers_delta(
                 server,
                 layer_id=layer_id,
-                state=state,
+                state=delta,
                 intent_id=intent_id,
                 timestamp=timestamp,
             )
