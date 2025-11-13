@@ -60,6 +60,8 @@ def _summarize_value(value: Any) -> str:
         thumb = value.get("thumbnail")
         if isinstance(thumb, list):
             return "<thumbnail array>"
+        if value.get("layer_type") and value.get("controls"):
+            return "<layer block>"
     # Fallback to repr for small/normal values
     return repr(value)
 
@@ -150,6 +152,8 @@ class ServerStateLedger:
         # Always avoid dumping full arrays for thumbnails/metadata. Summarize.
         value_for_log: str | Any
         if scope == "layer" and key in {"thumbnail", "metadata"}:
+            value_for_log = _summarize_value(value)
+        elif scope == "scene_layers" and key == "block":
             value_for_log = _summarize_value(value)
         else:
             value_for_log = value

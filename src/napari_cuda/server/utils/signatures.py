@@ -10,8 +10,10 @@ from napari_cuda.server.scene.blocks import (
     AxesBlock,
     CameraBlock,
     IndexBlock,
+    LayerBlock,
     LodBlock,
     ViewBlock,
+    layer_block_to_payload,
 )
 
 SignatureTuple = Tuple[Any, ...]
@@ -65,12 +67,18 @@ def layer_inputs_signature(
     layer_id: str,
     *,
     dataset_id: Optional[str] = None,
+    layer_block: LayerBlock | None = None,
 ) -> SignatureToken:
     """Inputs-only signature for layer-specific worker operations (thumbnails)."""
 
-    layer_values = snapshot.layer_values or {}
-    state = layer_values.get(str(layer_id))
-    visuals = _layer_visual_items(state, ndisplay=snapshot.ndisplay) if isinstance(state, LayerVisualState) else ()
+    visuals: SignatureTuple = ()
+    if layer_block is not None:
+        visuals = _layer_visual_items_from_block(layer_block, ndisplay=snapshot.ndisplay)
+    else:
+        layer_values = snapshot.layer_values or {}
+        state = layer_values.get(str(layer_id))
+        if isinstance(state, LayerVisualState):
+            visuals = _layer_visual_items(state, ndisplay=snapshot.ndisplay)
     token: SignatureTuple = (
         ("layer", str(layer_id)),
         ("dataset", None if dataset_id is None else str(dataset_id)),
@@ -93,7 +101,7 @@ def layer_content_signature(state: LayerVisualState) -> SignatureToken:
     return SignatureToken(items)
 
 
-def layers_block_signature(
+def layers_visual_signature(
     layers: Mapping[str, LayerVisualState] | None,
 ) -> SignatureToken:
     """Signature describing the rendered layer set."""
@@ -103,6 +111,16 @@ def layers_block_signature(
     entries = tuple(
         (str(layer_id), layer_content_signature(state).value)
         for layer_id, state in sorted(layers.items())
+    )
+    return SignatureToken(("layers", entries))
+
+
+def layer_block_signature(blocks: Sequence[LayerBlock] | None) -> SignatureToken:
+    if not blocks:
+        return SignatureToken(("layers", ()))
+    entries = tuple(
+        (str(block.layer_id), _canon(layer_block_to_payload(block)))
+        for block in sorted(blocks, key=lambda entry: str(entry.layer_id))
     )
     return SignatureToken(("layers", entries))
 
@@ -294,6 +312,33 @@ def _layer_visual_items(
     return tuple(items)
 
 
+def _layer_visual_items_from_block(
+    block: LayerBlock,
+    *,
+    ndisplay: Optional[int],
+) -> SignatureTuple:
+    payload = layer_block_to_payload(block)
+    controls = payload.get("controls", {})
+    extras = payload.get("extras", {})
+
+    items: list[tuple[str, Any]] = []
+
+    def _append(key: str, value: Any) -> None:
+        if value is None:
+            return
+        if ndisplay is not None and int(ndisplay) < 3 and key.startswith("volume."):
+            return
+        items.append((str(key), _normalize_visual_value(value)))
+
+    for key in sorted(controls.keys()):
+        _append(str(key), controls[key])
+
+    for key in sorted(extras.keys()):
+        _append(str(key), extras[key])
+
+    return tuple(items)
+
+
 def _round_float(value: Optional[float], places: int = 4) -> Optional[float]:
     if value is None:
         return None
@@ -422,7 +467,8 @@ __all__ = [
     "scene_content_signature",
     "layer_inputs_signature",
     "layer_content_signature",
-    "layers_block_signature",
+    "layers_visual_signature",
+    "layer_block_signature",
     "dims_content_signature",
     "dims_content_signature_from_payload",
     "snapshot_versions",

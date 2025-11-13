@@ -32,7 +32,10 @@ from napari_cuda.server.scene.viewport import RenderMode
 from napari_cuda.server.scene.blocks import (
     ENABLE_VIEW_AXES_INDEX_BLOCKS,
     AxesBlock,
+    LayerBlock,
+    LAYER_BLOCK_SCOPE,
     axes_to_payload,
+    layer_multiscale_block_to_payload,
     CameraBlock,
     PlaneCameraBlock,
     VolumeCameraBlock,
@@ -42,6 +45,7 @@ from napari_cuda.server.scene.blocks import (
     index_block_from_payload,
     index_block_to_payload,
     LodBlock,
+    layer_block_from_payload,
     lod_block_from_payload,
     lod_block_to_payload,
     ViewBlock,
@@ -202,6 +206,15 @@ def scene_blocks_from_snapshot(
     if volume_restore_entry is not None and volume_restore_entry.value is not None:
         volume_restore_block = volume_restore_cache_block_from_payload(volume_restore_entry.value)
 
+    layer_blocks: list[LayerBlock] = []
+    for (scope, target, key), entry in snapshot.items():
+        if scope != LAYER_BLOCK_SCOPE or key != "block":
+            continue
+        if entry.value is None:
+            continue
+        layer_blocks.append(layer_block_from_payload(entry.value))
+    layer_blocks.sort(key=lambda block: block.layer_id)
+
     return SceneBlockSnapshot(
         view=view_block,
         axes=axes_block,
@@ -210,40 +223,14 @@ def scene_blocks_from_snapshot(
         camera=camera_block,
         plane_restore=plane_restore_block,
         volume_restore=volume_restore_block,
+        layers=tuple(layer_blocks),
     )
 
 
 def fetch_scene_blocks(ledger: ServerStateLedger) -> SceneBlockSnapshot:
     """Fetch the typed block snapshot directly from the ledger."""
 
-    snapshot_map: dict[tuple[str, str, str], LedgerEntry] = {}
-
-    def _require(scope: str, target: str, key: str) -> LedgerEntry:
-        entry = ledger.get(scope, target, key)
-        assert entry is not None and entry.value is not None, f"{scope}.{target}.{key} missing from ledger"
-        snapshot_map[(scope, target, key)] = entry
-        return entry
-
-    _require("view", "main", "state")
-    # Optional blocks (axes/index/lod) may be absent when feature flag is off; add if present.
-    axes_entry = ledger.get("axes", "main", "state")
-    if axes_entry is not None and axes_entry.value is not None:
-        snapshot_map[("axes", "main", "state")] = axes_entry
-    index_entry = ledger.get("index", "main", "cursor")
-    if index_entry is not None and index_entry.value is not None:
-        snapshot_map[("index", "main", "cursor")] = index_entry
-    lod_entry = ledger.get("lod", "main", "state")
-    if lod_entry is not None and lod_entry.value is not None:
-        snapshot_map[("lod", "main", "state")] = lod_entry
-
-    _require("camera", "main", "state")
-    plane_restore_entry = ledger.get("restore_cache", "plane", "state")
-    if plane_restore_entry is not None and plane_restore_entry.value is not None:
-        snapshot_map[("restore_cache", "plane", "state")] = plane_restore_entry
-    volume_restore_entry = ledger.get("restore_cache", "volume", "state")
-    if volume_restore_entry is not None and volume_restore_entry.value is not None:
-        snapshot_map[("restore_cache", "volume", "state")] = volume_restore_entry
-
+    snapshot_map = ledger.snapshot()
     blocks = scene_blocks_from_snapshot(snapshot_map)
     assert blocks is not None, "scene blocks snapshot missing required payloads"
     return blocks
@@ -461,10 +448,21 @@ def snapshot_scene(
         camera=camera_block,
     )
 
+    blocks_snapshot: SceneBlockSnapshot | None = None
+    if ENABLE_VIEW_AXES_INDEX_BLOCKS:
+        blocks_snapshot = scene_blocks_from_snapshot(ledger_snapshot)
+
     layer_snapshots: list[LayerSnapshot] = []
     active_view = _active_view_state(ledger_snapshot)
     if default_layer_id:
         layer_id_str = str(default_layer_id)
+
+        typed_layer_block: LayerBlock | None = None
+        if blocks_snapshot is not None:
+            for block in blocks_snapshot.layers:
+                if block.layer_id == layer_id_str:
+                    typed_layer_block = block
+                    break
 
         layer_overrides: LayerVisualState | Mapping[str, Any] | None = None
         if layer_controls:
@@ -474,7 +472,10 @@ def snapshot_scene(
             if isinstance(layer_state, LayerVisualState):
                 layer_overrides = layer_state
 
-        controls_block = _resolve_layer_controls(layer_overrides)
+        if typed_layer_block is not None:
+            controls_block = _controls_from_layer_block(typed_layer_block)
+        else:
+            controls_block = _resolve_layer_controls(layer_overrides)
 
         current_level = int(active_view.level)
         level_shapes = list(spec.level_shapes)
@@ -499,16 +500,13 @@ def snapshot_scene(
             "level_shapes": [list(shape) for shape in level_shapes],
         }
 
-        layer_metadata: dict[str, Any] = {}
-        if thumbnail_provider is not None:
-            raw_thumbnail = thumbnail_provider(layer_id_str)
-            normalized_thumb = _normalize_thumbnail_array(raw_thumbnail)
-            if normalized_thumb is not None:
-                layer_metadata["thumbnail"] = normalized_thumb.tolist()
-
+        layer_metadata: dict[str, Any] = dict(typed_layer_block.metadata) if typed_layer_block is not None else {}
         layer_block["metadata"] = layer_metadata
 
-        multiscale_block = _build_multiscale_block(multiscale_state, base_shape=layer_shape)
+        if typed_layer_block is not None and typed_layer_block.multiscale is not None:
+            multiscale_block = layer_multiscale_block_to_payload(typed_layer_block.multiscale)
+        else:
+            multiscale_block = _build_multiscale_block(multiscale_state, base_shape=layer_shape)
         if multiscale_block:
             layer_block["multiscale"] = multiscale_block
 
@@ -516,7 +514,13 @@ def snapshot_scene(
         if render_hints:
             layer_block["render"] = render_hints
 
-        contrast_limits = _resolve_contrast_limits(volume_state)
+        typed_contrast_limits = None
+        if typed_layer_block is not None and typed_layer_block.controls.contrast_limits is not None:
+            typed_contrast_limits = [
+                float(typed_layer_block.controls.contrast_limits[0]),
+                float(typed_layer_block.controls.contrast_limits[1]),
+            ]
+        contrast_limits = typed_contrast_limits or _resolve_contrast_limits(volume_state)
         if contrast_limits is not None:
             layer_block["contrast_limits"] = contrast_limits
 
@@ -561,6 +565,35 @@ def _resolve_layer_controls(overrides: LayerVisualState | Mapping[str, Any] | No
         if key_str not in CONTROL_KEYS:
             continue
         controls[key_str] = value
+    return controls
+
+
+def _controls_from_layer_block(block: LayerBlock) -> dict[str, Any]:
+    controls = {
+        "visible": bool(block.controls.visible),
+        "opacity": float(block.controls.opacity),
+        "blending": str(block.controls.blending),
+        "interpolation": str(block.controls.interpolation),
+        "colormap": str(block.controls.colormap),
+        "gamma": float(block.controls.gamma),
+    }
+    if block.controls.contrast_limits is not None:
+        controls["contrast_limits"] = [
+            float(block.controls.contrast_limits[0]),
+            float(block.controls.contrast_limits[1]),
+        ]
+    if block.controls.depiction is not None:
+        controls["depiction"] = str(block.controls.depiction)
+    if block.controls.rendering is not None:
+        controls["rendering"] = str(block.controls.rendering)
+    if block.controls.attenuation is not None:
+        controls["attenuation"] = float(block.controls.attenuation)
+    if block.controls.iso_threshold is not None:
+        controls["iso_threshold"] = float(block.controls.iso_threshold)
+    if block.controls.projection_mode is not None:
+        controls["projection_mode"] = str(block.controls.projection_mode)
+    if block.controls.plane_thickness is not None:
+        controls["plane_thickness"] = float(block.controls.plane_thickness)
     return controls
 
 

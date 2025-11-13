@@ -13,6 +13,24 @@ from .camera import (
     camera_block_to_payload,
 )
 from .index import IndexBlock, index_block_from_payload, index_block_to_payload
+from .layers import (
+    LAYER_BLOCK_SCOPE,
+    LayerBlock,
+    LayerControlsBlock,
+    LayerLevelDescriptor,
+    LayerMultiscaleBlock,
+    LayerThumbnail,
+    layer_block_from_payload,
+    layer_block_to_payload,
+    layer_controls_block_from_payload,
+    layer_controls_block_to_payload,
+    layer_level_descriptor_from_payload,
+    layer_level_descriptor_to_payload,
+    layer_multiscale_block_from_payload,
+    layer_multiscale_block_to_payload,
+    layer_thumbnail_from_payload,
+    layer_thumbnail_to_payload,
+)
 from .lod import LodBlock, lod_block_from_payload, lod_block_to_payload
 from .view import ViewBlock, view_block_from_payload, view_block_to_payload
 from .restore import (
@@ -42,6 +60,22 @@ __all__ = [
     "IndexBlock",
     "index_block_from_payload",
     "index_block_to_payload",
+    "LayerBlock",
+    "layer_block_from_payload",
+    "layer_block_to_payload",
+    "LayerControlsBlock",
+    "layer_controls_block_from_payload",
+    "layer_controls_block_to_payload",
+    "LayerLevelDescriptor",
+    "layer_level_descriptor_from_payload",
+    "layer_level_descriptor_to_payload",
+    "LayerMultiscaleBlock",
+    "layer_multiscale_block_from_payload",
+    "layer_multiscale_block_to_payload",
+    "LayerThumbnail",
+    "layer_thumbnail_from_payload",
+    "layer_thumbnail_to_payload",
+    "LAYER_BLOCK_SCOPE",
     "LodBlock",
     "lod_block_from_payload",
     "lod_block_to_payload",

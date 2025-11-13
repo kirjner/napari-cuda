@@ -39,8 +39,9 @@ from napari_cuda.server.utils.signatures import (
     axes_block_signature,
     camera_block_signature,
     index_block_signature,
+    layer_block_signature,
     layer_inputs_signature,
-    layers_block_signature,
+    layers_visual_signature,
     lod_block_signature,
     view_block_signature,
 )
@@ -361,10 +362,16 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                 thumbnail_state = frame_state
                 # Post-frame: capture thumbnail on worker and hand off via mailbox
                 viewer = worker.viewer_model()
+                blocks_for_thumbnail = frame_state.block_snapshot
+                block_layers: tuple[Any, ...] = ()
+                if blocks_for_thumbnail is not None:
+                    block_layers = blocks_for_thumbnail.layers
                 if viewer is not None and viewer.layers:
                     # Choose target layer id: prefer first from snapshot.layer_values
                     target_layer_id: Optional[str] = None
-                    if frame_state.layer_values:
+                    if block_layers:
+                        target_layer_id = str(block_layers[0].layer_id)
+                    elif frame_state.layer_values:
                         keys = list(frame_state.layer_values.keys())
                         if keys:
                             target_layer_id = str(keys[0])
@@ -386,19 +393,30 @@ def start_worker(server: object, loop: asyncio.AbstractEventLoop, state: WorkerL
                         thumb = layer_obj.thumbnail
                         if thumb is not None:
                             arr = np.asarray(thumb)
-                            layer_state = None
+                            target_block = None
+                            if block_layers:
+                                block_map = {str(block.layer_id): block for block in block_layers}
+                                if target_layer_id is not None and target_layer_id in block_map:
+                                    target_block = block_map[target_layer_id]
+                                elif block_layers:
+                                    target_block = block_layers[0]
                             layer_values = thumbnail_state.layer_values if thumbnail_state.layer_values else {}
-                            if layer_values:
+                            layer_state = None
+                            if target_block is None and layer_values:
                                 if target_layer_id is not None and target_layer_id in layer_values:
                                     layer_state = layer_values[target_layer_id]
                                 else:
                                     values = list(layer_values.values())
                                     if values:
                                         layer_state = values[0]
-                            if layer_state is not None:
+                            if target_block is not None or layer_state is not None:
                                 # Build inputs-only token from the same frame_state we just rendered
                                 lid = str(target_layer_id or "layer-0")
-                                token = layer_inputs_signature(thumbnail_state, lid).value
+                                token = layer_inputs_signature(
+                                    thumbnail_state,
+                                    lid,
+                                    layer_block=target_block,
+                                ).value
                                 payload = ThumbnailCapture(
                                     layer_id=lid,
                                     array=arr,
@@ -508,13 +526,17 @@ def _op_seq_watcher_apply_snapshot(
         blocks_snapshot = fetch_scene_blocks(ledger)
         snapshot = replace(snapshot, block_snapshot=blocks_snapshot)
 
+    layer_signature = layer_block_signature(blocks_snapshot.layers)
+    if not layer_signature.value:
+        layer_signature = layers_visual_signature(snapshot.layer_values)
+
     detection_signatures = {
         "view": view_block_signature(blocks_snapshot.view),
         "axes": axes_block_signature(blocks_snapshot.axes),
         "index": index_block_signature(blocks_snapshot.index),
         "lod": lod_block_signature(blocks_snapshot.lod),
         "camera": camera_block_signature(blocks_snapshot.camera),
-        "layers": layers_block_signature(snapshot.layer_values),
+        "layers": layer_signature,
     }
 
     changed = current_op_seq != watcher_state.last_op_seq
@@ -560,7 +582,9 @@ def _prime_op_seq_watcher(
         index=index_block_signature(blocks.index),
         lod=lod_block_signature(blocks.lod),
         camera=camera_block_signature(blocks.camera),
-        layers=layers_block_signature(snapshot.layer_values),
+        layers=layer_block_signature(blocks.layers)
+        if blocks.layers
+        else layers_visual_signature(snapshot.layer_values),
     )
 
 

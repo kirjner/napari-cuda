@@ -9,6 +9,7 @@ from napari_cuda.server.scene.blocks import (
     AxesBlock,
     CameraBlock,
     IndexBlock,
+    LayerBlock,
     LodBlock,
     PlaneRestoreCacheBlock,
     ViewBlock,
@@ -44,6 +45,7 @@ class SceneBlockSnapshot:
     camera: CameraBlock
     plane_restore: PlaneRestoreCacheBlock | None
     volume_restore: VolumeRestoreCacheBlock | None
+    layers: tuple[LayerBlock, ...] = ()
 
 
 @dataclass(frozen=True)

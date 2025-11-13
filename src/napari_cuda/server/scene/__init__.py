@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from .blocks import LayerBlock
 from .builders import (
     CONTROL_KEYS,
     build_ledger_snapshot,
@@ -37,6 +38,7 @@ __all__ = [
     "CONTROL_KEYS",
     "BootstrapSceneMetadata",
     "CameraDeltaCommand",
+    "LayerBlock",
     "LayerVisualState",
     "PlanePose",
     "PlaneRequest",

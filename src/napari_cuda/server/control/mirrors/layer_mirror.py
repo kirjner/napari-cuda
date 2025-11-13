@@ -96,10 +96,6 @@ class ServerLayerMirror:
         with self._lock:
             return dict(self._latest_blocks)
 
-    def latest_layer_blocks(self) -> dict[str, LayerBlock]:
-        with self._lock:
-            return dict(self._latest_blocks)
-
     def reset(self) -> None:
         with self._lock:
             self._pending.clear()
