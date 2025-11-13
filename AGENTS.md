@@ -52,6 +52,9 @@
 - Reference plan: `docs/architecture/view_axes_index_plan.md` (call-stack
   diagrams + phased issue breakdown). Use it as the source of truth for scope
   and sequencing.
+- No external clients are depending on the notify/state protocol yet, so we can
+  evolve the payloads (LayerBlock-native) in lockstep with the server without
+  maintaining backward compatibility once Phase 3 lands.
 - Phase 0 progress:
   - Ledger module moved to `src/napari_cuda/server/ledger.py` (single module;
     update imports here going forward).
@@ -66,14 +69,15 @@
 
 ## IMMEDIATE NEXT GOAL
 
-Phase 3 cleanup (render-loop convergence):
+Finish Phase 3 cleanup by treating `SceneBlockSnapshot` as the only runtime+protocol
+payload:
 
-- Worker/runtime must operate on a single authoritative `SceneBlockSnapshot` per tick.
-  - Reuse the snapshot pulled for apply/telemetry instead of double-pulling.
-  - Collapse `_apply_snapshot` and `_apply_render_snapshot` into a single `RenderInterface`
-    that consumes `{view, axes, index, lod, camera}` + restore caches directly.
-- Once the block-native path is stable, delete `_plane_cache_from_snapshot` /
-  `_volume_cache_from_snapshot`, flip `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` on by default,
-  and remove the planner/mailbox remnants.
-- Keep docs/tests in sync with the block-only ledger (restore caches + `camera.main.state`
-  as the only pose source).
+1. **Runtime/render loop** – DONE: worker ingests a single block snapshot per tick. Keep
+   shrinking `RenderLedgerSnapshot` to a shim until everything else flips.
+2. **Notify + mirror consumers** – teach state-channel builders, the layer mirror, and
+   snapshot helpers to read `SceneBlockSnapshot.layers` directly and emit the same payloads.
+3. **Protocol flip** – once server-side consumers rely on LayerBlocks, update the notify
+   payload schema (and any stub clients) to speak LayerBlocks natively, then delete
+   `LayerVisualState` / `RenderLedgerSnapshot.layer_values`.
+4. **Flag flip & cleanup** – enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default, remove
+   the legacy planner/mailbox code, and document the block-only pipeline as the contract.

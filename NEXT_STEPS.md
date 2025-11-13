@@ -3,33 +3,31 @@
 _Last updated: 2025-11-12_
 
 ## Where We Are
-- ✅ Reducers, transactions, and notify builders emit and consume `{view, axes, index, lod, camera}` blocks plus restore caches.
-- ✅ Worker op-seq watcher replays a fresh ledger snapshot whenever block signatures mutate, eliminating stale camera jitter when `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX=1`.
-- ✅ Planner/mailbox stack is bypassed under the flag; worker now samples the ledger directly each tick and tracks per-block signatures locally.
-- ⚠️ Render loop + apply helpers still depend on `RenderLedgerSnapshot`’s legacy pose fields (`plane_*`, `volume_*`, `current_step`, `dims_spec`), so we pull/transform the same data twice.
-- ⚠️ `PlaneViewportCache` / `VolumeViewportCache` mirrors still exist in staging helpers and bootstrap code. They should become worker-only snapshots once block consumers are authoritative.
+- ✅ Reducers/transactions emit `{view, axes, index, lod, camera, layers}` blocks plus restore caches; worker runtime now ingests a single `SceneBlockSnapshot` per tick.
+- ✅ Op-seq watcher + render interface reuse the block snapshot, so the render loop no longer reconstructs pose data from `RenderLedgerSnapshot`.
+- ✅ Planner/mailbox stack is bypassed under the flag; worker tracks per-block signatures locally.
+- ⚠️ Notify builders, the layer mirror, and snapshot helpers still hydrate from `RenderLedgerSnapshot.layer_values` instead of `SceneBlockSnapshot.layers`.
+- ⚠️ `LayerVisualState` / `RenderLedgerSnapshot` remain as shims for the notify protocol even though no external clients require backward compatibility.
 
 ## Immediate Next Steps (Phase 3 Cleanup)
-1. **Block-native render loop & worker apply**
-   - Teach `render_loop/applying/*` to accept `SceneBlockSnapshot` + restore caches directly, instead of reconstructing pose data from `RenderLedgerSnapshot`.
-   - Collapse `pull_render_snapshot` + `_op_seq_watcher_apply_snapshot` double-pull to a single authoritative snapshot per tick (or apply blocks directly) so the worker never renders stale pose data.
-   - Update `_apply_snapshot` to treat `RenderLedgerSnapshot` as a thin view over the block payloads (no back-conversion to `dims_spec` for invariants already guaranteed by the block helpers).
-2. **Eliminate ledger copies of viewport caches**
-   - Remove `_plane_cache_from_snapshot` / `_volume_cache_from_snapshot` once the worker ingests restore caches straight from the block payloads.
-   - Keep restore caches as worker-only dataclasses; reducers remain responsible for ledger persistence through `write_*_restore_cache`.
+1. **Control/notify consumers → LayerBlocks**
+   - Teach `_collect_default_visuals`, notify builders, and state-channel tests to read `SceneBlockSnapshot.layers` (or the ledger `scene_layers.*.block`) directly.
+   - Mirror/cache modules should keep emitting the same payload shape for now, but populate it from LayerBlocks instead of `layer_values`.
+2. **Protocol flip (no compat clients)**
+   - Update notify payload builders + resumable history to speak LayerBlocks natively (TypedDict mirroring the block schema) and remove `LayerVisualState`.
+   - Delete `RenderLedgerSnapshot.layer_values` + the dual-write shim once the new payload lands; adjust stub clients/tests alongside the server.
 3. **Flag flip + cleanup**
-   - Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default after the render loop is block-native, then remove feature-flag branches and the legacy lerp path entirely.
-   - Delete the remaining planner/mailbox artifacts (`ViewportPlanner`, `PlaneViewportCache`/`VolumeViewportCache` ledger mirrors, `RenderUpdate` shims) once the flag is default-on.
+   - Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default, prune planner/mailbox artifacts, and remove `_plane/_volume_cache_from_snapshot` fallbacks.
 4. **Docs/tests refresh**
-   - Update `docs/architecture/view_axes_index_plan.md`, `dims_camera_legacy.md`, and API docs to describe the block-only ledger pipeline (restore caches + `camera.main.state` as the only pose source).
-   - Extend parity tests in `src/napari_cuda/server/tests/test_state_channel_updates.py` to assert block snapshots match the worker apply expectations (view mode, axis order, cursor, camera pose).
+   - Document the protocol change + block-only pipeline (`docs/architecture/view_axes_index_plan.md`, `dims_camera_legacy.md`).
+   - Extend parity tests (`test_state_channel_updates`, notify history tests) so LayerBlock serialization/deserialization is covered end-to-end.
 
 ## Upcoming Passes
 | Pass | Focus | Key Tasks | Exit Criteria |
 | ---- | ----- | --------- | ------------- |
-| **Pass A** | Render loop block ingestion | - Add block-aware staging helpers that operate on `SceneBlockSnapshot`<br>- Replace `snapshot_render_state` usages in worker apply path<br>- Remove redundant ledger pulls per tick | Worker applies dims/camera/lod directly from blocks behind the flag; watcher no longer re-pulls snapshots. |
-| **Pass B** | Cache + bootstrap cleanup | - Drop ledger copies of `PlaneViewportCache` / `VolumeViewportCache`<br>- Update bootstrap + tests to source poses from `camera.main.state` + restore caches<br>- Delete legacy viewport scopes/doc sections | No references to `viewport.*` or `camera_plane/camera_volume`; restore caches seeded exclusively via typed helpers. |
-| **Pass C** | Flag default + deletion | - Flip `ENABLE_VIEW_AXES_INDEX_BLOCKS` default to `True`<br>- Remove flag-guarded legacy branches in reducers, notify builders, worker runtime<br>- Prune planner/mailbox files and CI expectations | Block-only pipeline is the sole runtime path; docs/tests no longer mention the legacy planner/mailbox. |
+| **Pass A** | Control/notify block ingestion | - Consume `SceneBlockSnapshot.layers` (or `scene_layers.*.block`) everywhere in notify builders, mirrors, and snapshot helpers<br>- Keep emitting existing payloads via the shim until the protocol flip lands | Server-side state/notify code no longer reads `RenderLedgerSnapshot.layer_values`. |
+| **Pass B** | Protocol flip + shim removal | - Update notify payload schema + clients/tests to carry LayerBlocks directly<br>- Delete `LayerVisualState`, `RenderLedgerSnapshot.layer_values`, and the dual-write reducer paths | Layer appearance travels exclusively as LayerBlocks end-to-end. |
+| **Pass C** | Flag default + pipeline cleanup | - Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default<br>- Remove planner/mailbox artifacts and snapshot fallbacks<br>- Refresh docs/tests for the block-only runtime | Block-only pipeline is the sole runtime path; docs/tests treat it as the contract. |
 
 ## Supporting Work
 - **Telemetry:** ensure metrics capturing render/apply timings still function once the render loop reads blocks directly; rename metrics where they reference “viewport” terminology.

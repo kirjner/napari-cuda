@@ -131,3 +131,18 @@ Open follow-ups (carry into next session):
 2. Remove `current_level` from `DimsSpec` and `NotifyDimsPayload` entirely; consumers must read level from ActiveView/notify.level.
 3. Remove the lingering state channel try/except around ingest callbacks (now done for level; repeat for others when steady).
 4. Expand protocol tests to cover notify.level resume paths once the full suite is runnable in CI.
+# 2025-11-13 — Drop LayerVisualState shim (protocol flip plan)
+
+### Decision
+- We confirmed no external clients depend on the legacy notify/state payloads, so the project can
+  evolve the protocol alongside the server. Layer appearance should ride the `SceneBlockSnapshot`
+  LayerBlocks everywhere (runtime, control, notify), then we delete `RenderLedgerSnapshot.layer_values`
+  and the `LayerVisualState` dataclass entirely.
+
+### Actions
+- Updated `AGENTS.md`, `NEXT_STEPS.md`, and `docs/architecture/view_axes_index_plan.md` to spell out the
+  new scope: migrate notify builders + mirrors to LayerBlocks, flip the protocol, and then remove the shim.
+- Runtime/render loop already consumes `SceneBlockSnapshot` exclusively (see 2025-11-12 entry); remaining
+  work is purely control/protocol + documentation.
+- Future commits should treat LayerBlocks as the only source of truth; any new code that touches layer
+  visuals must do so via `scene_layers.<id>.block` instead of `layer_values`.

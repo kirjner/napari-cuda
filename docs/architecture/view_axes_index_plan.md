@@ -200,10 +200,11 @@ Outstanding Phase 1 work:
 4. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
    the protocol docs so consumers know where to look once the flag flips.
 
-Phase 2 is now complete; all consumers read the block ledger under the flag.
+Phase 2 is now complete; all runtime consumers read the block ledger under the flag.
 Phase 3 (in progress) removed the planner/mailbox stack and the legacy ledger scopes.
 What remains is flipping the feature flag on by default, updating docs/tests, and
-finishing the render-loop cleanup.
+deleting the `RenderLedgerSnapshot`/`LayerVisualState` shim now that no external
+clients depend on it.
 
 ### Phase 3 Direction (single snapshot + RenderInterface)
 
@@ -211,23 +212,94 @@ finishing the render-loop cleanup.
   (view/axes/index/lod/camera + typed layer blocks + restore caches), and apply it
   directly. No redundant `pull_render_snapshot` calls, no reconstructing pose data
   from `dims_spec`.
-- `RenderLedgerSnapshot` becomes an optional compatibility shim for legacy payloads.
-  As soon as layer blocks replace `LayerVisualState`, the worker/render loop no longer
-  depends on it.
+- `RenderLedgerSnapshot` is just a temporary compatibility shim. As soon as notify
+  builders/mirrors emit LayerBlocks, delete it entirely and have the worker/render
+  loop operate on the block bundle alone.
 - `RenderInterface` owns both the planning and apply APIs, mutating worker state directly from the block
   snapshot. Per-block signatures replace the current staging helpers.
 
-### Phase 3 Direction (single snapshot + RenderInterface)
+### Control / protocol flip
 
-- Worker should pull the ledger once per tick, receive a `SceneBlockSnapshot`
-  (view/axes/index/lod/camera + typed layer blocks + restore caches), and apply it
-  directly. No redundant `pull_render_snapshot` calls, no reconstructing pose data
-  from `dims_spec`.
-- `RenderLedgerSnapshot` becomes an optional compatibility shim for legacy payloads.
-  As soon as layer blocks replace `LayerVisualState`, the worker/render loop no longer
-  depends on it.
-- `RenderInterface` owns both the planning and apply APIs, mutating worker state directly from the block
-  snapshot. Per-block signatures replace the current staging helpers.
+- State-channel builders, the layer mirror, and resumable history must read
+  `SceneBlockSnapshot.layers` (or `scene_layers.<id>.block`) directly instead of
+  `RenderLedgerSnapshot.layer_values`.
+- The notify payload schema can now be updated to carry LayerBlocks because there
+  are no external clients; update stubs/tests alongside the server.
+- Once the control plane emits LayerBlocks, delete `LayerVisualState`,
+  `RenderLedgerSnapshot.layer_values`, and the dual-write reducer path.
+- After the shim is gone, `RenderLedgerSnapshot` should disappear entirely—everything
+  runs on the block snapshot and restore caches.
+
+### LayerBlock target schema (lean internal form)
+
+We are converging on a single typed `LayerBlock` per layer inside `SceneBlockSnapshot.layers`.
+Layers remain the only scope where the runtime performs per-property diffing:
+view/axes/index/lod/camera blocks are singletons with tiny payloads, while layer
+controls fan out across many entries and incur heavier napari work. The compat
+shim (`LayerVisualState` on `RenderLedgerSnapshot.layer_values`) only exists until
+the notify/protocol path flips; runtime + control code should ingest `SceneBlockSnapshot.layers`
+directly today.
+Internally this block only needs the data the runtime/control paths actually consume today:
+
+```python
+@dataclass(frozen=True)
+class LayerControlsBlock:
+    visible: bool
+    opacity: float
+    blending: str
+    interpolation: str
+    colormap: str
+    gamma: float
+    contrast_limits: tuple[float, float] | None = None
+    depiction: str | None = None
+    rendering: str | None = None
+    attenuation: float | None = None
+    iso_threshold: float | None = None
+    projection_mode: str | None = None
+    plane_thickness: float | None = None
+
+
+@dataclass(frozen=True)
+class LayerLevelDescriptor:
+    shape: tuple[int, ...]
+    downsample: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class LayerMultiscaleBlock:
+    current_level: int
+    levels: tuple[LayerLevelDescriptor, ...]
+    policy: str | None = None
+    index_space: str | None = None
+
+
+@dataclass(frozen=True)
+class LayerThumbnail:
+    array: tuple[tuple[tuple[int, ...], ...], ...]
+    dtype: str
+    shape: tuple[int, ...]
+    generated_at: float | None = None
+
+
+@dataclass(frozen=True)
+class LayerBlock:
+    layer_id: str
+    layer_type: Literal["image"]  # widened later for labels/points/etc.
+    controls: LayerControlsBlock
+    metadata: Mapping[str, Any]
+    thumbnail: LayerThumbnail | None
+    multiscale: LayerMultiscaleBlock | None
+    versions: Mapping[str, int] | None = None
+    extras: Mapping[str, Any] = field(default_factory=dict)  # e.g., {"removed": True}
+```
+
+Everything else we currently ship to clients (`name`, `ndim`, `shape`, `axis_labels`, `volume`,
+`level_shapes`, `scale`, `translate`, `source`, `render` hints) can be reconstructed from the other
+scene blocks (view/axes/index/lod/camera) or the scene source metadata. To avoid breaking protocol
+consumers immediately, we will keep a conversion shim near the outbound payload builders that
+combines this lean `LayerBlock` with the other blocks to recreate the richer shape legacy clients
+expect. Once `notify.scene` / `notify.layers` consumers are updated to read the lean block directly,
+we can delete the shim and drop the redundant fields from the payloads entirely.
 
 Phase 3 work items (authoritative once this doc is updated again):
 1. **✅ Render loop mailbox removed.** Worker ticks now hydrate the viewer directly
@@ -246,10 +318,11 @@ Phase 3 work items (authoritative once this doc is updated again):
      scopes are deleted.
 2. **✅ Delete legacy ledger scopes.** Reducers/transactions now persist only the block
    payloads (plus restore caches). Notify/builders/worker bootstrap read those scopes exclusively.
-3. Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default, strip the flag-off
+3. Move notify/control consumers (baseline, deltas, resumable history, mirror) to layer
+   blocks, then drop `LayerVisualState` + `RenderLedgerSnapshot.layer_values`.
+4. Enable `NAPARI_CUDA_ENABLE_VIEW_AXES_INDEX` by default, strip the flag-off
    branches from scene builders/notify/runtime, and refresh docs/tests/CI to
-   assume the block schema is the sole path.
-4. Finish the render-loop cleanup noted above (single snapshot per tick).
+   assume the block schema (including LayerBlocks) is the sole path.
 
 Restore Flow (Current → Target)
 -------------------------------
