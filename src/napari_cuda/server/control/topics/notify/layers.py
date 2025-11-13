@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Optional
+from typing import Any, Optional, Union
 
 from napari_cuda.protocol import NOTIFY_LAYERS_TYPE
 from napari_cuda.protocol.envelopes import (
@@ -20,7 +20,12 @@ from napari_cuda.server.control.protocol.runtime import (
 )
 from napari_cuda.server.control.resumable_history_store import EnvelopeSnapshot
 from napari_cuda.server.scene import LayerVisualState
+from napari_cuda.server.scene.layer_block_diff import (
+    LayerBlockDelta,
+    layer_block_delta_sections,
+)
 
+LayerState = Union[LayerVisualState, LayerBlockDelta]
 
 _CONTROL_KEYS = {
     "visible",
@@ -36,7 +41,7 @@ _CONTROL_KEYS = {
 }
 
 
-def _split_layer_visual_state(
+def _split_visual_state(
     state: LayerVisualState,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
     controls: dict[str, Any] = {}
@@ -71,19 +76,36 @@ def _split_layer_visual_state(
     )
 
 
+def _split_layer_state(
+    state: LayerState,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
+    if isinstance(state, LayerVisualState):
+        return _split_visual_state(state)
+    return layer_block_delta_sections(state)
+
+
+def _split_layer_visual_state(
+    state: LayerVisualState,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, dict[str, Any] | None, bool]:
+    """Compat wrapper for tests expecting the legacy splitter."""
+
+    return _split_visual_state(state)
+
+
 async def _deliver_layers_delta(
     server: Any,
     *,
     layer_id: Optional[str],
-    state: LayerVisualState,
+    state: LayerState,
     intent_id: Optional[str],
     timestamp: Optional[float],
     targets: Optional[Sequence[Any]] = None,
 ) -> None:
-    if not state.keys() and not state.extra and not state.metadata and state.thumbnail is None:
-        return
+    if isinstance(state, LayerVisualState):
+        if not state.keys() and not state.extra and not state.metadata and state.thumbnail is None:
+            return
 
-    controls, metadata, data, thumbnail, removed = _split_layer_visual_state(state)
+    controls, metadata, data, thumbnail, removed = _split_layer_state(state)
     if not any((controls, metadata, data, thumbnail)) and not removed:
         return
 
@@ -146,7 +168,7 @@ async def broadcast_layers_delta(
     server: Any,
     *,
     layer_id: Optional[str],
-    state: LayerVisualState,
+    state: LayerState,
     intent_id: Optional[str],
     timestamp: Optional[float],
 ) -> None:
@@ -165,7 +187,7 @@ async def send_layers_delta(
     ws: Any,
     *,
     layer_id: Optional[str],
-    state: LayerVisualState,
+    state: LayerState,
     intent_id: Optional[str],
     timestamp: Optional[float],
 ) -> None:

@@ -4,11 +4,21 @@ from __future__ import annotations
 
 import logging
 import threading
+from dataclasses import replace
 from collections.abc import Awaitable, Callable, Mapping
 from typing import Optional
 
-from napari_cuda.server.scene import LayerVisualState, build_ledger_snapshot
 from napari_cuda.server.ledger import LedgerEvent, ServerStateLedger
+from napari_cuda.server.scene import LayerVisualState
+from napari_cuda.server.scene.blocks import LayerBlock, layer_block_from_payload
+from napari_cuda.server.scene.builders import scene_blocks_from_snapshot
+from napari_cuda.server.scene.layer_block_adapter import layer_block_to_visual_state
+from napari_cuda.server.scene.layer_block_diff import (
+    AppliedVersions,
+    LayerBlockDelta,
+    compute_layer_block_deltas,
+    layer_block_delta_updates,
+)
 from napari_cuda.server.utils.signatures import SignatureToken, layer_content_signature
 from napari_cuda.shared.dims_spec import dims_spec_from_payload
 
@@ -16,22 +26,6 @@ ScheduleFn = Callable[[Awaitable[None], str], None]
 BroadcastFn = Callable[[str, LayerVisualState, Optional[str], float], Awaitable[None]]
 DefaultLayerResolver = Callable[[], Optional[str]]
 
-
-_ALLOWED_LAYER_KEYS = {
-    "visible",
-    "opacity",
-    "blending",
-    "interpolation",
-    "gamma",
-    "colormap",
-    "contrast_limits",
-    "depiction",
-    "rendering",
-    "attenuation",
-    "iso_threshold",
-    "metadata",
-    "thumbnail",
-}
 
 logger = logging.getLogger(__name__)
 
@@ -54,11 +48,11 @@ class ServerLayerMirror:
         self._lock = threading.Lock()
         self._started = False
         self._op_open = False
-        self._pending: dict[str, set[str]] = {}
-        self._pending_versions: dict[tuple[str, str], int] = {}
+        self._pending: dict[str, LayerBlockDelta] = {}
         self._pending_intents: dict[str, Optional[str]] = {}
-        self._last_versions: dict[tuple[str, str], int] = {}
         self._latest_states: dict[str, LayerVisualState] = {}
+        self._latest_blocks: dict[str, LayerBlock] = {}
+        self._block_versions: AppliedVersions = {}
         self._ndisplay: Optional[int] = None
         self._last_payload_sig: dict[str, SignatureToken] = {}
 
@@ -69,7 +63,8 @@ class ServerLayerMirror:
                 raise RuntimeError("ServerLayerMirror already started")
             self._started = True
         snapshot = self._ledger.snapshot()
-        ledger_snapshot = build_ledger_snapshot(self._ledger, snapshot)
+        blocks_snapshot = scene_blocks_from_snapshot(snapshot)
+        assert blocks_snapshot is not None, "layer blocks missing from ledger snapshot"
         spec_entry = snapshot.get(("dims", "main", "dims_spec"))
         with self._lock:
             if spec_entry is not None and spec_entry.value is not None:
@@ -77,29 +72,17 @@ class ServerLayerMirror:
                 if spec is not None:
                     self._ndisplay = int(spec.ndisplay)
             self._pending.clear()
-            self._pending_versions.clear()
             self._pending_intents.clear()
-            self._last_versions.clear()
             self._latest_states.clear()
+            self._latest_blocks.clear()
+            self._block_versions.clear()
             self._last_payload_sig.clear()
-            layer_values = ledger_snapshot.layer_values or {}
-            for layer_id, layer_state in layer_values.items():
-                norm_id = str(layer_id)
-                self._latest_states[norm_id] = layer_state
-                if layer_state.versions:
-                    for prop, version in layer_state.versions.items():
-                        self._last_versions[(norm_id, str(prop))] = int(version)
-        for (scope, target, key), entry in snapshot.items():
-            if scope not in {"volume", "multiscale"}:
-                continue
-            self._record_snapshot(
-                scope,
-                target,
-                key,
-                entry.value,
-                entry.version,
-                finalize=True,
-            )
+            for block in blocks_snapshot.layers:
+                layer_id = str(block.layer_id)
+                self._latest_blocks[layer_id] = block
+                self._latest_states[layer_id] = layer_block_to_visual_state(block)
+                for prop, version in (block.versions or {}).items():
+                    self._block_versions[("layer", layer_id, str(prop))] = int(version)
         self._ledger.subscribe("scene", "main", "op_state", self._on_op_state)
         self._ledger.subscribe("dims", "main", "dims_spec", self._on_dims_spec)
         self._ledger.subscribe_all(self._on_event)
@@ -112,10 +95,10 @@ class ServerLayerMirror:
     def reset(self) -> None:
         with self._lock:
             self._pending.clear()
-            self._pending_versions.clear()
             self._pending_intents.clear()
-            self._last_versions.clear()
             self._latest_states.clear()
+            self._latest_blocks.clear()
+            self._block_versions.clear()
             self._op_open = False
             self._ndisplay = None
             self._last_payload_sig.clear()
@@ -146,21 +129,24 @@ class ServerLayerMirror:
             self._ndisplay = value
             if previous_enabled and not self._volume_enabled_locked():
                 for layer_id, state in list(self._latest_states.items()):
-                    volume_keys = [
+                    volume_keys = tuple(
                         key for key in state.extra.keys() if str(key).startswith("volume.")
-                    ]
+                    )
                     if not volume_keys:
                         continue
                     updates = {key: None for key in volume_keys}
-                    version_updates = {key: None for key in volume_keys}
-                    pruned = state.with_updates(
-                        updates=updates,
-                        versions=version_updates,
-                    )
+                    pruned = state.with_updates(updates=updates, versions=None)
                     self._latest_states[layer_id] = pruned
+                    block = self._latest_blocks.get(layer_id)
+                    if block is not None and block.extras:
+                        filtered = {
+                            str(key): value
+                            for key, value in block.extras.items()
+                            if not str(key).startswith("volume.")
+                        }
+                        self._latest_blocks[layer_id] = replace(block, extras=filtered)
                     for key in volume_keys:
-                        self._last_versions.pop((layer_id, key), None)
-                        self._pending_versions.pop((layer_id, key), None)
+                        self._block_versions.pop(("layer", layer_id, str(key)), None)
 
     def _on_dims_spec(self, event: LedgerEvent) -> None:
         spec = dims_spec_from_payload(event.value if isinstance(event.value, Mapping) else None)
@@ -176,38 +162,32 @@ class ServerLayerMirror:
             if spec is not None:
                 self._handle_ndisplay(int(spec.ndisplay))
             return
-        if scope not in {"layer", "volume", "multiscale"}:
+        if scope != "scene_layers" or event.key != "block":
             return
-        to_flush: Optional[dict[str, set[str]]] = None
+
+        payload = event.value
+        if not isinstance(payload, Mapping):
+            raise AssertionError("scene_layers block payload must be a mapping")
+        block = layer_block_from_payload(payload)
+        layer_id = str(block.layer_id)
+
+        to_flush: Optional[dict[str, LayerBlockDelta]] = None
         intents: dict[str, Optional[str]] = {}
         with self._lock:
-            layer_id, prop, value = self._map_event_locked(event)
-            if layer_id is None or prop is None:
-                return
-            version_obj = event.version
-            if version_obj is None:
-                raise AssertionError("ledger layer event missing version")
-            version_int = int(version_obj)
-            key = (layer_id, prop)
-            last = self._last_versions.get(key)
-            if last is not None and last == version_int:
-                return
-            updates = {prop: value}
-            version_map = {prop: version_int}
-            self._update_state_locked(
-                layer_id,
-                updates=updates,
-                versions=version_map,
-                finalize=False,
+            deltas = compute_layer_block_deltas(
+                self._block_versions,
+                (block,),
+                previous_blocks=self._latest_blocks,
             )
-            pending_props = self._pending.setdefault(layer_id, set())
-            pending_props.add(prop)
-            self._pending_versions[key] = version_int
+            delta = deltas.get(layer_id)
+            if delta is None:
+                return
+            self._latest_blocks[layer_id] = block
+            self._latest_states[layer_id] = layer_block_to_visual_state(block)
+            self._pending[layer_id] = delta
             if event.metadata and "intent_id" in event.metadata:
-                intent_value = event.metadata.get("intent_id")
-                self._pending_intents[layer_id] = (
-                    None if intent_value is None else str(intent_value)
-                )
+                raw = event.metadata.get("intent_id")
+                self._pending_intents[layer_id] = None if raw is None else str(raw)
             if not self._op_open:
                 to_flush = self._drain_pending_locked()
                 intents = self._pending_intents
@@ -216,135 +196,40 @@ class ServerLayerMirror:
             self._flush(to_flush, intents, event.timestamp)
 
     # ------------------------------------------------------------------
-    def _drain_pending_locked(self) -> dict[str, set[str]]:
+    def _drain_pending_locked(self) -> dict[str, LayerBlockDelta]:
         pending = self._pending
         self._pending = {}
-        return {layer: set(props) for layer, props in pending.items() if props}
+        return dict(pending)
 
     # ------------------------------------------------------------------
     def _flush(
         self,
-        pending: dict[str, set[str]],
+        pending: dict[str, LayerBlockDelta],
         intents: dict[str, Optional[str]],
         timestamp: float,
     ) -> None:
-        for layer_id, props in pending.items():
+        for layer_id, delta in pending.items():
             state = self._latest_states.get(layer_id)
-            if state is None or not props:
+            if state is None:
                 continue
-            subset = state.subset(props)
-            if not subset.keys():
+            updates, versions = layer_block_delta_updates(delta)
+            subset = LayerVisualState(layer_id=layer_id).with_updates(
+                updates=updates,
+                versions=versions,
+            )
+            if not subset.keys() and not subset.extra and not subset.metadata and subset.thumbnail is None:
                 continue
             # Content signature gating for emission (dedupe by values, not versions)
             sig = layer_content_signature(subset)
             last = self._last_payload_sig.get(layer_id)
             if not sig.changed(last):
-                # No change in outward payload content; skip broadcast
-                for prop in props:
-                    _ = self._pending_versions.pop((layer_id, prop), None)
                 continue
             self._last_payload_sig[layer_id] = sig
-            for prop in props:
-                version = self._pending_versions.pop((layer_id, prop), None)
-                if version is not None:
-                    self._last_versions[(layer_id, prop)] = version
             intent_id = intents.get(layer_id)
             self._schedule(
                 self._broadcaster(layer_id, subset, intent_id, timestamp),
                 f"mirror-layer-{layer_id}",
             )
-
-    # ------------------------------------------------------------------
-    def _map_event(self, event: LedgerEvent) -> tuple[Optional[str], Optional[str], object]:
-        return self._map_event_locked(event)
-
-    def _map_event_locked(self, event: LedgerEvent) -> tuple[Optional[str], Optional[str], object]:
-        scope = str(event.scope)
-        target = str(event.target) if event.target is not None else ""
-        key = str(event.key)
-        value = event.value
-
-        if scope == "layer":
-            if key not in _ALLOWED_LAYER_KEYS:
-                return None, None, value
-            return target, key, value
-
-        if not self._volume_enabled_locked():
-            return None, None, value
-        # volume/multiscale updates map to the default remote layer
-        layer_id = target if target.startswith("layer") else self._default_layer()
-        if layer_id is None:
-            return None, None, value
-        namespaced = f"{scope}.{key}"
-        return layer_id, namespaced, value
-
-    # ------------------------------------------------------------------
-    def _record_snapshot(
-        self,
-        scope: str,
-        target: str,
-        key: str,
-        value: object,
-        version: object | None,
-        *,
-        finalize: bool = False,
-    ) -> None:
-        with self._lock:
-            layer_id: Optional[str] = None
-            prop_name: Optional[str] = None
-            if scope == "layer":
-                if key not in _ALLOWED_LAYER_KEYS:
-                    return
-                layer_id = str(target)
-                prop_name = str(key)
-            elif scope in {"volume", "multiscale"}:
-                if not self._volume_enabled_locked():
-                    return
-                layer_id = str(target) if str(target).startswith("layer") else self._default_layer()
-                if layer_id is None:
-                    return
-                prop_name = f"{scope}.{key}"
-            else:
-                return
-
-            assert layer_id is not None and prop_name is not None
-
-            version_map: dict[str, int | None] | None = None
-            if version is not None:
-                version_map = {prop_name: int(version)}
-
-            updates = {prop_name: value}
-            self._update_state_locked(
-                layer_id,
-                updates=updates,
-                versions=version_map,
-                finalize=finalize,
-            )
-
-    def _update_state_locked(
-        self,
-        layer_id: str,
-        *,
-        updates: Mapping[str, object] | None = None,
-        versions: Mapping[str, int | None] | None = None,
-        finalize: bool,
-    ) -> LayerVisualState:
-        state = self._latest_states.get(layer_id)
-        if state is None:
-            state = LayerVisualState(layer_id=layer_id)
-        updates_payload = {str(key): value for key, value in (updates or {}).items()}
-        versions_payload = (
-            {str(key): (None if value is None else int(value)) for key, value in versions.items()}
-            if versions
-            else None
-        )
-        state = state.with_updates(updates=updates_payload, versions=versions_payload)
-        self._latest_states[layer_id] = state
-        if finalize and versions_payload:
-            for key, value in versions_payload.items():
-                if value is not None:
-                    self._last_versions[(layer_id, key)] = int(value)
-        return state
 
     def _volume_enabled_locked(self) -> bool:
         value = self._ndisplay

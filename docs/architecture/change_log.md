@@ -158,3 +158,11 @@ Open follow-ups (carry into next session):
   work is purely control/protocol + documentation.
 - Future commits should treat LayerBlocks as the only source of truth; any new code that touches layer
   visuals must do so via `scene_layers.<id>.block` instead of `layer_values`.
+# 2025-11-13 — ServerLayerMirror + notify.layers sourced from LayerBlocks
+
+### Control
+- `ServerLayerMirror` now subscribes to `scene_layers.*.block`, reuses the shared LayerBlock diff helper, and emits deltas derived from LayerBlocks instead of `RenderLedgerSnapshot.layer_values`.
+- Notify baseline builders and `_split_layer_state` can ingest `LayerBlockDelta` structures, keeping the existing payload shape but sourcing values from the new blocks.
+
+### Next steps
+- Switch notify.layers history/replay to pass LayerBlock deltas end-to-end, then flip the protocol schema and delete `LayerVisualState`.

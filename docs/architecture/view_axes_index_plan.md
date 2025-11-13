@@ -224,6 +224,7 @@ clients depend on it.
 - State-channel builders, the layer mirror, and resumable history must read
   `SceneBlockSnapshot.layers` (or `scene_layers.<id>.block`) directly instead of
   `RenderLedgerSnapshot.layer_values`.
+- Baseline/resume helpers and `ServerLayerMirror` already hydrate from LayerBlocks via the shared diff helper; notify payload builders/history now need to consume the same sections before the shim is removed.
 - The notify payload schema can now be updated to carry LayerBlocks because there
   are no external clients; update stubs/tests alongside the server.
 - Once the control plane emits LayerBlocks, delete `LayerVisualState`,

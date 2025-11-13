@@ -6,15 +6,15 @@ _Last updated: 2025-11-13_
 - ✅ Reducers/transactions emit `{view, axes, index, lod, camera, layers}` blocks plus restore caches; worker runtime now ingests a single `SceneBlockSnapshot` per tick.
 - ✅ Op-seq watcher + render interface reuse the block snapshot, so the render loop no longer reconstructs pose data from `RenderLedgerSnapshot`.
 - ✅ Planner/mailbox stack is bypassed under the flag; worker tracks per-block signatures locally.
-- ✅ `_collect_default_visuals`, state-channel baselines, and tests now hydrate from `SceneBlockSnapshot.layers` (via `scene_layers.*.block`) using the LayerBlock adapter; the ledger shim only persists for mirror/notify emitters.
-- ✅ Shared LayerBlock diff helpers are in place so runtime and control paths compute mutations the same way.
-- ⚠️ ServerLayerMirror, resumable history, and notify.layers builders still read `RenderLedgerSnapshot.layer_values`; they must switch to the new block deltas next.
+- ✅ `_collect_default_visuals`, state-channel baselines, and tests hydrate from `SceneBlockSnapshot.layers` (via `scene_layers.*.block`) using the LayerBlock adapter.
+- ✅ Shared LayerBlock diff helpers power both runtime reapply and `ServerLayerMirror`, so mirror broadcasts and notify baselines now source deltas directly from LayerBlocks.
+- ⚠️ Notify payload builders/resumable history still emit the legacy schema using the shim; they must flip to LayerBlock payloads before we can drop `LayerVisualState`.
 - ⚠️ `LayerVisualState` / `RenderLedgerSnapshot` remain as shims for the notify protocol even though no external clients require backward compatibility.
 
 ## Immediate Next Steps (Phase 3 Cleanup)
 1. **Control/notify consumers → LayerBlocks (Pass A2)**
-   - Rewire `ServerLayerMirror`, notify.layers builders, and resumable history to consume LayerBlock deltas via the shared diff helper.
-   - Keep emitting the legacy payload shape for now, but derive it from LayerBlocks instead of `layer_values`.
+   - Already landed for baselines + mirror; remaining work is rewiring notify.layers payload builders and resumable history deltas to consume the LayerBlock sections directly, then delete the last `layer_values` reads.
+   - Keep emitting the legacy payload shape for now, but derive it entirely from LayerBlocks until the protocol flip.
 2. **Protocol flip (no compat clients)**
    - Update notify payload builders + resumable history to speak LayerBlocks natively (TypedDict mirroring the block schema) and remove `LayerVisualState`.
    - Delete `RenderLedgerSnapshot.layer_values` + the dual-write shim once the new payload lands; adjust stub clients/tests alongside the server.
