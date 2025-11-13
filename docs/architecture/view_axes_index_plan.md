@@ -197,8 +197,24 @@ Outstanding Phase 1 work:
    own the entire bootstrap path we should expose a shared “seed ledger for
    tests” helper (or call the real reducers) so those defaults only live in one
    place.
-4. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
+5. Document the ledger schema (keys + payloads) in `dims_camera_legacy.md` and
    the protocol docs so consumers know where to look once the flag flips.
+
+### Typed payload schema pilot
+
+- **Goal:** Treat `SceneBlockSnapshot.layers` as the canonical wire payload by introducing
+  explicit TypedDict schemas (`NotifyLayerBlockPayload`, etc.) in
+  `napari_cuda.protocol.messages`. Both `notify.scene` baselines and `notify.layers`
+  deltas will emit LayerBlock payloads directly.
+- **Scope:** Keep the rest of the protocol payloads in their existing dataclass
+  representations while we validate the LayerBlock pipeline. This reduces blast
+  radius but still gives us end-to-end coverage (ledger → notify → client) for the
+  typed schema approach.
+- **Follow-up:** If the pilot lands cleanly, schedule a Phase 3.5/4 task to inventory
+  the remaining envelopes (`notify.dims`, session frames, command replies, etc.),
+  decide between TypedDicts vs. Pydantic for each, and plan the bulk migration
+  (builders, tests, stub clients). That effort should reuse the helpers added for
+  LayerBlocks so the entire protocol eventually benefits from strict wire schemas.
 
 Phase 2 is now complete; all runtime consumers read the block ledger under the flag.
 Phase 3 (in progress) removed the planner/mailbox stack and the legacy ledger scopes.

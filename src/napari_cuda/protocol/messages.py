@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from numbers import Integral
 from typing import Any
 
+from typing_extensions import NotRequired, TypedDict
+
 from napari_cuda.shared.dims_spec import DimsSpec
 from napari_cuda.shared.dims_spec import dims_spec_from_payload, dims_spec_to_payload
 
@@ -47,6 +49,113 @@ _ACK_STATUSES = {"accepted", "rejected"}
 _COMMAND_SUCCESS_STATUS = "ok"
 _COMMAND_ERROR_STATUS = "error"
 _ERROR_SEVERITIES = {"info", "warning", "critical"}
+
+
+class NotifyLayerBlockControls(TypedDict, total=False):
+    visible: bool
+    opacity: float
+    blending: str
+    interpolation: str
+    colormap: str
+    gamma: float
+    contrast_limits: Sequence[float] | None
+    depiction: str | None
+    rendering: str | None
+    attenuation: float | None
+    iso_threshold: float | None
+    projection_mode: str | None
+    plane_thickness: float | None
+
+
+class NotifyLayerBlockLevel(TypedDict):
+    shape: Sequence[int]
+    downsample: Sequence[float]
+
+
+class NotifyLayerBlockMultiscale(TypedDict, total=False):
+    current_level: int
+    levels: Sequence[NotifyLayerBlockLevel]
+    policy: str | None
+    index_space: str | None
+
+
+class NotifyLayerBlockThumbnail(TypedDict):
+    array: Sequence[Sequence[Sequence[int]]]
+    dtype: str
+    shape: Sequence[int]
+    generated_at: float | None
+
+
+class NotifyLayerBlockPayload(TypedDict):
+    layer_id: str
+    layer_type: str
+    controls: NotifyLayerBlockControls
+    metadata: NotRequired[Mapping[str, Any]]
+    thumbnail: NotRequired[NotifyLayerBlockThumbnail]
+    multiscale: NotRequired[NotifyLayerBlockMultiscale]
+    versions: NotRequired[Mapping[str, int]]
+    extras: NotRequired[Mapping[str, Any]]
+
+
+def layer_block_payload_from_mapping(
+    mapping: Mapping[str, Any],
+    *,
+    context: str,
+) -> NotifyLayerBlockPayload:
+    mapping = _as_mapping(mapping, context)
+    _ensure_keyset(
+        mapping,
+        required=("layer_id", "layer_type", "controls"),
+        optional=("metadata", "thumbnail", "multiscale", "versions", "extras"),
+        context=context,
+    )
+    controls = _as_mutable_mapping(mapping["controls"], f"{context}.controls")
+    payload: NotifyLayerBlockPayload = {
+        "layer_id": str(mapping["layer_id"]),
+        "layer_type": str(mapping["layer_type"]),
+        "controls": {str(key): value for key, value in controls.items()},
+    }
+    metadata = mapping.get("metadata")
+    if metadata is not None:
+        payload["metadata"] = _as_mutable_mapping(metadata, f"{context}.metadata")
+    thumbnail = mapping.get("thumbnail")
+    if thumbnail is not None:
+        payload["thumbnail"] = _as_mutable_mapping(thumbnail, f"{context}.thumbnail")
+    multiscale = mapping.get("multiscale")
+    if multiscale is not None:
+        payload["multiscale"] = _as_mutable_mapping(multiscale, f"{context}.multiscale")
+    versions = mapping.get("versions")
+    if versions is not None:
+        versions_map = _as_mutable_mapping(versions, f"{context}.versions")
+        payload["versions"] = {str(key): int(value) for key, value in versions_map.items()}
+    extras = mapping.get("extras")
+    if extras is not None:
+        payload["extras"] = _as_mutable_mapping(extras, f"{context}.extras")
+    return payload
+
+
+def layer_block_payload_to_dict(payload: NotifyLayerBlockPayload) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "layer_id": str(payload["layer_id"]),
+        "layer_type": str(payload["layer_type"]),
+        "controls": dict(payload["controls"]),
+    }
+    metadata = payload.get("metadata")
+    if metadata is not None:
+        data["metadata"] = dict(metadata)
+    thumbnail = payload.get("thumbnail")
+    if thumbnail is not None:
+        data["thumbnail"] = dict(thumbnail)
+    multiscale = payload.get("multiscale")
+    if multiscale is not None:
+        data["multiscale"] = dict(multiscale)
+    versions = payload.get("versions")
+    if versions is not None:
+        data["versions"] = {str(key): int(value) for key, value in versions.items()}
+    extras = payload.get("extras")
+    if extras is not None:
+        data["extras"] = dict(extras)
+    return data
 
 
 def _strip_none(mapping: dict[str, Any]) -> dict[str, Any]:
@@ -476,7 +585,7 @@ class SessionAckPayload:
 @dataclass(slots=True)
 class NotifyScenePayload:
     viewer: dict[str, Any]
-    layers: tuple[dict[str, Any], ...]
+    layers: tuple[NotifyLayerBlockPayload, ...]
     metadata: dict[str, Any] | None = None
     policies: dict[str, Any] | None = None
 
@@ -484,7 +593,7 @@ class NotifyScenePayload:
         return _strip_none(
             {
                 "viewer": dict(self.viewer),
-                "layers": [dict(item) for item in self.layers],
+                "layers": [layer_block_payload_to_dict(item) for item in self.layers],
                 "metadata": dict(self.metadata) if self.metadata is not None else None,
                 "policies": dict(self.policies) if self.policies is not None else None,
             }
@@ -500,7 +609,7 @@ class NotifyScenePayload:
             context="notify.scene payload",
         )
         layers = tuple(
-            _as_mutable_mapping(item, "notify.scene payload.layers[]")
+            layer_block_payload_from_mapping(item, context="notify.scene payload.layers[]")
             for item in _as_sequence(mapping["layers"], "notify.scene payload.layers")
         )
         return cls(
@@ -552,30 +661,16 @@ class NotifyLevelPayload:
 
 @dataclass(slots=True)
 class NotifyLayersPayload:
-    """Structured per-layer delta.
-
-    At least one of controls, metadata, data, thumbnail, or removed must be provided.
-    """
-
     layer_id: str
-    controls: dict[str, Any] | None = None
-    metadata: dict[str, Any] | None = None
-    data: dict[str, Any] | None = None
-    thumbnail: dict[str, Any] | None = None
+    layer: NotifyLayerBlockPayload | None = None
     removed: bool | None = None
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"layer_id": self.layer_id}
-        if self.controls:
-            payload["controls"] = dict(self.controls)
-        if self.metadata:
-            payload["metadata"] = dict(self.metadata)
-        if self.data:
-            payload["data"] = dict(self.data)
-        if self.thumbnail:
-            payload["thumbnail"] = dict(self.thumbnail)
+        if self.layer is not None:
+            payload["layer"] = layer_block_payload_to_dict(self.layer)
         if self.removed:
-            payload["removed"] = True
+            payload["removed"] = bool(self.removed)
         return payload
 
     @classmethod
@@ -584,18 +679,21 @@ class NotifyLayersPayload:
         _ensure_keyset(
             mapping,
             required=("layer_id",),
-            optional=("controls", "metadata", "data", "thumbnail", "removed"),
+            optional=("layer", "removed"),
             context="notify.layers payload",
         )
-        provided = any(name in mapping for name in ("controls", "metadata", "data", "thumbnail", "removed"))
+        provided = any(name in mapping for name in ("layer", "removed"))
         if not provided:
-            raise ValueError("notify.layers payload requires at least one section or 'removed'")
+            raise ValueError("notify.layers payload requires 'layer' or 'removed'")
+        layer_value = mapping.get("layer")
+        layer_payload = (
+            layer_block_payload_from_mapping(layer_value, context="notify.layers payload.layer")
+            if layer_value is not None
+            else None
+        )
         return cls(
             layer_id=str(mapping["layer_id"]),
-            controls=_optional_mapping(mapping.get("controls"), "notify.layers payload.controls"),
-            metadata=_optional_mapping(mapping.get("metadata"), "notify.layers payload.metadata"),
-            data=_optional_mapping(mapping.get("data"), "notify.layers payload.data"),
-            thumbnail=_optional_mapping(mapping.get("thumbnail"), "notify.layers payload.thumbnail"),
+            layer=layer_payload,
             removed=bool(mapping.get("removed")) if mapping.get("removed") is not None else None,
         )
 

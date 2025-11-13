@@ -11,12 +11,7 @@ from napari_cuda.client.control.control_state import ControlStateContext
 from napari_cuda.client.data.registry import RemoteLayerRegistry
 from napari_cuda.client.data.remote_image_layer import RemoteImageLayer
 from napari_cuda.client.runtime.client_loop.loop_state import ClientLoopState
-from napari_cuda.protocol.snapshots import (
-    LayerDelta,
-    LayerSnapshot,
-    SceneSnapshot,
-    ViewerSnapshot,
-)
+from napari_cuda.protocol.snapshots import LayerDelta, LayerSnapshot, SceneSnapshot, ViewerSnapshot
 
 
 class _StubPresenter:

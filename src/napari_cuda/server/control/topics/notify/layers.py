@@ -46,6 +46,7 @@ async def _deliver_layers_delta(
 
     payload = build_notify_layers_payload(
         layer_id=resolved_layer_id,
+        layer_type=state.block.layer_type,
         controls=controls,
         metadata=metadata,
         data=data,
@@ -171,6 +172,7 @@ async def send_layer_baseline(
             resolved_layer_id = delta.block.layer_id or "layer-0"
             payload = build_notify_layers_payload(
                 layer_id=resolved_layer_id,
+                layer_type=delta.block.layer_type,
                 controls=controls,
                 metadata=metadata,
                 data=data,

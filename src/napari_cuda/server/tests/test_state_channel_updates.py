@@ -1407,6 +1407,7 @@ def _prepare_resumable_payloads(server: Any) -> tuple[EnvelopeSnapshot, Envelope
 
     layer_payload = build_notify_layers_payload(
         layer_id="layer-0",
+        layer_type="image",
         controls={"opacity": 0.42},
     )
     layer_snapshot = store.delta_envelope(

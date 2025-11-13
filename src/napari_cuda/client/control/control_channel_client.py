@@ -506,21 +506,18 @@ class StateChannel:
         if _STATE_DEBUG:
             payload = frame.payload
             sections = []
-            if getattr(payload, 'controls', None):
-                sections.append(f"controls:{sorted(payload.controls.keys())}")
-            if getattr(payload, 'metadata', None) is not None:
-                sections.append("metadata")
-            if getattr(payload, 'data', None) is not None:
-                sections.append("data")
-            if getattr(payload, 'thumbnail', None) is not None:
-                sections.append("thumbnail")
-            if getattr(payload, 'removed', None):
+            if payload.layer is not None:
+                controls = payload.layer.get("controls") or {}
+                sections.append(f"layer.blocks:{sorted(controls.keys())}")
+                if payload.layer.get("metadata"):
+                    sections.append("metadata")
+                if payload.layer.get("extras"):
+                    sections.append("extras")
+                if payload.layer.get("thumbnail"):
+                    sections.append("thumbnail")
+            if payload.removed:
                 sections.append("removed")
-            logger.debug(
-                "received notify.layers: id=%s sections=%s",
-                payload.layer_id,
-                sections,
-            )
+            logger.debug("received notify.layers: id=%s sections=%s", payload.layer_id, sections)
 
         try:
             self.ingest_notify_layers(frame)

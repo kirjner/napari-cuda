@@ -169,9 +169,14 @@ def test_state_channel_layer_delta_callback(state_channel):
     received = []
     state_channel.ingest_notify_layers = received.append
 
+    layer_payload = {
+        'layer_id': 'layer-1',
+        'layer_type': 'image',
+        'controls': {'opacity': 0.5},
+    }
     frame = build_notify_layers_delta(
         session_id='session-4',
-        payload={'layer_id': 'layer-1', 'controls': {'opacity': 0.5}},
+        payload={'layer_id': 'layer-1', 'layer': layer_payload},
         timestamp=1.0,
         delta_token='tok-layer-1',
         seq=3,
@@ -183,8 +188,8 @@ def test_state_channel_layer_delta_callback(state_channel):
     message = received[0]
     assert isinstance(message, NotifyLayersFrame)
     assert message.payload.layer_id == 'layer-1'
-    assert message.payload.controls is not None
-    assert message.payload.controls['opacity'] == 0.5
+    assert message.payload.layer is not None
+    assert message.payload.layer['controls']['opacity'] == 0.5
 
 
 def test_state_channel_layer_remove_callback(state_channel):
@@ -272,6 +277,7 @@ def test_state_channel_notify_scene_dispatch(state_channel: StateChannel) -> Non
         "ndim": 2,
         "shape": [8, 8],
         "axis_labels": ["y", "x"],
+        "controls": {"visible": True},
     }
     frame = build_notify_scene_snapshot(
         session_id="session-2",
@@ -304,6 +310,7 @@ def test_state_channel_notify_scene_includes_policies() -> None:
         "ndim": 3,
         "shape": [32, 32, 8],
         "axis_labels": ["z", "y", "x"],
+        "controls": {"visible": True},
     }
     policies = {
         'multiscale': {

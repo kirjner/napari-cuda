@@ -9,7 +9,7 @@ from napari_cuda.protocol.messages import (
     NotifyLayersPayload,
     NotifyScenePayload,
 )
-from napari_cuda.protocol.snapshots import SceneSnapshot
+from napari_cuda.protocol.snapshots import LayerDelta, SceneSnapshot
 from napari_cuda.server.control.state_models import ServerLedgerUpdate
 from napari_cuda.server.scene import snapshot_scene_blocks, snapshot_volume_state
 from napari_cuda.server.ledger import LedgerEntry
@@ -68,36 +68,38 @@ def build_notify_layers_delta_payload(result: ServerLedgerUpdate) -> NotifyLayer
     }
 
     if key in control_keys:
-        return NotifyLayersPayload(layer_id=layer_id, controls={key: value})
+        return LayerDelta(layer_id=layer_id, controls={key: value}).to_payload()
     if key == "metadata":
         md = dict(value) if isinstance(value, dict) else {"value": value}
-        return NotifyLayersPayload(layer_id=layer_id, metadata=md)
+        return LayerDelta(layer_id=layer_id, metadata=md).to_payload()
     if key == "thumbnail":
         th = dict(value) if isinstance(value, dict) else {"array": value}
-        return NotifyLayersPayload(layer_id=layer_id, thumbnail=th)
+        return LayerDelta(layer_id=layer_id, thumbnail=th).to_payload()
     if key == "removed" and bool(value):
-        return NotifyLayersPayload(layer_id=layer_id, removed=True)
+        return LayerDelta(layer_id=layer_id, removed=True).to_payload()
     # Fallback: data section for structural/other keys
-    return NotifyLayersPayload(layer_id=layer_id, data={key: value})
+    return LayerDelta(layer_id=layer_id, data={key: value}).to_payload()
 
 
 def build_notify_layers_payload(
     *,
     layer_id: str,
+    layer_type: str | None = None,
     controls: Mapping[str, Any] | None = None,
     metadata: Mapping[str, Any] | None = None,
     data: Mapping[str, Any] | None = None,
     thumbnail: Mapping[str, Any] | None = None,
     removed: bool | None = None,
 ) -> NotifyLayersPayload:
-    return NotifyLayersPayload(
+    return LayerDelta(
         layer_id=str(layer_id),
+        layer_type=str(layer_type) if layer_type is not None else "image",
         controls={str(k): v for k, v in controls.items()} if controls else None,
         metadata={str(k): v for k, v in metadata.items()} if metadata else None,
         data={str(k): v for k, v in data.items()} if data else None,
         thumbnail={str(k): v for k, v in thumbnail.items()} if thumbnail else None,
         removed=bool(removed) if removed else None,
-    )
+    ).to_payload()
 
 
 def _build_policies_block(

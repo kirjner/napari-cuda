@@ -5,6 +5,7 @@ import json
 import pytest
 
 from napari_cuda.protocol import (
+    PROTO_VERSION,
     NOTIFY_CAMERA_TYPE,
     NOTIFY_DIMS_TYPE,
     NOTIFY_ERROR_TYPE,
@@ -80,10 +81,15 @@ def test_session_hello_roundtrip() -> None:
 
 def test_notify_scene_roundtrip() -> None:
     sequencer = ResumableTopicSequencer(topic=NOTIFY_SCENE_TYPE)
+    layer_block = {
+        "layer_id": "layer-1",
+        "layer_type": "image",
+        "controls": {"visible": True},
+    }
     notify_scene = build_notify_scene_snapshot(
         session_id="session-1",
         viewer={"dims": {"ndim": 2}},
-        layers=[{"layer_id": "layer-1", "kind": "image"}],
+        layers=[layer_block],
         timestamp=2.0,
         sequencer=sequencer,
     )
@@ -128,7 +134,13 @@ def test_parser_dispatch() -> None:
     scene_frame = build_notify_scene_snapshot(
         session_id="sess",
         viewer={"dims": {"ndim": 3}},
-        layers=[{"layer_id": "layer"}],
+        layers=[
+            {
+                "layer_id": "layer",
+                "layer_type": "image",
+                "controls": {"visible": True},
+            }
+        ],
         sequencer=sequencer,
     )
     level_seq = ResumableTopicSequencer(topic=NOTIFY_LEVEL_TYPE)
@@ -238,9 +250,14 @@ def test_resumable_sequencer_snapshot_and_delta() -> None:
 def test_notify_layers_delta_uses_sequencer() -> None:
     sequencer = ResumableTopicSequencer(topic=NOTIFY_LAYERS_TYPE)
     sequencer.snapshot()
+    layer_payload = {
+        "layer_id": "layer-1",
+        "layer_type": "image",
+        "controls": {"opacity": 0.5},
+    }
     frame = build_notify_layers_delta(
         session_id="sess",
-        payload={"layer_id": "layer-1", "controls": {"opacity": 0.5}},
+        payload={"layer_id": "layer-1", "layer": layer_payload},
         sequencer=sequencer,
     )
 

@@ -14,12 +14,8 @@ from typing import (
 
 import numpy as np
 
-from napari_cuda.protocol.snapshots import (
-    LayerSnapshot,
-    SceneSnapshot,
-    scene_snapshot,
-    viewer_snapshot_from_blocks,
-)
+from napari_cuda.protocol.messages import NotifyLayerBlockPayload
+from napari_cuda.protocol.snapshots import LayerSnapshot, SceneSnapshot, scene_snapshot, viewer_snapshot_from_blocks
 from napari_cuda.server.scene.defaults import default_volume_state
 from napari_cuda.server.scene.models import (
     CameraDeltaCommand,
@@ -33,6 +29,7 @@ from napari_cuda.server.scene.blocks import (
     ENABLE_VIEW_AXES_INDEX_BLOCKS,
     AxesBlock,
     LayerBlock,
+    layer_block_to_payload,
     LAYER_BLOCK_SCOPE,
     axes_to_payload,
     layer_multiscale_block_to_payload,
@@ -488,55 +485,77 @@ def snapshot_scene(
         axis_labels = [axis.label for axis in spec.axes]
         is_volume = bool(ndisplay_value >= 3)
 
-        layer_block: dict[str, Any] = {
-            "layer_id": layer_id_str,
-            "layer_type": "image",
-            "name": default_layer_name,
-            "ndim": len(layer_shape),
-            "shape": layer_shape,
-            "axis_labels": axis_labels,
-            "volume": is_volume,
-            "controls": controls_block,
-            "level_shapes": [list(shape) for shape in level_shapes],
-        }
-
-        layer_metadata: dict[str, Any] = dict(typed_layer_block.metadata) if typed_layer_block is not None else {}
-        layer_block["metadata"] = layer_metadata
-
-        if typed_layer_block is not None and typed_layer_block.multiscale is not None:
-            multiscale_block = layer_multiscale_block_to_payload(typed_layer_block.multiscale)
+        payload: NotifyLayerBlockPayload
+        layer_metadata: dict[str, Any] = (
+            dict(typed_layer_block.metadata) if typed_layer_block is not None else {}
+        )
+        if typed_layer_block is not None:
+            payload = layer_block_to_payload(typed_layer_block)
+            payload = _augment_layer_payload(
+                payload,
+                default_layer_name=default_layer_name,
+                layer_shape=layer_shape,
+                axis_labels=axis_labels,
+                level_shapes=level_shapes,
+                is_volume=is_volume,
+                volume_state=volume_state,
+                scene_source=scene_source,
+            )
         else:
-            multiscale_block = _build_multiscale_block(multiscale_state, base_shape=layer_shape)
-        if multiscale_block:
-            layer_block["multiscale"] = multiscale_block
+            payload = {
+                "layer_id": layer_id_str,
+                "layer_type": "image",
+                "controls": {str(key): value for key, value in controls_block.items()},
+            }
+            if layer_metadata:
+                payload["metadata"] = layer_metadata
+            if multiscale_state:
+                multiscale_block = _build_multiscale_block(multiscale_state, base_shape=layer_shape)
+                if multiscale_block:
+                    payload["multiscale"] = multiscale_block
 
-        render_hints = _build_render_hints(volume_state)
-        if render_hints:
-            layer_block["render"] = render_hints
+            extras: dict[str, Any] = {
+                "name": default_layer_name,
+                "ndim": len(layer_shape),
+                "shape": layer_shape,
+                "axis_labels": axis_labels,
+                "volume": is_volume,
+                "level_shapes": [list(shape) for shape in level_shapes],
+            }
 
-        typed_contrast_limits = None
-        if typed_layer_block is not None and typed_layer_block.controls.contrast_limits is not None:
-            typed_contrast_limits = [
-                float(typed_layer_block.controls.contrast_limits[0]),
-                float(typed_layer_block.controls.contrast_limits[1]),
-            ]
-        contrast_limits = typed_contrast_limits or _resolve_contrast_limits(volume_state)
-        if contrast_limits is not None:
-            layer_block["contrast_limits"] = contrast_limits
+            render_hints = _build_render_hints(volume_state)
+            if render_hints:
+                extras["render"] = render_hints
 
-        scale = _resolve_scale(scene_source)
-        if scale is not None:
-            layer_block["scale"] = scale
+            contrast_limits = _resolve_contrast_limits(volume_state)
+            if contrast_limits is not None:
+                extras["contrast_limits"] = contrast_limits
 
-        translate = _resolve_translate(scene_source)
-        if translate is not None:
-            layer_block["translate"] = translate
+            scale = _resolve_scale(scene_source)
+            if scale is not None:
+                extras["scale"] = scale
 
-        source_block = _resolve_source_block(scene_source)
-        if source_block is not None:
-            layer_block["source"] = source_block
+            translate = _resolve_translate(scene_source)
+            if translate is not None:
+                extras["translate"] = translate
 
-        layer_snapshots.append(LayerSnapshot(layer_id=layer_id_str, block=layer_block))
+            source_block = _resolve_source_block(scene_source)
+            if source_block is not None:
+                extras["source"] = source_block
+
+            payload = _augment_layer_payload(
+                payload,
+                default_layer_name=default_layer_name,
+                layer_shape=layer_shape,
+                axis_labels=axis_labels,
+                level_shapes=level_shapes,
+                is_volume=is_volume,
+                volume_state=volume_state,
+                scene_source=scene_source,
+                extras_overrides=extras,
+            )
+
+        layer_snapshots.append(LayerSnapshot(layer_id=layer_id_str, block=payload))
 
     metadata = _scene_metadata(zarr_path=zarr_path, scene_source=scene_source)
 
@@ -688,6 +707,63 @@ def _resolve_contrast_limits(volume_state: Mapping[str, Any]) -> Optional[list[f
     if isinstance(clim, Sequence) and len(clim) >= 2:
         return list(clim[:2])
     return None
+
+
+def _augment_layer_payload(
+    payload: NotifyLayerBlockPayload,
+    *,
+    default_layer_name: str,
+    layer_shape: Sequence[int],
+    axis_labels: Sequence[str],
+    level_shapes: Sequence[Sequence[int]],
+    is_volume: bool,
+    volume_state: Mapping[str, Any],
+    scene_source: Optional[object],
+    extras_overrides: Mapping[str, Any] | None = None,
+) -> NotifyLayerBlockPayload:
+    block: NotifyLayerBlockPayload = dict(payload)
+
+    if extras_overrides:
+        for key, value in extras_overrides.items():
+            if value is None:
+                continue
+            block[key] = value
+
+    block.setdefault("name", default_layer_name)
+    block.setdefault("ndim", len(layer_shape))
+    if "shape" not in block:
+        block["shape"] = [int(dim) for dim in layer_shape]
+    if "axis_labels" not in block:
+        block["axis_labels"] = [str(label) for label in axis_labels]
+    block.setdefault("volume", bool(is_volume))
+    if "level_shapes" not in block:
+        block["level_shapes"] = [list(shape) for shape in level_shapes]
+
+    render_hints = _build_render_hints(volume_state)
+    if render_hints and "render" not in block:
+        block["render"] = render_hints
+
+    if "contrast_limits" not in block:
+        contrast_limits = _resolve_contrast_limits(volume_state)
+        if contrast_limits is not None:
+            block["contrast_limits"] = contrast_limits
+
+    if "scale" not in block:
+        scale = _resolve_scale(scene_source)
+        if scale is not None:
+            block["scale"] = scale
+
+    if "translate" not in block:
+        translate = _resolve_translate(scene_source)
+        if translate is not None:
+            block["translate"] = translate
+
+    if "source" not in block:
+        source_block = _resolve_source_block(scene_source)
+        if source_block is not None:
+            block["source"] = source_block
+
+    return block
 
 
 def _build_camera_block(
