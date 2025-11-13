@@ -84,16 +84,12 @@ def compute_layer_block_deltas(
                 if prop_key == "thumbnail":
                     thumbnail_changed = True
                     continue
-                if not hasattr(block.controls, prop_key):
-                    extras_changed = True
-                    continue
                 if (
                     prop_key in _OPTIONAL_LAYER_CONTROLS
                     and getattr(block.controls, prop_key) is None
                 ):
                     continue
                 controls_changed.append(prop_key)
-                extras_changed = extras_changed or prop_key.startswith("volume.")
         else:
             base_keys: list[str] = list(_MANDATORY_LAYER_CONTROLS)
             for key in _OPTIONAL_LAYER_CONTROLS:
@@ -103,10 +99,23 @@ def compute_layer_block_deltas(
             controls_changed = base_keys
             metadata_changed = bool(block.metadata)
             thumbnail_changed = block.thumbnail is not None
-        if previous_block is None and block.extras:
-            extras_changed = True
-        elif previous_block is not None and block.extras != previous_block.extras:
-            extras_changed = True
+
+        if not metadata_changed:
+            if previous_block is None:
+                metadata_changed = bool(block.metadata)
+            else:
+                metadata_changed = block.metadata != previous_block.metadata
+
+        if not thumbnail_changed:
+            if previous_block is None:
+                thumbnail_changed = block.thumbnail is not None
+            else:
+                thumbnail_changed = block.thumbnail != previous_block.thumbnail
+
+        if previous_block is None:
+            extras_changed = bool(block.extras)
+        else:
+            extras_changed = block.extras != previous_block.extras
 
         if not controls_changed and not metadata_changed and not thumbnail_changed and not extras_changed:
             continue
